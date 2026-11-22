@@ -1,16 +1,20 @@
-"""Deterministic InfoWall, Codebase and Hub attention digest; no model calls."""
+"""Gate daily recommendations on fresh, verifiable decision candidates."""
 
 from __future__ import annotations
 
 import asyncio
-import os
+import json
 import re
-from collections.abc import Mapping, Sequence
+from bisect import bisect_right
+from collections.abc import Awaitable, Callable, Mapping, Sequence
+from dataclasses import dataclass
 from datetime import datetime, timezone
+from hashlib import sha256
 from typing import Any
 from urllib.parse import urlsplit
 
-from claude_hub.models import TaskLifecycle, WorkspaceTask
+from claude_hub.models import TaskLifecycle, TaskPhase, WorkspaceTask
+from claude_hub.models.schema_domains.execution import TaskProgressState
 from claude_hub.services.demand_patrol.commands import (
     CommandError,
     CommandRunner,
@@ -33,7 +37,7 @@ def _text(value: Any) -> str:
 
 def _display(value: Any, fallback: str = "未提供", limit: int = 180) -> str:
     text = " ".join(_text(value).split()) or fallback
-    text = text[:limit]
+    text = text[:limit].replace("<", "＜").replace(">", "＞").replace("|", "｜")
     return re.sub(r"([\\`*_[\]<>])", r"\\\1", text)
 
 
@@ -163,91 +167,244 @@ async def _read_mr(
             return None, f"MR 查询不可用（权限、超时或响应格式）：{url}"
 
 
-def _state_changes(
-    snapshot: MRStateSnapshot,
-    previous: MRStateSnapshot | None,
-    demands: Sequence[Mapping[str, Any]],
-) -> list[str]:
-    label = f"[{_display(snapshot.title, 'MR')}]({snapshot.url})"
-    lines = []
-    for demand in demands:
-        if snapshot.state == "merged" and demand.get("status") in _OPEN_DEMAND_STATUSES:
-            lines.append(
-                f"- **已合入待关单**：{label} → {_display(demand.get('title'))} "
-                f"（{_display(demand.get('status'))}）；请核对验收并关闭/更新 InfoWall，合入不等于验收通过。"
-            )
-    if previous and previous.state != "unknown" and snapshot.state != previous.state:
+DecisionModel = Callable[[str, str], Awaitable[str]]
+_MAX_DECISIONS = 3
+_MAX_MODEL_CANDIDATES = 8
+_PRIORITIES = {"p0": 0, "p1": 1}
+_REPLY_SUBJECTS = {"mr": "MR", "ci": "MR", "demand": "需求", "task": "Task"}
+
+
+@dataclass(frozen=True)
+class Decision:
+    key: str
+    fingerprint: str
+    rank: tuple[int, int, float]
+    kind: str
+    subject: str
+    situation: str
+    actions: tuple[str, str]
+    next_action: str = ""
+    task_option: str | None = None
+
+
+@dataclass(frozen=True)
+class DailyDigest:
+    record: PatrolRunRecord
+    receipts: dict[str, str]
+
+
+def _fingerprint(*fields: str | int) -> str:
+    return sha256(json.dumps(fields, ensure_ascii=False).encode()).hexdigest()
+
+
+def _mr_decision(
+    snapshot: MRStateSnapshot, demands: Sequence[Mapping[str, Any]]
+) -> Decision | None:
+    priority = min(
+        (_PRIORITIES.get(_text(demand.get("priority")).lower(), 2) for demand in demands),
+        default=2,
+    )
+    subject = f"[{_display(snapshot.title, 'MR')}]({snapshot.url})"
+    scope = "mr"
+    if snapshot.ci_status == "failed" and snapshot.state != "closed":
+        scope = "ci"
+        kind = "CI 失败"
+        actions = ("指派 MR 负责人排查并重跑 CI", "暂缓该 MR 并保留失败记录")
+    elif snapshot.state == "closed":
+        kind = "MR 已关闭"
+        actions = ("确认是否需要重新打开或替换 MR", "确认关闭并更新关联需求")
+    elif snapshot.state == "merged":
+        kind = "MR 已合入，关联需求仍待验收"
+        actions = ("安排核对验收证据并更新需求", "继续保持需求开启，等待验收证据")
+    else:
+        return None
+    return Decision(
+        key=f"{scope}:{snapshot.url}",
+        fingerprint=_fingerprint(kind),
+        rank=(priority, 0, 0),
+        kind=kind,
+        subject=subject,
+        situation=kind,
+        actions=actions,
+    )
+
+
+def _stall_decision(
+    demand: Mapping[str, Any], tasks: Sequence[WorkspaceTask], state: PatrolState, now: datetime
+) -> Decision | None:
+    demand_id = _text(demand.get("id"))
+    status = _text(demand.get("status"))
+    priority = _text(demand.get("priority")).lower()
+    touched = _last_touch(demand)
+    if not demand_id or priority not in _PRIORITIES or status not in _OPEN_DEMAND_STATUSES:
+        return None
+    if (
+        touched is None
+        or (age := (now - touched).total_seconds() / 3600) < state.config.stalled_hours
+    ):
+        return None
+    unassigned = status == "planned" and not _matching_tasks(demand, tasks)
+    action = "指定负责人并确认处理时限" if unassigned else "指定负责人核查阻塞并更新进展"
+    return Decision(
+        key=f"demand:{demand_id}",
+        fingerprint=_fingerprint(
+            priority, status, touched.astimezone(timezone.utc).isoformat(), int(unassigned)
+        ),
+        rank=(_PRIORITIES[priority], 2, -age),
+        kind="需求停滞待派工" if unassigned else "需求停滞",
+        subject=f"{_display(demand.get('title'))}（需求 {_display(demand_id, limit=80)}）",
+        situation=f"{priority.upper()} 已 {age:.0f} 小时未更新"
+        + ("，仍待派工" if unassigned else ""),
+        actions=(action, "明确延期日期并更新需求"),
+        next_action=_text(demand.get("next_action")),
+    )
+
+
+_TASK_ACTIONS = {
+    TaskPhase.NEEDS_USER: (
+        "Task 等待用户决定",
+        ("请提交待决问题和可选方案", "明确暂缓并约定复查时间"),
+    ),
+    TaskPhase.AWAITING_ACCEPTANCE: ("Task 等待验收", ("核对产物后验收", "退回并补充验收缺口")),
+    TaskPhase.ORPHANED: ("Task 等待重新接手", ("指定接手者继续任务", "暂缓任务并记录原因")),
+}
+
+
+_OPTION_PAIR = re.compile(
+    r"(?<![\w])(?:方案\s*)?A[.、:：)）]\s*(.+?)"
+    r"(?:[；;。\n]|\s+)+\s*(?:方案\s*)?B[.、:：)）]\s*([^；;。\n]+)",
+    re.DOTALL | re.IGNORECASE,
+)
+_NATURAL_OPTION_PAIR = re.compile(
+    r"(?:请在|需要在|需在)([^；;。\n]+?)(?:和|或|还是)([^；;。\n]+?)"
+    r"(?:之间选择|中选择|中二选一|之间二选一)"
+)
+_RECOMMENDED_OPTION = re.compile(r"(?:推荐|建议)\s*(?:方案\s*)?([AB])(?![\w])", re.IGNORECASE)
+
+
+def _task_decision(
+    task: WorkspaceTask, lifecycle: TaskLifecycle | None, detail: str
+) -> Decision | None:
+    if not lifecycle or not lifecycle.attention or lifecycle.phase not in _TASK_ACTIONS:
+        return None
+    kind, actions = _TASK_ACTIONS[lifecycle.phase]
+    situation = _display(lifecycle.reason_text, "待处理")
+    task_option = None
+    if lifecycle.phase == TaskPhase.NEEDS_USER:
+        progress = task.latest_progress
+        if (
+            lifecycle.reason in {"initiator_needs_input", "initiator_blocked"}
+            and progress is not None
+            and progress.execution_epoch == task.execution_epoch
+            and progress.state in {TaskProgressState.NEEDS_INPUT, TaskProgressState.BLOCKED}
+        ):
+            detail = _text(progress.summary) or detail
+        if detail:
+            pair = _OPTION_PAIR.search(detail) or _NATURAL_OPTION_PAIR.search(detail)
+            situation = _display(detail, limit=140)
+            if pair:
+                lead = detail[: pair.start()].strip(" ：:，,；;。")
+                situation = _display(lead, "等待在以下方案中选择", limit=140)
+                second = _RECOMMENDED_OPTION.split(pair[2], maxsplit=1)[0].rstrip(" ，,")
+                actions = (
+                    f"选择{_display(pair[1], limit=90)}",
+                    f"选择{_display(second or pair[2], limit=90)}",
+                )
+                recommendation = _RECOMMENDED_OPTION.search(detail)
+                task_option = recommendation[1].upper() if recommendation else "A"
+    return Decision(
+        key=f"task:{task.id}",
+        fingerprint=_fingerprint(
+            lifecycle.phase.value,
+            lifecycle.reason,
+            lifecycle.owner.id or "",
+            task.review_cycle,
+            task.execution_epoch,
+            " ".join(detail.split()),
+        ),
+        rank=(1, 1, 0),
+        kind=kind,
+        subject=f"{_display(task.title)}（Task {_display(task.id, limit=80)}）",
+        situation=f"{kind}（{situation}）",
+        actions=actions,
+        task_option=task_option,
+    )
+
+
+async def _recommend(
+    decisions: Sequence[Decision], model: DecisionModel, workspace_id: str
+) -> list[tuple[Decision, str]]:
+    # Titles, URLs, and free text from InfoWall or Task records stay local.
+    # The model ranks factual candidate types and chooses among fixed actions.
+    context = [
+        {
+            "id": index,
+            "kind": item.kind,
+            "priority_rank": item.rank[0],
+            "stalled_hours": round(-item.rank[2]) if item.rank[2] else None,
+            "options": (
+                {"A": "选择上报方案 A", "B": "选择上报方案 B"}
+                if item.task_option
+                else dict(zip(("A", "B"), item.actions, strict=True))
+            ),
+            "source_recommendation": item.task_option,
+        }
+        for index, item in enumerate(decisions, start=1)
+    ]
+    count = min(len(decisions), _MAX_DECISIONS)
+    prompt = (
+        "你是每日巡检的只读决策简报助手。根据事实类型和候选动作，提炼最需要用户拍板的事项。"
+        "仅做文本归纳，禁止使用任何工具、访问文件或外部系统、执行动作或通知他人。"
+        f"从下方恰好选 {count} 项，优先选择 priority_rank 较小的事项；同级按阻塞紧迫性取舍，并按优先级顺序输出。"
+        '仅输出 JSON 数组，每项为 [事项 id, 推荐选项 A 或 B]，例如 [[1,"A"],[2,"B"]]。\n'
+        + json.dumps(context, ensure_ascii=False)
+    )
+    async with asyncio.timeout(40):
+        answer = (await model(prompt, workspace_id)).strip()
+    answer = re.sub(r"^```(?:json)?\s*|\s*```$", "", answer)
+    if len(answer) > 100:
+        raise ValueError("Daily recommendation output exceeds its budget")
+    choices = json.loads(answer)
+    if not isinstance(choices, list) or len(choices) != count:
+        raise ValueError("Invalid daily recommendation length")
+    selected: list[tuple[Decision, str]] = []
+    seen: set[int] = set()
+    for choice in choices:
+        if not isinstance(choice, list) or len(choice) != 2:
+            raise ValueError("Invalid daily recommendation entry")
+        index, option = choice
+        if type(index) is not int or not 1 <= index <= len(decisions) or index in seen:
+            raise ValueError("Invalid daily recommendation index")
+        if option not in ("A", "B"):
+            raise ValueError("Invalid daily recommendation option")
+        seen.add(index)
+        item = decisions[index - 1]
+        selected.append((item, item.task_option or option))
+    if [decision.rank[0] for decision, _ in selected] != [
+        decision.rank[0] for decision in decisions[:count]
+    ]:
+        raise ValueError("Daily recommendation omitted higher priority decisions")
+    return selected
+
+
+def _render(selected: Sequence[tuple[Decision, str]], slot_label: str) -> str:
+    lines = [f"**研发需求巡检 · {_display(slot_label)}**"]
+    for item, recommended in selected:
+        options = [
+            f"{letter}{'（推荐）' if letter == recommended else ''} {action}"
+            for letter, action in zip(("A", "B"), item.actions, strict=True)
+        ]
+        scope, _, identity = item.key.partition(":")
+        reply_subject = f"{_REPLY_SUBJECTS[scope]} {_display(identity)}"
+        reply_action = item.actions[0 if recommended == "A" else 1]
+        if item.next_action:
+            options[0] += f"（已有下一步：{_display(item.next_action, limit=80)}）"
         lines.append(
-            f"- **MR 状态跳变**：{label}，{_display(previous.state)} → {_display(snapshot.state)}。"
+            f"- {item.subject}：{item.situation}。\n"
+            f"  选项：{'；'.join(options)}。\n"
+            f"  快捷回复：「{reply_subject}，请{reply_action}」。"
         )
-    if snapshot.ci_status == "failed" and (previous is None or previous.ci_status != "failed"):
-        kind = "CI 回归" if previous and previous.ci_status != "unknown" else "首次发现 CI 失败"
-        before = _display(previous.ci_status) if previous else "未观测"
-        lines.append(f"- **{kind}**：{label}，{before} → failed；请查看当前流水线。")
-    return lines
-
-
-def _stall_lines(
-    demands: Sequence[Mapping[str, Any]],
-    tasks: Sequence[WorkspaceTask],
-    state: PatrolState,
-    now: datetime,
-) -> list[str]:
-    lines: list[str] = []
-    for demand in sorted(demands, key=lambda item: _text(item.get("priority"))):
-        priority = _text(demand.get("priority")).lower()
-        if priority not in {"p0", "p1"} or demand.get("status") not in _OPEN_DEMAND_STATUSES:
-            continue
-        touched = _last_touch(demand)
-        hours = max(0.0, (now - touched).total_seconds() / 3600) if touched else None
-        matches = _matching_tasks(demand, tasks)
-        stalled = hours is not None and hours >= state.config.stalled_hours
-        unassigned = demand.get("status") == "planned" and not matches
-        if not stalled and not unassigned:
-            continue
-        reasons = []
-        if stalled:
-            reasons.append("停滞")
-        if unassigned:
-            reasons.append("待派工（未匹配活跃 Hub Task）")
-        age = f"{hours:.0f}h 未更新" if hours is not None else "更新时间未知"
-        associated = (
-            "；关联 Task " + ", ".join(f"`{task.id}`" for task in matches) if matches else ""
-        )
-        lines.append(
-            f"- **{priority.upper()} · {' / '.join(reasons)}** · {age} · {_display(demand.get('title'))}"
-            f"{associated}\n  下一步：{_display(demand.get('next_action'), '请明确下一步行动')}"
-        )
-    return lines
-
-
-def _attention_lines(
-    tasks: Sequence[WorkspaceTask], lifecycles: Mapping[str, TaskLifecycle]
-) -> list[str]:
-    lines: list[str] = []
-    for task in tasks:
-        lifecycle = lifecycles.get(task.id)
-        if lifecycle is None or not lifecycle.attention:
-            continue
-        lines.append(
-            f"- **{_display(task.title)}** · {_display(lifecycle.phase.value)} · "
-            f"{_display(lifecycle.reason_text)}\n"
-            f"  Workspace `{task.workspace_id}` · Task `{task.id}`"
-        )
-    return lines
-
-
-def _pending_lines(demands: Sequence[Mapping[str, Any]], top_n: int) -> tuple[int, list[str]]:
-    pending = [demand for demand in demands if demand.get("status") == "pending"]
-    epoch = datetime.min.replace(tzinfo=timezone.utc)
-    pending.sort(key=lambda item: _timestamp(item.get("created_at")) or epoch, reverse=True)
-    lines = [f"待确认 **{len(pending)}** 项；展示最新 {min(top_n, len(pending))} 项。"]
-    for demand in pending[:top_n]:
-        lines.append(
-            f"- {_display(demand.get('title'))} · `{_display(demand.get('id'))}`\n"
-            f"  下一步：{_display(demand.get('next_action'), '确认是否跟进并设置优先级')}"
-        )
-    return len(pending), lines
+    return "\n\n".join(lines)
 
 
 async def build_daily_digest(
@@ -257,14 +414,12 @@ async def build_daily_digest(
     tasks: Sequence[WorkspaceTask],
     lifecycles: Mapping[str, TaskLifecycle],
     runner: CommandRunner = run_command,
+    decision_model: DecisionModel,
+    task_details: Mapping[str, str] | None = None,
     slot_label: str = "manual",
     dry_run: bool = False,
-) -> PatrolRunRecord:
-    """Collect facts and update successful MR snapshots, leaving delivery to the owner.
-
-    The service owns the working state copy and commits it only after delivery.
-    A dry run never changes snapshots, slot receipts, or external state.
-    """
+) -> DailyDigest:
+    """Refresh observed state and return receipts to commit after delivery."""
     now = now.replace(tzinfo=timezone.utc) if now.tzinfo is None else now
     record = PatrolRunRecord(channel="daily", started_at=now.isoformat(), dry_run=dry_run)
     demand_rows: list[Mapping[str, Any]] = []
@@ -274,18 +429,22 @@ async def build_daily_digest(
         demand_rows = _demands(payload)
     except (CommandError, OSError, TimeoutError, ValueError):
         demands_available = False
-        record.errors.append("InfoWall 需求读取失败；需求数量、停滞及收件箱状态未知。")
+        record.errors.append("InfoWall 需求读取失败，无法核查关联 MR 和需求停滞。")
 
     urls_to_demands: dict[str, list[Mapping[str, Any]]] = {}
     for demand in demand_rows:
-        if demand.get("status") not in _OPEN_DEMAND_STATUSES:
-            continue
-        for url in sorted(demand_mr_urls(demand)):
-            urls_to_demands.setdefault(url, []).append(demand)
-    urls = sorted(urls_to_demands)[:_MAX_MRS]
+        if demand.get("status") in _OPEN_DEMAND_STATUSES:
+            for url in demand_mr_urls(demand):
+                urls_to_demands.setdefault(url, []).append(demand)
+    ordered_urls = sorted(urls_to_demands)
+    start = bisect_right(ordered_urls, state.daily_mr_cursor)
+    urls = (ordered_urls[start:] + ordered_urls[:start])[:_MAX_MRS]
+    if urls and not dry_run:
+        state.daily_mr_cursor = urls[-1]
     gate = asyncio.Semaphore(4)
     results = await asyncio.gather(*(_read_mr(url, runner, gate) for url in urls))
-    changes: list[str] = []
+    receipts = state.daily_decision_receipts.copy()
+    decisions: dict[str, Decision] = {}
     queried = 0
     for snapshot, error in results:
         if error:
@@ -293,46 +452,69 @@ async def build_daily_digest(
         if snapshot is None:
             continue
         queried += 1
-        changes.extend(
-            _state_changes(
-                snapshot, state.mr_snapshots.get(snapshot.url), urls_to_demands[snapshot.url]
-            )
-        )
+        ci_key = f"ci:{snapshot.url}"
+        if snapshot.ci_status == "success":
+            receipts.pop(ci_key, None)
+        if snapshot.state not in {"closed", "merged"}:
+            receipts.pop(f"mr:{snapshot.url}", None)
         if not dry_run:
             state.mr_snapshots[snapshot.url] = snapshot
 
-    stalls = _stall_lines(demand_rows, tasks, state, now)
-    attention = _attention_lines(tasks, lifecycles)
-    pending_count, pending = _pending_lines(demand_rows, state.config.pending_top_n)
-    sections = [f"# 研发需求与 Work 巡检 · {_display(slot_label)}", f"观测时间：{now.isoformat()}"]
-    for heading, lines, empty in (
-        ("🚨 状态跳变与待关单", changes, "已成功查询的 MR 未发现状态跳变或待关单。"),
-        ("🔥 P0·P1 停滞与待派工", stalls, "未发现达到阈值的停滞或计划内待派工事项。"),
-        ("⏳ Hub 待你拍板任务", attention, "无待你拍板的 Hub Task。"),
-        (
-            "📥 InfoWall 待确认收件箱",
-            pending if demands_available else [],
-            "InfoWall 不可用，收件箱状态未知。",
-        ),
-    ):
-        if not demands_available and heading.startswith(("🚨", "🔥")):
-            empty = "InfoWall 不可用，无法核查。"
-        sections.extend((f"## {heading}", "\n".join(lines) if lines else empty))
-    omitted = max(0, len(urls_to_demands) - len(urls))
-    sections.append(f"MR 覆盖：成功 {queried}/{len(urls)}；本轮上限 {_MAX_MRS}，未查询 {omitted}。")
-    if record.errors:
-        sections.extend(("### 数据缺口", "\n".join(f"- {error}" for error in record.errors)))
-    record.markdown = "\n\n".join(sections)
-    record.candidates = len(changes) + len(stalls) + len(attention)
+        # An unresolved failure takes precedence over merged-MR acceptance.
+        # Only a confirmed success re-arms a delivered failure, even after
+        # pending, running, missing, or otherwise inconclusive observations.
+        if (
+            snapshot.state == "merged"
+            and snapshot.ci_status not in {"success", "failed"}
+            and ci_key in receipts
+        ):
+            continue
+        decision = _mr_decision(snapshot, urls_to_demands[snapshot.url])
+        if decision is not None:
+            decisions[decision.key] = decision
+
+    for demand in demand_rows:
+        if (decision := _stall_decision(demand, tasks, state, now)) is not None:
+            decisions[decision.key] = decision
+    for task in tasks:
+        detail = (task_details or {}).get(task.id, "")
+        if (decision := _task_decision(task, lifecycles.get(task.id), detail)) is not None:
+            decisions[decision.key] = decision
+    for key in list(receipts):
+        scope, _, identity = key.partition(":")
+        if key in decisions:
+            continue
+        if scope == "task" or (
+            demands_available
+            and (scope == "demand" or (scope in {"mr", "ci"} and identity not in urls_to_demands))
+        ):
+            del receipts[key]
+    if not dry_run:
+        state.daily_decision_receipts = receipts
+
+    fresh = [item for item in decisions.values() if receipts.get(item.key) != item.fingerprint]
+    fresh.sort(key=lambda item: (item.rank, item.key))
+    selected = [(item, item.task_option or "A") for item in fresh[:_MAX_DECISIONS]]
+    record.candidates = len(fresh)
     record.details = {
         "demands_available": demands_available,
         "demands": len(demand_rows) if demands_available else None,
         "mrs_queried": queried,
         "mrs_requested": len(urls),
-        "mrs_omitted": omitted,
-        "state_changes": len(changes),
-        "stalled_or_unassigned": len(stalls),
-        "attention_tasks": len(attention),
-        "pending": pending_count if demands_available else None,
+        "mrs_omitted": len(urls_to_demands) - len(urls),
+        "selected": len(selected),
+        "decision_mode": "skipped",
     }
-    return record
+    if selected:
+        record.details["decision_mode"] = "deterministic"
+        if not dry_run:
+            record.llm_invoked = 1
+            try:
+                selected = await _recommend(
+                    fresh[:_MAX_MODEL_CANDIDATES], decision_model, state.config.workspace_id
+                )
+                record.details["decision_mode"] = "model"
+            except Exception as exc:
+                record.details["provider_fallback"] = type(exc).__name__
+        record.markdown = _render(selected, slot_label)
+    return DailyDigest(record, {item.key: item.fingerprint for item, _ in selected})

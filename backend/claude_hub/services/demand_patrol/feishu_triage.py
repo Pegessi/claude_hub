@@ -879,12 +879,16 @@ def _find_retained_patrol_session(workspace_id: str, title: str) -> ManagedSessi
     return None
 
 
-async def diagnose_message(
-    candidate: FeishuCandidate,
-    *,
-    workspace_id: str = DEFAULT_PATROL_WORKSPACE_ID,
-) -> TriageDiagnosis:
-    """Run one read-only Workspace Chat session and auto-archive it when done."""
+async def patrol_provider_env(
+    *, require_read_only: bool = False
+) -> tuple[AgentType, dict[str, str]]:
+    """Select a provider the caller can use with the requested permissions."""
+    if require_read_only:
+        # The daily adapter requires a successful Codex Plan-mode transition
+        # before it submits any prompt. MASO has no equivalent Hub mode.
+        if not shutil.which("codex"):
+            raise CommandError("No provider with a read-only patrol mode is installed")
+        return AgentType.CODEX, {"CODEX_REASONING_EFFORT": "low"}
     agent_type, model, env = AgentType.CODEX, None, {}
     try:
         base_url, models, _ = await discover_maso_service(
@@ -913,6 +917,16 @@ async def diagnose_message(
     launch_env = dict(env)
     if model and agent_type in _MODEL_ENV_KEYS:
         launch_env[_MODEL_ENV_KEYS[agent_type]] = model.strip()
+    return agent_type, launch_env
+
+
+async def diagnose_message(
+    candidate: FeishuCandidate,
+    *,
+    workspace_id: str = DEFAULT_PATROL_WORKSPACE_ID,
+) -> TriageDiagnosis:
+    """Run one read-only Workspace Chat session and auto-archive it when done."""
+    agent_type, launch_env = await patrol_provider_env()
     target_workspace_id = _resolve_patrol_workspace_id(workspace_id)
     session_title = f"Patrol triage: {candidate.message_id}"
     retained = _find_retained_patrol_session(target_workspace_id, session_title)
