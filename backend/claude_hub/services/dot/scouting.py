@@ -132,16 +132,25 @@ async def advertised_model_ids() -> set[str]:
     return set(_advertised_model_ids(models))
 
 
+def _stage2_model_rank(model: str) -> tuple[int, str]:
+    """Prefer high-reasoning verifiers; keep inexpensive models for last."""
+    normalized = model.lower()
+    cheap = "flash" in normalized or "deepseek" in normalized
+    high = "high" in normalized
+    return (2 if cheap else 0 if high else 1, normalized)
+
+
 def resolve_stage2_model(advertised: set[str], configured: str) -> str:
-    """Choose an explicit model or a deterministic reasoning model from the catalog."""
+    """Honor an explicit choice, otherwise choose the strongest ranked catalog entry."""
     if configured:
         return configured
-    return next(iter(sorted(advertised, key=lambda m: ("high" not in m.lower(), m))), "")
+    return next(iter(sorted(advertised, key=_stage2_model_rank)), "")
 
 
 def _stage2_fallback_chain(primary: str, advertised: set[str] | None = None) -> list[str]:
-    """Try the configured model followed by distinct live catalog choices."""
-    return list(dict.fromkeys(model for model in [primary, *sorted(advertised or ())] if model))[:4]
+    """Try the primary, then ranked distinct catalog choices, with a bounded budget."""
+    ordered = sorted(advertised or (), key=_stage2_model_rank)
+    return list(dict.fromkeys(model for model in [primary, *ordered] if model))[:4]
 
 
 async def _ephemeral_model_turn(prompt: str, model: str) -> str:

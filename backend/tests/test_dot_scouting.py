@@ -648,6 +648,18 @@ def test_stage2_fallback_chain_uses_distinct_catalog_models() -> None:
     ]
 
 
+def test_stage2_ranking_keeps_cheap_models_behind_strong_and_base() -> None:
+    advertised = {"a-flash-high", "b-deepseek-high", "c-base", "z-reasoning-high"}
+    assert resolve_stage2_model(advertised, "") == "z-reasoning-high"
+    assert scouting._stage2_fallback_chain("z-reasoning-high", advertised) == [
+        "z-reasoning-high",
+        "c-base",
+        "a-flash-high",
+        "b-deepseek-high",
+    ]
+    assert resolve_stage2_model(advertised, "a-flash-high") == "a-flash-high"
+
+
 def test_stage2_fallback_chain_is_bounded() -> None:
     models = {f"example-{n}" for n in range(10)}
     assert len(scouting._stage2_fallback_chain("primary", models)) == 4

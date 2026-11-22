@@ -7,6 +7,10 @@
 
 ## Released
 
+### fix(dot): prefer strong scouting verification models
+
+- Rank high-reasoning models ahead of base and inexpensive fallback choices.
+
 ### feat(dot): proactive interest radar and DeepSeek->strong-model scout funnel
 
 - Add `services/dot/scouting.py` + `scouting_core.py`: a self-contained pipeline
