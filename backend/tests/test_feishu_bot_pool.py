@@ -1053,6 +1053,24 @@ def test_a_push_goes_only_to_the_chat_bound_to_the_tab(api) -> None:
     assert len(api.wire.pushes) == 1
 
 
+def test_push_skips_stale_binding_for_same_tab(api, monkeypatch: pytest.MonkeyPatch) -> None:
+    from types import SimpleNamespace
+
+    bot_id = api.pool.create_bot(name="One", config=_config("app-1"), environ={})
+    _pair(api.pool, bot_id, owner=LOCAL, tab_id="tab-1", chat_id="oc-1", environ={})
+    original_snapshot = api.pool.snapshot
+    entry = original_snapshot({}).get(bot_id)
+    valid = entry.bindings[0]
+    from dataclasses import replace
+
+    stale = replace(valid, pairing_id="old")
+    fake = SimpleNamespace(enabled=True, configured=True, bot_id=bot_id, bindings=[stale, valid])
+    monkeypatch.setattr(api.pool, "snapshot", lambda *args, **kwargs: SimpleNamespace(bots=[fake]))
+    assert bot_api.feishu_bound_to_tab("tab-1")
+    assert asyncio.run(bot_api.push_to_tab("tab-1", "notice"))
+    assert api.wire.pushes[-1][0] == "oc-1"
+
+
 def test_pairing_code_reply_carries_the_confirmation_word(api, clock: Clock) -> None:
     """Regression for the blocking defect: consuming the code advances the Bot
     revision, so a reply still built on the pre-claim snapshot would be

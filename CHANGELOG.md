@@ -7,6 +7,10 @@
 
 ## Released
 
+### fix(dot): deliver notifications and poll personal mentions
+
+- Select the currently routed bot binding and poll personal mentions with a durable watermark.
+
 ### fix(dot): prefer strong scouting verification models
 
 - Rank high-reasoning models ahead of base and inexpensive fallback choices.
