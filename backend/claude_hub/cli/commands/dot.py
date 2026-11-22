@@ -233,6 +233,38 @@ def dot_notify(
     emit(_call(ctx, "POST", "/notify", json=body), cli_main.as_json(ctx))
 
 
+# ── scouting ────────────────────────────────────────────────────────────
+
+
+@dot.group("scout", invoke_without_command=True)
+@click.pass_context
+def dot_scout(ctx: click.Context) -> None:
+    """Proactive interest radar and the DeepSeek->strong-model scout funnel."""
+    if ctx.invoked_subcommand is None:
+        # Default to the read-only profile view so a bare `dot scout` is safe.
+        emit(_call(ctx, "GET", "/scout/profile"), cli_main.as_json(ctx))
+
+
+@dot_scout.command("profile")
+@click.pass_context
+def dot_scout_profile(ctx: click.Context) -> None:
+    """Refresh and show the evolving interest radar (no model call, no notify)."""
+    emit(_call(ctx, "GET", "/scout/profile"), cli_main.as_json(ctx))
+
+
+@dot_scout.command("run")
+@click.option(
+    "--dry-run/--no-dry-run",
+    default=True,
+    show_default=True,
+    help="Dry run never sends a Feishu notice; use --no-dry-run to allow Speak-Bar pushes.",
+)
+@click.pass_context
+def dot_scout_run(ctx: click.Context, dry_run: bool) -> None:
+    """Run the two-stage scout funnel. Dry-run is the safe default."""
+    emit(_call(ctx, "POST", "/scout/run", json={"dry_run": dry_run}), cli_main.as_json(ctx))
+
+
 # ── memory ──────────────────────────────────────────────────────────────
 
 

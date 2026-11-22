@@ -173,6 +173,13 @@ class InboxAck(BaseModel):
     ids: Optional[List[str]] = None
 
 
+class ScoutRunRequest(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    # Dry run is the safe default: it never sends a Feishu notice.
+    dry_run: bool = True
+
+
 def _service() -> DotService:
     return get_dot_service()
 
@@ -732,6 +739,37 @@ async def dot_inbox_ack(
     payload: InboxAck, current_user: User = Depends(get_current_user)
 ) -> dict[str, Any]:
     return {"acked": _service().store.mark_inbox_read(payload.ids)}
+
+
+# ── scouting ────────────────────────────────────────────────────────────
+
+
+@router.get("/scout/profile")
+async def dot_scout_profile(
+    current_user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    """Refresh and return the interest radar. No model call and no notification."""
+    from ..services.dot.scouting import INTEREST_LINE_LABELS, ScoutingEngine
+
+    engine = ScoutingEngine()
+    profile = await asyncio.to_thread(engine.refresh_profile, _service().store)
+    return {
+        "profile": profile.to_dict(),
+        "line_labels": dict(INTEREST_LINE_LABELS),
+        "runs": engine.store.list_runs()[-10:],
+    }
+
+
+@router.post("/scout/run")
+async def dot_scout_run(
+    payload: ScoutRunRequest, current_user: User = Depends(get_current_user)
+) -> dict[str, Any]:
+    """Run the two-stage funnel. ``dry_run`` defaults to True and never notifies."""
+    from ..services.dot.scouting import ScoutingEngine
+
+    engine = ScoutingEngine()
+    result = await engine.run(_service().store, dry_run=payload.dry_run)
+    return result.to_dict()
 
 
 __all__ = ["router"]
