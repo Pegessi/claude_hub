@@ -992,7 +992,10 @@ async def test_c2_r2_failed_watch_url_delivery_recovered_by_patrol_and_generatio
         watch_chat_ids=frozenset({PRIORITY_CHAT_WEB_ID, "oc_priority_group"}),
         url_patterns=(r"https?://compute\.example\.com/job/\d+",),
     )
-    poller, _svc, _uc = _setup_poller(tmp_path, realtime_config=cfg, event_sink=failing_sink)
+    poller, _svc, uc = _setup_poller(tmp_path, realtime_config=cfg, event_sink=failing_sink)
+    wt = uc._get_web_transport()
+    assert wt is not None
+    wt.bind_sender_alias("ou_colleague", COLLEAGUE_WEB_UID)
     router = poller.realtime_router
     monkeypatch.setattr(triage_mod, "get_feishu_realtime_event_router", lambda: router)
     monkeypatch.setattr(
@@ -1531,6 +1534,7 @@ async def test_c3_r2_probe_c_real_web_push_numeric_sender_deduplicates_with_open
     wt._remember_chat(
         WebChat(id=ORDINARY_CHAT_WEB_ID, open_chat_id="oc_group_1", name="研发排障群")
     )
+    wt.bind_sender_alias("ou_colleague", COLLEAGUE_WEB_UID)
     monkeypatch.setattr(
         triage_mod, "get_feishu_realtime_event_router", lambda: poller.realtime_router
     )
@@ -1969,6 +1973,8 @@ async def test_c5_r1_topic_dedupe_across_namespaces_and_singleton_sender_isolati
     wt._remember_chat(
         WebChat(id=ORDINARY_CHAT_WEB_ID, open_chat_id="oc_group_1", name="研发排障群")
     )
+    wt.bind_sender_alias("ou_colleague", COLLEAGUE_WEB_UID)
+    wt.bind_topic_alias("omt_same_topic", "7400000000000006900")
     monkeypatch.setattr(
         triage_mod, "get_feishu_realtime_event_router", lambda: poller.realtime_router
     )
@@ -2136,3 +2142,147 @@ async def test_c5_r2_renamed_watch_group_refreshes_cached_chat_metadata_and_rout
     assert emitted[0].event_type == "im.watch_chat_url"
     assert "Priority group" in lookup_names
     assert poller.realtime_router.watched_openapi_chat_ids() == ("oc_renamed_group",)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("other_sender_id", "other_sender_name"),
+    [
+        ("ou_bob", "Bob"),
+        ("ou_carol", "Carol"),
+        ("ou_dave_synthetic_99", "Dave"),
+        ("ou_xavier_unfamiliar", "Alice"),
+    ],
+)
+async def test_c6_r1_and_c6_r2_alpha_renamed_senders_and_populated_cache_unrelated_topics_not_merged(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    other_sender_id: str,
+    other_sender_name: str,
+) -> None:
+    """C6-R1 & C6-R2 regression:
+    - Any unfamiliar/renamed OpenAPI sender (Bob, Carol, Dave, or same display name with different ou_...) must NOT match a lone handled or failed Web record from another user.
+    - Even with a verified sender alias and a populated real transport _msg_cache, an unrelated unaliased OpenAPI topic (omt_...) must NOT match a Web topic record.
+    """
+    from claude_hub.services.demand_patrol import feishu_triage as triage_mod
+    from claude_hub.services.demand_patrol.feishu_triage import _candidate, filter_unanswered
+    from claude_hub.services.feishu_web_session.rich import WebChat
+
+    should_fail = False
+
+    async def sink(_ev: ExternalEvent) -> bool:
+        return not should_fail
+
+    poller, _svc, uc = _setup_poller(
+        tmp_path,
+        realtime_config=FeishuRealtimeEventConfig(
+            enabled=True,
+            suppress_patrol_when_healthy=True,
+        ),
+        event_sink=sink,
+    )
+    wt = uc._get_web_transport()
+    assert wt is not None
+    wt._remember_chat(
+        WebChat(id=ORDINARY_CHAT_WEB_ID, open_chat_id="oc_group_1", name="研发排障群")
+    )
+    wt.bind_sender_alias("ou_colleague", COLLEAGUE_WEB_UID)
+    monkeypatch.setattr(
+        triage_mod, "get_feishu_realtime_event_router", lambda: poller.realtime_router
+    )
+
+    # 1. C6-R1(a): Handled Web message from Alice (COLLEAGUE_WEB_UID) must not suppress other_sender_id's same-second/same-text candidate when Alice's row is absent
+    alice_ok = _build_pushed_via_wire(
+        msg_id="7400000000000007101",
+        from_id=COLLEAGUE_WEB_UID,
+        chat_id=ORDINARY_CHAT_WEB_ID,
+        nodes=[Node(text="@Owner", at=OWNER_WEB_UID), T(" 同一秒不同人去重测试？")],
+        create_time_s=1_760_009_601,
+        at_me=True,
+    )
+    assert await poller.handle_pushed_web_message(alice_ok) is True
+
+    other_cand = _candidate(
+        {
+            "message_id": f"om_other_{other_sender_id}",
+            "chat_id": "oc_group_1",
+            "chat_name": "研发排障群",
+            "chat_type": "group",
+            "create_time": "1760009601000",
+            "sender": {"id": other_sender_id, "name": other_sender_name},
+            "content": f'<at user_id="{OWNER_OPEN_ID}">@Owner</at> 同一秒不同人去重测试？',
+            "mentions": [{"id": OWNER_OPEN_ID}],
+        }
+    )
+    cands_a, answered_a = filter_unanswered([other_cand], OWNER_OPEN_ID, [], realtime_healthy=True)
+    assert [c.message_id for c in cands_a] == [f"om_other_{other_sender_id}"]
+    assert answered_a == []
+
+    # 2. C6-R1(b): Failed Web delivery from Alice must not be cleared when patrol recovers only other_sender_id's candidate
+    should_fail = True
+    alice_fail = _build_pushed_via_wire(
+        msg_id="7400000000000007102",
+        from_id=COLLEAGUE_WEB_UID,
+        chat_id=ORDINARY_CHAT_WEB_ID,
+        nodes=[Node(text="@Owner", at=OWNER_WEB_UID), T(" 同一秒不同人恢复测试？")],
+        create_time_s=1_760_009_602,
+        at_me=True,
+    )
+    assert await poller.handle_pushed_web_message(alice_fail) is False
+    assert poller.realtime_router.pending_fallback_count == 1
+
+    other_recovered = _candidate(
+        {
+            "message_id": f"om_rec_{other_sender_id}",
+            "chat_id": "oc_group_1",
+            "chat_name": "研发排障群",
+            "chat_type": "group",
+            "create_time": "1760009602000",
+            "sender": {"id": other_sender_id, "name": other_sender_name},
+            "content": f'<at user_id="{OWNER_OPEN_ID}">@Owner</at> 同一秒不同人恢复测试？',
+            "mentions": [{"id": OWNER_OPEN_ID}],
+        }
+    )
+    poller.realtime_router.acknowledge_patrol_fallback(
+        recovered_ids=[f"om_rec_{other_sender_id}"],
+        recovered_candidates=[other_recovered],
+    )
+    assert poller.realtime_router.pending_fallback_count == 1
+    assert poller.realtime_router.is_message_handled("7400000000000007102") is False
+
+    # 3. C6-R2: Verified sender (ou_colleague <-> COLLEAGUE_WEB_UID) and populated _msg_cache,
+    #    but unrelated unaliased OpenAPI topic (omt_unrelated_topic) must NOT match Web topic 7400000000000007100
+    should_fail = False
+    topic_push = _build_pushed_via_wire(
+        msg_id="7400000000000007103",
+        from_id=COLLEAGUE_WEB_UID,
+        chat_id=ORDINARY_CHAT_WEB_ID,
+        root_id="7400000000000007100",
+        parent_id="7400000000000007100",
+        thread_id="7400000000000007100",
+        nodes=[Node(text="@Owner", at=OWNER_WEB_UID), T(" 话题报错隔离测试？")],
+        create_time_s=1_760_009_603,
+        at_me=True,
+    )
+    assert await poller.handle_pushed_web_message(topic_push) is True
+    assert len(wt._msg_cache) > 0
+
+    unrelated_topic_cand = _candidate(
+        {
+            "message_id": "om_unrelated_topic_msg",
+            "chat_id": "oc_group_1",
+            "chat_name": "研发排障群",
+            "chat_type": "group",
+            "thread_id": "omt_unrelated_topic",
+            "reply_to": "om_unrelated_root",
+            "create_time": "1760009603000",
+            "sender": {"id": "ou_colleague", "name": "Alice"},
+            "content": f'<at user_id="{OWNER_OPEN_ID}">@Owner</at> 话题报错隔离测试？',
+            "mentions": [{"id": OWNER_OPEN_ID}],
+        }
+    )
+    cands_topic, answered_topic = filter_unanswered(
+        [unrelated_topic_cand], OWNER_OPEN_ID, [], realtime_healthy=True
+    )
+    assert [c.message_id for c in cands_topic] == ["om_unrelated_topic_msg"]
+    assert answered_topic == []

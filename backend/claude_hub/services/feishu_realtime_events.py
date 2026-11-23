@@ -816,9 +816,7 @@ class FeishuRealtimeEventRouter:
             same_wb = any(is_web_entity_id(t) for t in c_tkeys) and any(
                 is_web_entity_id(t) for t in r_tkeys
             )
-            if not (c_tkeys & r_tkeys) and (
-                same_om or same_wb or not getattr(self._last_web_transport, "_msg_cache", None)
-            ):
+            if not (c_tkeys & r_tkeys) and (same_om or same_wb or not verified_msg):
                 return False
         c_sid, c_sname = (
             str(kw.get("sender_id") or "").strip().casefold(),
@@ -838,15 +836,10 @@ class FeishuRealtimeEventRouter:
             }
             if (c_ou and r_ou and not (c_ou & r_ou)) or (c_wb and r_wb and not (c_wb & r_wb)):
                 return False
-        v_s = bool(
-            (c_skeys and r_skeys and (c_skeys & r_skeys)) or (c_sname and c_sname == r_sname)
+        return not (
+            (c_sname and r_sname and c_sname != r_sname)
+            or not (verified_msg or (c_skeys and r_skeys and (c_skeys & r_skeys)))
         )
-        if (c_sname and r_sname and c_sname != r_sname) or (
-            not (verified_msg or v_s)
-            and (c_sid in {"ou_bob", "7100000000000000009"} or c_sname == "bob")
-        ):
-            return False
-        return True
 
     def note_candidate_batch(self, candidates: Sequence[Any]) -> None:
         with self._lock:
@@ -1348,7 +1341,18 @@ class FeishuRealtimeEventRouter:
         cks, ocid, cname = self._chat_keys(wcid, wt), "", ""
         if is_at_me or m_urls:
             w_cf = {c.strip().casefold() for c in cfg.watch_chat_ids if c and c.strip()}
-            ref = bool(m_urls and cfg.watch_chat_names and not (cks & w_cf))
+            cached_ch = (
+                cc.get(wcid)
+                if isinstance(cc := getattr(wt, "_chat_cache", None), Mapping)
+                else None
+            )
+            cached_nm = " ".join(str(getattr(cached_ch, "name", "") or "").split()).casefold()
+            ref = bool(
+                m_urls
+                and cfg.watch_chat_names
+                and not (cks & w_cf)
+                and cached_nm not in cfg.watch_chat_names
+            )
             ocid, cname = await self._ensure_chat_metadata(wcid, wt, refresh=ref)
             if ocid:
                 cks |= self._chat_keys(ocid, wt)
