@@ -430,7 +430,7 @@ def _is_answered_by(message: FeishuCandidate, own: FeishuCandidate) -> bool:
         if (
             bool(message.thread_id)
             and own.thread_id == message.thread_id
-            and own.created_at >= message.created_at
+            and own.created_at > message.created_at
         ):
             return True
         if own.thread_id and own.thread_id == message.message_id:
@@ -459,9 +459,11 @@ def filter_unanswered(
     realtime_healthy: bool = False,
 ) -> tuple[list[FeishuCandidate], list[str]]:
     """Admit only direct, explicitly mentioned, watch-group URL, or participated-thread human questions."""
+    _ = realtime_healthy
     own_messages = [message for message in messages if message.sender_id == user_open_id]
     seen = set(processed_ids)
     realtime_router = get_feishu_realtime_event_router()
+    rt_cfg = realtime_router.resolve_config()
     candidates, answered = [], []
     for message in sorted(messages, key=lambda item: item.created_at):
         if message.message_id in seen or message.sender_id == user_open_id:
@@ -475,6 +477,7 @@ def filter_unanswered(
             message.message_id,
             chat_id=message.chat_id,
             thread_id=message.thread_id,
+            sender_id=message.sender_id,
             text=message.text,
             created_at_ms=created_ms,
         ) or realtime_router.has_owner_replied(
@@ -494,6 +497,8 @@ def filter_unanswered(
             message.chat_id,
             message.chat_name,
             message.text,
+            rt_cfg,
+            message_id=message.message_id,
         )
         is_mention = user_open_id in message.mentioned_ids
         is_watch_url = bool(watch_urls)
@@ -503,17 +508,6 @@ def filter_unanswered(
             and own.created_at < message.created_at
             for own in own_messages
         )
-        is_uncovered_by_realtime = (message.chat_type == "p2p" and not is_mention) or (
-            is_participated_thread and not is_mention and not is_watch_url
-        )
-        if (
-            realtime_healthy
-            and not realtime_router.needs_patrol_fallback
-            and (is_mention or is_watch_url)
-            and not is_uncovered_by_realtime
-        ):
-            answered.append(message.message_id)
-            continue
         relevant = (
             message.chat_type == "p2p" or is_mention or is_watch_url or is_participated_thread
         )
@@ -1282,12 +1276,22 @@ async def run_feishu_triage(
         start = _search_start(state, now)
         start_iso = start.astimezone(tz).isoformat(timespec="seconds")
         end_iso = now.astimezone(tz).isoformat(timespec="seconds")
-        by_id: dict[str, FeishuCandidate] = {}
-        for extra_flags in (
+        realtime_router = get_feishu_realtime_event_router()
+        rt_cfg = realtime_router.resolve_config()
+        fallback_gen = realtime_router.fallback_generation
+        search_flags: list[tuple[str, ...]] = [
             ("--is-at-me",),
             ("--chat-type", "p2p"),
             ("--sender", uid),
+        ]
+        if (
+            rt_cfg.watch_chat_ids
+            or rt_cfg.watch_chat_names
+            or realtime_router.needs_patrol_fallback
         ):
+            search_flags.append(("--chat-type", "group"))
+        by_id: dict[str, FeishuCandidate] = {}
+        for extra_flags in search_flags:
             payload = await runner(
                 _search_command(start_iso, end_iso, *extra_flags),
                 timeout=60,
@@ -1415,8 +1419,16 @@ async def run_feishu_triage(
     pending = [item for item in candidates if item.message_id not in completed]
     # A per-run diagnosis cap must not silently discard the rest of a successful search.
     state.feishu_watermark_iso = min((item.created_at for item in pending), default=now).isoformat()
-    if not pending and not result.errors:
-        get_feishu_realtime_event_router().acknowledge_patrol_fallback()
+    completed_set = set(completed)
+    realtime_router.acknowledge_patrol_fallback(
+        recovered_ids=completed,
+        recovered_candidates=[item for item in candidates if item.message_id in completed_set],
+        seen_ids=[item.message_id for item in messages],
+        window_start_ms=int(start.timestamp() * 1000),
+        window_end_ms=int(now.timestamp() * 1000),
+        max_generation=fallback_gen,
+        all_candidates_completed=(not pending),
+    )
     result.details["remaining"] = len(pending)
     result.markdown = "\n\n---\n\n".join(cards) if cards else "飞书巡检：没有新的排障草稿可发送。"
     return result

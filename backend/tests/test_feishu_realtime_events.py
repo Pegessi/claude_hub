@@ -820,6 +820,15 @@ def test_r5_regex_with_comma_quantifiers_parsed_intact_from_env_and_json(
     assert cfg_json.url_patterns == (pattern,)
     assert matches_fault_or_task_url("https://compute.example.com/job/123", cfg_json) is True
 
+    # 3. Literal top-level comma in ENV regex string is also preserved intact
+    (tmp_path / "hub" / "local_runtime_settings.json").unlink()
+    literal_comma_pattern = r"https://compute\.example\.com/task/foo,bar$"
+    monkeypatch.setenv("CLAUDE_HUB_FEISHU_WATCH_URL_REGEX", literal_comma_pattern)
+    cfg_comma = FeishuRealtimeEventConfig.from_runtime()
+    assert cfg_comma.url_patterns == (literal_comma_pattern,)
+    assert matches_fault_or_task_url("https://compute.example.com/task/foo,bar", cfg_comma) is True
+    assert matches_fault_or_task_url("https://compute.example.com/task/foo", cfg_comma) is False
+
 
 @pytest.mark.asyncio
 async def test_r1_uncovered_p2p_and_delivery_failure_preserve_patrol_fallback(
@@ -841,7 +850,10 @@ async def test_r1_uncovered_p2p_and_delivery_failure_preserve_patrol_fallback(
 
     poller, _svc, _uc = _setup_poller(
         tmp_path,
-        realtime_config=FeishuRealtimeEventConfig(enabled=True),
+        realtime_config=FeishuRealtimeEventConfig(
+            enabled=True,
+            suppress_patrol_when_healthy=True,
+        ),
         event_sink=flaky_sink,
     )
     monkeypatch.setattr(poller_mod, "_DEFAULT_AI_POLLER", poller)
@@ -893,6 +905,402 @@ async def test_r1_uncovered_p2p_and_delivery_failure_preserve_patrol_fallback(
 
 
 @pytest.mark.asyncio
+async def test_c2_r1_receipt_backed_patrol_suppression_retains_unhandled_backlog(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """C2-R1 regression: filter_unanswered must retain unhandled @me/watch-URL messages even when realtime_healthy=True."""
+    from claude_hub.services.demand_patrol import feishu_triage as triage_mod
+    from claude_hub.services.demand_patrol.feishu_triage import (
+        _candidate,
+        filter_unanswered,
+    )
+    from claude_hub.services.feishu_realtime_events import FeishuRealtimeEventRouter
+
+    assert FeishuRealtimeEventConfig().suppress_patrol_when_healthy is False
+
+    router = FeishuRealtimeEventRouter(
+        config=FeishuRealtimeEventConfig(
+            enabled=True,
+            watch_chat_ids=frozenset({"oc_priority_group"}),
+            url_patterns=(r"https?://compute\.example\.com/job/\d+",),
+        )
+    )
+    monkeypatch.setattr(triage_mod, "get_feishu_realtime_event_router", lambda: router)
+
+    unhandled_mention = _candidate(
+        {
+            "message_id": "om_unhandled_mention",
+            "chat_id": "oc_group_1",
+            "chat_name": "普通研发群",
+            "chat_type": "group",
+            "create_time": "1760002000000",
+            "sender": {"id": "ou_colleague", "name": "Alice"},
+            "content": "@Owner 启动报错 OOM，麻烦看下？",
+            "mentions": [{"id": OWNER_OPEN_ID}],
+        }
+    )
+    # Without a handled receipt, filter_unanswered retains the candidate even when realtime_healthy=True
+    cands_unhealthy, ans_unhealthy = filter_unanswered(
+        [unhandled_mention], OWNER_OPEN_ID, [], realtime_healthy=False
+    )
+    cands_healthy, ans_healthy = filter_unanswered(
+        [unhandled_mention], OWNER_OPEN_ID, [], realtime_healthy=True
+    )
+    assert [c.message_id for c in cands_unhealthy] == ["om_unhandled_mention"]
+    assert ans_unhealthy == []
+    assert [c.message_id for c in cands_healthy] == ["om_unhandled_mention"]
+    assert ans_healthy == []
+
+    # Once a real receipt is recorded, filter_unanswered suppresses the duplicate
+    router._record_handled(
+        "7400000000000002000",
+        alias_id="om_unhandled_mention",
+        chat_keys={"oc_group_1"},
+        sender_ids={"ou_colleague"},
+        text="@Owner 启动报错 OOM，麻烦看下？",
+        created_at_ms=1_760_002_000_000,
+    )
+    cands_after, ans_after = filter_unanswered(
+        [unhandled_mention], OWNER_OPEN_ID, [], realtime_healthy=True
+    )
+    assert cands_after == []
+    assert ans_after == ["om_unhandled_mention"]
+
+
+@pytest.mark.asyncio
+async def test_c2_r2_failed_watch_url_delivery_recovered_by_patrol_and_generational_ack(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """C2-R2 regression: failed watch-URL sink keeps pending_fallback on empty patrol, is recovered by patrol search, and scopes acks to generation."""
+    from claude_hub.services.demand_patrol import feishu_triage as triage_mod
+    from claude_hub.services.demand_patrol.feishu_triage import (
+        TriageDiagnosis,
+        TriageEvidenceLink,
+        run_feishu_triage,
+    )
+    from tests.test_demand_patrol_triage import FakeDot, FakeRunner, capabilities
+
+    monkeypatch.setenv("INFOWALL_URL", "http://127.0.0.1:18899")
+    monkeypatch.setenv("INFOWALL_API_KEY_FILE", "/home/tiger/.local/state/infowall/api-key")
+
+    async def failing_sink(_event: ExternalEvent) -> bool:
+        return False
+
+    cfg = FeishuRealtimeEventConfig(
+        enabled=True,
+        watch_chat_ids=frozenset({PRIORITY_CHAT_WEB_ID, "oc_priority_group"}),
+        url_patterns=(r"https?://compute\.example\.com/job/\d+",),
+    )
+    poller, _svc, _uc = _setup_poller(tmp_path, realtime_config=cfg, event_sink=failing_sink)
+    router = poller.realtime_router
+    monkeypatch.setattr(triage_mod, "get_feishu_realtime_event_router", lambda: router)
+    monkeypatch.setattr(
+        "claude_hub.services.feishu_realtime_events._DEFAULT_REALTIME_ROUTER", router
+    )
+
+    now = datetime(2026, 11, 14, 3, 0, tzinfo=timezone.utc)
+    msg_ts_s = int(now.timestamp()) - 300
+    watch_push = _build_pushed_via_wire(
+        msg_id="7400000000000002101",
+        from_id=COLLEAGUE_WEB_UID,
+        chat_id=PRIORITY_CHAT_WEB_ID,
+        nodes=[T("服务 OOM 报错，帮忙排查 https://compute.example.com/job/123")],
+        create_time_s=msg_ts_s,
+        at_me=False,
+    )
+    assert await poller.handle_pushed_web_message(watch_push) is False
+    assert router.pending_fallback_count == 1
+
+    # 1. An empty patrol that did not recover the failed watch-URL message must NOT clear pending_fallback
+    empty_state = PatrolState()
+    empty_res = await run_feishu_triage(
+        empty_state,
+        now=now,
+        dot=FakeDot(),
+        runner=FakeRunner([]),
+        triage=AsyncMock(),
+        capabilities=capabilities,
+    )
+    assert empty_res.candidates == 0
+    assert router.pending_fallback_count == 1
+
+    # 2. A patrol with FakeRunner containing that unmentioned watched-group URL question recovers it
+    #    and preserves any newer fallback raised during the patrol's awaited work.
+    concurrent_push = _build_pushed_via_wire(
+        msg_id="7400000000000002102",
+        from_id=COLLEAGUE_WEB_UID,
+        chat_id=PRIORITY_CHAT_WEB_ID,
+        nodes=[T("第二个任务也报错了 https://compute.example.com/job/456")],
+        create_time_s=msg_ts_s + 10,
+        at_me=False,
+    )
+
+    async def fake_triage(_cand: Any) -> TriageDiagnosis:
+        # Simulate a new failed delivery arriving while run_feishu_triage is mid-flight
+        await poller.handle_pushed_web_message(concurrent_push)
+        return TriageDiagnosis(
+            headline="定位服务启动阶段 OOM 并核对缓存配置",
+            root_cause="日志显示启动时分配缓存超出设备可用显存，需继续核对配置来源。",
+            evidence_links=[
+                TriageEvidenceLink(title="任务失败日志", url="https://compute.example.com/job/123")
+            ],
+            reply_draft=(
+                "已查看这次启动失败日志，错误发生在缓存初始化分配显存时，目前能确认可用显存不足。"
+                "建议先核对缓存预算、并行参数及设备上的进程占用，确认后再决定是否需要改代码。"
+            ),
+            project_hint="推理服务稳定性",
+            next_action="检查配置与失败日志并确认修复范围",
+            needs_code_fix=True,
+        )
+
+    runner_with_group_q = FakeRunner(
+        [
+            {
+                "message_id": "om_watch_group_q1",
+                "chat_id": "oc_priority_group",
+                "chat_name": "重点重保排障群",
+                "chat_type": "group",
+                "thread_id": "",
+                "create_time": str(msg_ts_s * 1000),
+                "sender": {"id": "ou_colleague", "name": "Alice"},
+                "content": "服务 OOM 报错，帮忙排查 https://compute.example.com/job/123",
+                "mentions": [],
+                "message_app_link": "https://applink.feishu.cn/client/message/om_watch_group_q1",
+            }
+        ]
+    )
+    dot = FakeDot()
+    state = PatrolState()
+    res = await run_feishu_triage(
+        state,
+        now=now,
+        dot=dot,
+        runner=runner_with_group_q,
+        triage=fake_triage,
+        capabilities=capabilities,
+    )
+    assert res.candidates == 1
+    assert res.notified == 1
+    assert res.errors == []
+    # First fallback (generation 1) was recovered and cleared; concurrent fallback (generation 2) remains!
+    assert router.pending_fallback_count == 1
+    assert "7400000000000002102" in router._pending_fallbacks
+
+
+def test_c2_r3_cross_namespace_dedupe_rejects_conflicting_alias_different_topic_and_missing_chat() -> (
+    None
+):
+    """C2-R3 regression: cross-namespace matching must reject conflicting aliases, different topics/times, and missing chat."""
+    from claude_hub.services.feishu_realtime_events import FeishuRealtimeEventRouter
+
+    router = FeishuRealtimeEventRouter()
+    text = "@Owner 线上推理服务报错 OOM，麻烦看下"
+    ts_ms = 1_760_003_000_000
+
+    # 1. Record with a known verified OpenAPI alias om_known_A
+    router._record_handled(
+        "7400000000000003001",
+        alias_id="om_known_A",
+        chat_keys={"oc_chat_1"},
+        thread_id="omt_topic_1",
+        sender_ids={"ou_alice"},
+        text=text,
+        created_at_ms=ts_ms,
+    )
+    assert router.is_message_handled("om_known_A") is True
+    # A different OpenAPI ID om_new_B must NEVER match a record already bound to om_known_A
+    assert (
+        router.is_message_handled(
+            "om_new_B",
+            chat_id="oc_chat_1",
+            thread_id="omt_topic_1",
+            sender_id="ou_alice",
+            text=text,
+            created_at_ms=ts_ms,
+        )
+        is False
+    )
+
+    # 2. Record an unaliased web message ID
+    router._record_handled(
+        "7400000000000003002",
+        chat_keys={"oc_chat_1"},
+        thread_id="omt_topic_1",
+        sender_ids={"ou_alice"},
+        text=text,
+        created_at_ms=ts_ms,
+    )
+    # Different thread -> False
+    assert (
+        router.is_message_handled(
+            "om_other_thread",
+            chat_id="oc_chat_1",
+            thread_id="omt_topic_2",
+            sender_id="ou_alice",
+            text=text,
+            created_at_ms=ts_ms,
+        )
+        is False
+    )
+    # Timestamp +1s -> False
+    assert (
+        router.is_message_handled(
+            "om_plus_1s",
+            chat_id="oc_chat_1",
+            thread_id="omt_topic_1",
+            sender_id="ou_alice",
+            text=text,
+            created_at_ms=ts_ms + 1000,
+        )
+        is False
+    )
+    # Missing chat_id -> False
+    assert (
+        router.is_message_handled(
+            "om_missing_chat",
+            chat_id="",
+            thread_id="omt_topic_1",
+            sender_id="ou_alice",
+            text=text,
+            created_at_ms=ts_ms,
+        )
+        is False
+    )
+    # Different sender -> False
+    assert (
+        router.is_message_handled(
+            "om_other_sender",
+            chat_id="oc_chat_1",
+            thread_id="omt_topic_1",
+            sender_id="ou_bob",
+            text=text,
+            created_at_ms=ts_ms,
+        )
+        is False
+    )
+    # Exact match across namespaces binds om_exact_1 and rejects any subsequent om_exact_2
+    assert (
+        router.is_message_handled(
+            "om_exact_1",
+            chat_id="oc_chat_1",
+            thread_id="omt_topic_1",
+            sender_id="ou_alice",
+            text=text,
+            created_at_ms=ts_ms,
+        )
+        is True
+    )
+    assert (
+        router.is_message_handled(
+            "om_exact_2",
+            chat_id="oc_chat_1",
+            thread_id="omt_topic_1",
+            sender_id="ou_alice",
+            text=text,
+            created_at_ms=ts_ms,
+        )
+        is False
+    )
+
+
+@pytest.mark.asyncio
+async def test_c2_r4_equal_second_history_page_and_slow_triage_thread_quote_do_not_suppress(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """C2-R4 regression: list_messages_page with ascending-position messages_at and _is_answered_by on equal-time unrelated thread quotes must not suppress."""
+    from claude_hub.services.demand_patrol.feishu_triage import (
+        _candidate,
+        _is_answered_by,
+    )
+    from claude_hub.services.feishu_web_session.rich import WebChat
+
+    emitted: list[ExternalEvent] = []
+
+    async def sink(event: ExternalEvent) -> bool:
+        emitted.append(event)
+        return True
+
+    poller, _svc, uc = _setup_poller(
+        tmp_path,
+        realtime_config=FeishuRealtimeEventConfig(enabled=True),
+        event_sink=sink,
+    )
+    wt = uc._get_web_transport()
+    assert wt is not None
+
+    # Mock web_client.chats and web_client.messages_at returning ascending positions [pos 10 (owner), pos 11 (question)] at the same second
+    owner_pushed = _build_pushed_via_wire(
+        msg_id="7400000000000004010",
+        from_id=OWNER_WEB_UID,
+        chat_id=ORDINARY_CHAT_WEB_ID,
+        nodes=[T("我先看下上一个问题")],
+        create_time_s=1_760_004_000,
+        position=10,
+    )
+    question_pushed = _build_pushed_via_wire(
+        msg_id="7400000000000004011",
+        from_id=COLLEAGUE_WEB_UID,
+        chat_id=ORDINARY_CHAT_WEB_ID,
+        nodes=[Node(text="@Owner", at=OWNER_WEB_UID), T(" 这个新报错帮忙看下？")],
+        create_time_s=1_760_004_000,
+        position=11,
+        at_me=True,
+    )
+
+    async def fake_chats(_chat_ids: list[str]) -> dict[str, WebChat]:
+        return {
+            ORDINARY_CHAT_WEB_ID: WebChat(
+                id=ORDINARY_CHAT_WEB_ID,
+                name="普通研发讨论群",
+                last_position=11,
+            )
+        }
+
+    async def fake_messages_at(_chat_id: str, _positions: list[int]) -> list[Any]:
+        # Real messages_at sorts ascending by position: pos 10 before pos 11
+        return [owner_pushed.message, question_pushed.message]
+
+    monkeypatch.setattr(wt.web_client, "chats", fake_chats)
+    monkeypatch.setattr(wt.web_client, "messages_at", fake_messages_at)
+
+    # Deliver question_pushed directly (so only _verify_unanswered_via_client -> list_messages_page sees owner_pushed)
+    assert await poller.handle_pushed_web_message(question_pushed) is True
+    assert len(emitted) == 1
+    assert poller.realtime_router.suppressed_replied_count == 0
+
+    # Also verify slow-patrol _is_answered_by does not treat an equal-timestamp quote of an earlier message in the same thread as answering the new question
+    q_cand = _candidate(
+        {
+            "message_id": "om_q_new",
+            "chat_id": "oc_chat",
+            "chat_type": "group",
+            "thread_id": "omt_thread_1",
+            "reply_to": "om_root",
+            "create_time": "1760004000000",
+            "sender": {"id": "ou_colleague", "name": "Alice"},
+            "content": "@Owner 新问题报错了",
+            "mentions": [{"id": OWNER_OPEN_ID}],
+        }
+    )
+    own_unrelated_quote_same_sec = _candidate(
+        {
+            "message_id": "om_own_quote_earlier",
+            "chat_id": "oc_chat",
+            "chat_type": "group",
+            "thread_id": "omt_thread_1",
+            "reply_to": "om_unrelated_old_msg",
+            "create_time": "1760004000000",
+            "sender": {"id": OWNER_OPEN_ID, "name": "Owner"},
+            "content": "顺便回复一下上面那条旧消息",
+            "mentions": [],
+        }
+    )
+    assert _is_answered_by(q_cand, own_unrelated_quote_same_sec) is False
+
+
+@pytest.mark.asyncio
 async def test_sibling_29c6249b_gateway_coexistence_suppresses_courtesy_and_suppressed_ids(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -937,6 +1345,7 @@ async def test_default_dot_event_gateway_integration_and_20m_patrol_suppression(
             {
                 "CLAUDE_HUB_FEISHU_WATCH_CHAT_IDS": [PRIORITY_CHAT_WEB_ID],
                 "CLAUDE_HUB_FEISHU_WATCH_URL_REGEX": r"https?://compute\.example\.com/job/\d+",
+                "CLAUDE_HUB_FEISHU_SUPPRESS_PATROL_WHEN_HEALTHY": True,
             }
         ),
         encoding="utf-8",
@@ -962,7 +1371,7 @@ async def test_default_dot_event_gateway_integration_and_20m_patrol_suppression(
     assert inbox[0]["event_type"] == "im.watch_chat_url"
     assert inbox[0]["severity"] == "urgent"
 
-    # Verify 20m slow patrol is suppressed when the WebSocket realtime stream is healthy
+    # Verify 20m slow patrol is suppressed when the WebSocket realtime stream is healthy and opt-in enabled
     now = datetime(2026, 11, 14, 3, 0, tzinfo=timezone.utc)
     state = PatrolState(config=PatrolConfig(enabled=True, feishu_enabled=True))
     assert feishu_due(state, now, realtime_healthy=False) is True
@@ -975,6 +1384,10 @@ async def test_default_dot_event_gateway_integration_and_20m_patrol_suppression(
     )
 
     monkeypatch.setattr(poller_mod, "_DEFAULT_AI_POLLER", poller)
+    monkeypatch.setattr(
+        "claude_hub.services.demand_patrol.service.get_feishu_realtime_event_router",
+        lambda: poller.realtime_router,
+    )
     poller._frontier_task = type("FakeTask", (), {"done": lambda self: False})()  # type: ignore[assignment]
     poller._on_frontier_state(None)
     assert is_feishu_realtime_stream_healthy() is True

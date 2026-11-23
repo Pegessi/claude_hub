@@ -801,10 +801,19 @@ class FeishuWebUserTransport:
         parsed_msgs = [
             um for m in raw_msgs for um in (self.to_user_message(m, session=s),) if um is not None
         ]
+
+        def _msg_order_key(item: FeishuUserMessage) -> tuple[int, int, int]:
+            wm = self._msg_cache.get(item.message_id)
+            return (
+                item.create_time_ms,
+                wm.position if wm is not None else 0,
+                int(getattr(wm, "topic_position", None) or 0) if wm is not None else 0,
+            )
+
         if sort_type == "ByCreateTimeDesc":
-            parsed_msgs.sort(key=lambda item: item.create_time_ms, reverse=True)
+            parsed_msgs.sort(key=_msg_order_key, reverse=True)
         else:
-            parsed_msgs.sort(key=lambda item: item.create_time_ms)
+            parsed_msgs.sort(key=_msg_order_key)
         has_more = start_pos > 0
         next_tok = str(start_pos - 1) if has_more else ""
         return FeishuMessagePage(items=tuple(parsed_msgs), has_more=has_more, page_token=next_tok)

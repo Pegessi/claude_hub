@@ -175,20 +175,14 @@ def _iter_richtext_nodes(typ: int, content: bytes) -> list[Mapping[str, Any]]:
     for root_field in ("elementIds", "atIds", "anchorIds"):
         raw_ids = rich.get(root_field)
         if isinstance(raw_ids, list):
-            for k in raw_ids:
-                ks = _str(k)
-                if ks and ks not in ordered_keys:
-                    ordered_keys.append(ks)
-    for k in dictionary:
-        ks = _str(k)
-        if ks and ks not in ordered_keys:
-            ordered_keys.append(ks)
+            ordered_keys.extend(_str(k) for k in raw_ids if _str(k))
+    ordered_keys.extend(_str(k) for k in dictionary if _str(k))
 
     visited: set[str] = set()
     nodes: list[Mapping[str, Any]] = []
 
     def visit(key: str, depth: int) -> None:
-        if depth > 25 or key in visited:
+        if depth > 25 or not key or key in visited:
             return
         visited.add(key)
         node = dictionary.get(key)
@@ -209,19 +203,19 @@ def extract_mentioned_user_ids(typ: int, content: bytes) -> tuple[str, ...]:
     """Extract mentioned user IDs from a Feishu web protocol message's richText."""
     mentioned: list[str] = []
     for node in _iter_richtext_nodes(typ, content):
-        if _num(node.get("tag")) != TAG_AT:
-            continue
-        raw_prop = _str(node.get("property"))
+        raw_prop = _str(node.get("property")) if _num(node.get("tag")) == TAG_AT else ""
         if not raw_prop:
             continue
         try:
-            prop_bytes = base64.b64decode(raw_prop.encode("ascii"))
-            prop = decode("lark_entities_RichTextElement_AtProperty", prop_bytes)
+            prop = decode(
+                "lark_entities_RichTextElement_AtProperty",
+                base64.b64decode(raw_prop.encode("ascii")),
+            )
+            uid = _str(prop.get("userId")).strip()
+            if uid and uid not in mentioned:
+                mentioned.append(uid)
         except Exception:
             continue
-        uid = _str(prop.get("userId")).strip()
-        if uid and uid not in mentioned:
-            mentioned.append(uid)
     return tuple(mentioned)
 
 
@@ -237,27 +231,21 @@ def extract_message_urls(typ: int, content: bytes, text: str = "") -> tuple[str,
     for node in _iter_richtext_nodes(typ, content):
         tag = _num(node.get("tag"))
         raw_prop = _str(node.get("property"))
-        if not raw_prop:
+        if not raw_prop or tag not in {TAG_A, TAG_TEXT, TAG_LINK}:
             continue
+        schema = (
+            "lark_entities_RichTextElement_AnchorProperty"
+            if tag == TAG_A
+            else "lark_entities_RichTextElement_TextProperty"
+        )
         try:
-            prop_bytes = base64.b64decode(raw_prop.encode("ascii"))
-        except Exception:
-            continue
-        if tag == TAG_A:
-            try:
-                prop = decode("lark_entities_RichTextElement_AnchorProperty", prop_bytes)
+            prop = decode(schema, base64.b64decode(raw_prop.encode("ascii")))
+            if tag == TAG_A:
                 add_url(_str(prop.get("href")))
-                for match in _HTTP_URL_RE.finditer(_str(prop.get("content"))):
-                    add_url(match.group(0))
-            except Exception:
-                pass
-        elif tag in {TAG_TEXT, TAG_LINK}:
-            try:
-                prop = decode("lark_entities_RichTextElement_TextProperty", prop_bytes)
-                for match in _HTTP_URL_RE.finditer(_str(prop.get("content"))):
-                    add_url(match.group(0))
-            except Exception:
-                pass
+            for match in _HTTP_URL_RE.finditer(_str(prop.get("content"))):
+                add_url(match.group(0))
+        except Exception:
+            pass
 
     combined_text = "\n".join(filter(None, (text, text_of(typ, content) if content else "")))
     for match in _HTTP_URL_RE.finditer(combined_text):
@@ -269,55 +257,13 @@ def _read_runtime_json_documents() -> list[Mapping[str, Any]]:
     home = resolve_runtime_home()
     docs: list[Mapping[str, Any]] = []
     for filename in ("feishu_realtime_events.json", "local_runtime_settings.json"):
-        path = home / filename
         try:
-            data = json.loads(path.read_text(encoding="utf-8"))
+            data = json.loads((home / filename).read_text(encoding="utf-8"))
+            if isinstance(data, Mapping):
+                docs.append(data)
         except (OSError, UnicodeError, ValueError):
             continue
-        if isinstance(data, Mapping):
-            docs.append(data)
     return docs
-
-
-def _split_regex_patterns_outside_braces(text: str) -> list[str]:
-    """Split a string of regex patterns on newlines or top-level commas outside ``{...}``/``[...]``."""
-    results: list[str] = []
-    for line in text.splitlines():
-        stripped_line = line.strip()
-        if not stripped_line:
-            continue
-        buf: list[str] = []
-        brace_depth = 0
-        bracket_depth = 0
-        escaped = False
-        for ch in stripped_line:
-            if escaped:
-                buf.append(ch)
-                escaped = False
-                continue
-            if ch == "\\":
-                buf.append(ch)
-                escaped = True
-                continue
-            if ch == "[" and brace_depth == 0:
-                bracket_depth += 1
-            elif ch == "]" and bracket_depth > 0:
-                bracket_depth -= 1
-            elif ch == "{" and bracket_depth == 0:
-                brace_depth += 1
-            elif ch == "}" and brace_depth > 0:
-                brace_depth -= 1
-            elif ch == "," and brace_depth == 0 and bracket_depth == 0:
-                part = "".join(buf).strip()
-                if part:
-                    results.append(part)
-                buf = []
-                continue
-            buf.append(ch)
-        tail = "".join(buf).strip()
-        if tail:
-            results.append(tail)
-    return results
 
 
 def _setting_values(
@@ -345,15 +291,8 @@ def _setting_values(
             if from_list_item:
                 values.append(text)
                 return
-            if split_commas:
-                for part in re.split(r"[,\n]+", text):
-                    cleaned = part.strip()
-                    if cleaned:
-                        values.append(cleaned)
-            else:
-                for part in _split_regex_patterns_outside_braces(text):
-                    if part:
-                        values.append(part)
+            parts = re.split(r"[,\n]+", text) if split_commas else text.splitlines()
+            values.extend(p.strip() for p in parts if p.strip())
         elif isinstance(raw, Sequence) and not isinstance(raw, (bytes, bytearray)):
             for item in raw:
                 extend_raw(item, from_list_item=True)
@@ -371,24 +310,17 @@ def _setting_values(
 def _setting_bool(
     names: Sequence[str], docs: Sequence[Mapping[str, Any]], *, default: bool
 ) -> bool:
-    for name in names:
-        if name in os.environ:
-            raw = os.environ[name].strip().lower()
+    sources: list[Any] = [os.environ[n] for n in names if n in os.environ]
+    sources.extend(doc[n] for doc in docs for n in names if n in doc)
+    for val in sources:
+        if isinstance(val, bool):
+            return val
+        if isinstance(val, str):
+            raw = val.strip().lower()
             if raw in {"1", "true", "yes", "on"}:
                 return True
             if raw in {"0", "false", "no", "off"}:
                 return False
-    for doc in docs:
-        for name in names:
-            val = doc.get(name)
-            if isinstance(val, bool):
-                return val
-            if isinstance(val, str):
-                raw = val.strip().lower()
-                if raw in {"1", "true", "yes", "on"}:
-                    return True
-                if raw in {"0", "false", "no", "off"}:
-                    return False
     return default
 
 
@@ -403,23 +335,18 @@ class FeishuRealtimeEventConfig:
     actionable_hosts: frozenset[str] = frozenset()
     automated_chat_ids: frozenset[str] = frozenset()
     events_url: str = ""
-    suppress_patrol_when_healthy: bool = True
+    suppress_patrol_when_healthy: bool = False
 
     @classmethod
     def from_runtime(cls) -> FeishuRealtimeEventConfig:
         docs = _read_runtime_json_documents()
         enabled = _setting_bool(
-            ("CLAUDE_HUB_FEISHU_REALTIME_EVENTS_ENABLED", "enabled"),
-            docs,
-            default=True,
+            ("CLAUDE_HUB_FEISHU_REALTIME_EVENTS_ENABLED", "enabled"), docs, default=True
         )
         suppress_patrol = _setting_bool(
-            (
-                "CLAUDE_HUB_FEISHU_SUPPRESS_PATROL_WHEN_HEALTHY",
-                "suppress_patrol_when_healthy",
-            ),
+            ("CLAUDE_HUB_FEISHU_SUPPRESS_PATROL_WHEN_HEALTHY", "suppress_patrol_when_healthy"),
             docs,
-            default=True,
+            default=False,
         )
         watch_ids = frozenset(
             item.casefold()
@@ -476,14 +403,10 @@ class FeishuRealtimeEventConfig:
         automated_chat_ids = frozenset(
             item.casefold()
             for item in _setting_values(
-                ("CLAUDE_HUB_PATROL_AUTOMATED_CHAT_IDS", "automated_chat_ids"),
-                docs,
+                ("CLAUDE_HUB_PATROL_AUTOMATED_CHAT_IDS", "automated_chat_ids"), docs
             )
         )
-        events_urls = _setting_values(
-            ("CLAUDE_HUB_FEISHU_REALTIME_EVENTS_URL", "events_url"),
-            docs,
-        )
+        events_urls = _setting_values(("CLAUDE_HUB_FEISHU_REALTIME_EVENTS_URL", "events_url"), docs)
         return cls(
             enabled=enabled,
             watch_chat_ids=watch_ids,
@@ -539,18 +462,32 @@ def matches_watch_group_url(
     *,
     extra_urls: Sequence[str] = (),
     extra_chat_ids: Sequence[str] = (),
+    message_id: str = "",
 ) -> list[str]:
     """Return matched fault/task URLs if the chat is a configured priority watch group."""
-    cfg = config or FeishuRealtimeEventConfig.from_runtime()
+    router = _DEFAULT_REALTIME_ROUTER
+    cfg = config or (
+        router.resolve_config() if router is not None else FeishuRealtimeEventConfig.from_runtime()
+    )
     candidate_ids = {
         cid.strip().casefold()
         for cid in (chat_id, *extra_chat_ids)
         if isinstance(cid, str) and cid.strip()
     }
+    if router is not None:
+        for cid in list(candidate_ids):
+            candidate_ids.update(router.expand_chat_keys(cid))
     normalized_name = " ".join((chat_name or "").split()).casefold()
     in_watch_group = bool(candidate_ids & cfg.watch_chat_ids) or (
         bool(normalized_name) and normalized_name in cfg.watch_chat_names
     )
+    if not in_watch_group and router is not None:
+        in_watch_group = router.matches_pending_failed_watch_delivery(
+            message_id=message_id,
+            chat_ids=candidate_ids,
+            chat_name=normalized_name,
+            text=text,
+        )
     if not in_watch_group:
         return []
 
@@ -579,14 +516,34 @@ class _OwnerReplyMark:
     message_id: str
 
 
-@dataclass(frozen=True)
+@dataclass
 class _CrossTransportRecord:
     web_msg_id: str
     canonical_msg_id: str
     chat_keys: frozenset[str]
+    thread_id: str
+    sender_ids: frozenset[str]
     content_hash: str
     created_at_ms: int
     recorded_at: float
+
+
+@dataclass
+class _FallbackRecord:
+    item_id: str
+    web_msg_id: str
+    alias_id: str
+    kind: str  # "failed_delivery" | "uncovered_message"
+    generation: int
+    chat_keys: frozenset[str]
+    chat_name: str
+    thread_id: str
+    sender_id: str
+    text: str
+    content_hash: str
+    created_at_ms: int
+    matched_urls: tuple[str, ...] = ()
+    event: ExternalEvent | None = None
 
 
 def _reply_mark_is_newer_or_equal(candidate: _OwnerReplyMark, existing: _OwnerReplyMark) -> bool:
@@ -603,24 +560,41 @@ def _reply_mark_is_newer_or_equal(candidate: _OwnerReplyMark, existing: _OwnerRe
     return True
 
 
+def _is_newer_reply(
+    cand_ms: int,
+    cand_pos: int,
+    cand_tpos: int,
+    *,
+    target_ms: int,
+    target_pos: int,
+    target_tpos: int,
+    direct_anchor: bool = False,
+) -> bool:
+    if cand_ms > target_ms > 0:
+        return True
+    if cand_ms == target_ms and target_ms > 0:
+        if target_pos > 0 and cand_pos > 0:
+            return cand_pos > target_pos
+        if target_tpos > 0 and cand_tpos > 0:
+            return cand_tpos > target_tpos
+        return direct_anchor
+    return False
+
+
 def _parse_created_ms(value: Any) -> int:
     if isinstance(value, bool) or value is None:
         return 0
     if isinstance(value, (int, float)):
         num = float(value)
         return int(num if num > 100_000_000_000 else num * 1000)
-    if isinstance(value, str):
+    if isinstance(value, str) and value.strip():
         raw = value.strip()
-        if not raw:
-            return 0
         if raw.replace(".", "", 1).isdigit():
             num = float(raw)
             return int(num if num > 100_000_000_000 else num * 1000)
         try:
             dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
-            return int(dt.timestamp() * 1000)
+            return int((dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)).timestamp() * 1000)
         except ValueError:
             return 0
     return 0
@@ -643,12 +617,14 @@ class FeishuRealtimeEventRouter:
         self._owner_topic_replies: OrderedDict[tuple[str, str], _OwnerReplyMark] = OrderedDict()
         self._owner_chat_replies: OrderedDict[str, _OwnerReplyMark] = OrderedDict()
         self._owner_parent_replies: OrderedDict[str, _OwnerReplyMark] = OrderedDict()
+        self._known_chat_aliases: dict[str, set[str]] = {}
+        self._pending_fallbacks: OrderedDict[str, _FallbackRecord] = OrderedDict()
+        self._fallback_generation = 0
         self._emitted_count = 0
         self._suppressed_count = 0
         self._suppressed_courtesy_count = 0
         self._suppressed_replied_count = 0
         self._delivery_failed_count = 0
-        self._pending_fallback_count = 0
         self._last_delivery_error: str | None = None
 
     @property
@@ -673,7 +649,11 @@ class FeishuRealtimeEventRouter:
 
     @property
     def pending_fallback_count(self) -> int:
-        return self._pending_fallback_count
+        return len(self._pending_fallbacks)
+
+    @property
+    def fallback_generation(self) -> int:
+        return self._fallback_generation
 
     @property
     def last_delivery_error(self) -> str | None:
@@ -681,13 +661,150 @@ class FeishuRealtimeEventRouter:
 
     @property
     def needs_patrol_fallback(self) -> bool:
-        return self._pending_fallback_count > 0
+        return bool(self._pending_fallbacks)
 
-    def acknowledge_patrol_fallback(self) -> None:
-        """Clear pending fallback flag after a successful Feishu patrol run."""
+    def _add_fallback_record(
+        self,
+        *,
+        item_id: str,
+        web_msg_id: str,
+        alias_id: str = "",
+        kind: str,
+        chat_name: str,
+        chat_keys: set[str],
+        thread_id: str,
+        sender_id: str,
+        text: str,
+        created_at_ms: int,
+        matched_urls: Sequence[str] = (),
+        event: ExternalEvent | None = None,
+        error: str | None = None,
+    ) -> None:
         with self._lock:
-            self._pending_fallback_count = 0
-            self._last_delivery_error = None
+            if error is not None:
+                self._delivery_failed_count += 1
+                self._last_delivery_error = error
+            self._fallback_generation += 1
+            self._pending_fallbacks[item_id] = _FallbackRecord(
+                item_id,
+                web_msg_id,
+                alias_id,
+                kind,
+                self._fallback_generation,
+                frozenset(chat_keys),
+                chat_name,
+                thread_id,
+                sender_id,
+                text,
+                _content_fingerprint(text),
+                created_at_ms,
+                tuple(matched_urls),
+                event,
+            )
+
+    def expand_chat_keys(self, chat_id: str) -> set[str]:
+        clean = (chat_id or "").strip().casefold()
+        with self._lock:
+            return ({clean} | set(self._known_chat_aliases.get(clean, ()))) if clean else set()
+
+    def matches_pending_failed_watch_delivery(
+        self,
+        *,
+        message_id: str = "",
+        chat_ids: set[str] | None = None,
+        chat_name: str = "",
+        text: str = "",
+    ) -> bool:
+        clean_mid = (message_id or "").strip()
+        fp_hash = _content_fingerprint(text) if text.strip() else ""
+        with self._lock:
+            return any(
+                rec.kind == "failed_delivery"
+                and rec.matched_urls
+                and (
+                    (clean_mid and clean_mid in {rec.item_id, rec.web_msg_id, rec.alias_id})
+                    or (chat_ids and (chat_ids & rec.chat_keys))
+                    or (chat_name and rec.chat_name and chat_name == rec.chat_name.casefold())
+                    or (fp_hash and rec.content_hash == fp_hash)
+                )
+                for rec in self._pending_fallbacks.values()
+            )
+
+    def acknowledge_patrol_fallback(
+        self,
+        *,
+        recovered_ids: Sequence[str] | None = None,
+        recovered_candidates: Sequence[Any] = (),
+        seen_ids: Sequence[str] = (),
+        window_start_ms: int | None = None,
+        window_end_ms: int | None = None,
+        max_generation: int | None = None,
+        all_candidates_completed: bool = True,
+    ) -> None:
+        """Clear only recovered/covered fallback items within the scanned generation/window."""
+        with self._lock:
+            if (
+                recovered_ids is None
+                and not recovered_candidates
+                and not seen_ids
+                and window_start_ms is None
+                and window_end_ms is None
+                and max_generation is None
+            ):
+                self._pending_fallbacks.clear()
+                self._last_delivery_error = None
+                return
+            rec_id_set = {str(mid).strip() for mid in (recovered_ids or ()) if str(mid).strip()}
+            seen_id_set = {str(mid).strip() for mid in seen_ids if str(mid).strip()} | rec_id_set
+            for key, rec in list(self._pending_fallbacks.items()):
+                if max_generation is not None and rec.generation > max_generation:
+                    continue
+                if (
+                    window_start_ms is not None
+                    and window_end_ms is not None
+                    and rec.created_at_ms > 0
+                    and not (window_start_ms <= rec.created_at_ms <= window_end_ms)
+                ):
+                    continue
+                direct = bool({rec.item_id, rec.web_msg_id, rec.alias_id} & rec_id_set - {""})
+                matched_alias = rec.alias_id or rec.item_id
+                if not direct:
+                    for cand in recovered_candidates:
+                        cand_dt = getattr(cand, "created_at", None)
+                        cand_ms = int(cand_dt.timestamp() * 1000) if cand_dt is not None else 0
+                        if (
+                            str(getattr(cand, "thread_id", "") or "").strip() == rec.thread_id
+                            and _content_fingerprint(str(getattr(cand, "text", "") or ""))
+                            == rec.content_hash
+                            and (
+                                rec.created_at_ms <= 0
+                                or cand_ms <= 0
+                                or abs(cand_ms - rec.created_at_ms) <= _CROSS_TRANSPORT_MAX_DELTA_MS
+                            )
+                        ):
+                            direct = True
+                            matched_alias = (
+                                str(getattr(cand, "message_id", "") or "").strip() or matched_alias
+                            )
+                            break
+                if direct:
+                    self._record_handled(
+                        rec.web_msg_id or rec.item_id,
+                        alias_id=matched_alias,
+                        chat_keys=set(rec.chat_keys),
+                        thread_id=rec.thread_id,
+                        sender_ids={rec.sender_id.casefold()} if rec.sender_id else None,
+                        text=rec.text,
+                        created_at_ms=rec.created_at_ms,
+                    )
+                    self._pending_fallbacks.pop(key, None)
+                elif rec.kind == "uncovered_message" and all_candidates_completed:
+                    if not seen_id_set or (
+                        {rec.item_id, rec.web_msg_id, rec.alias_id} & seen_id_set - {""}
+                    ):
+                        self._pending_fallbacks.pop(key, None)
+            if not self._pending_fallbacks:
+                self._last_delivery_error = None
 
     def resolve_config(self) -> FeishuRealtimeEventConfig:
         if self._explicit_config is not None:
@@ -710,6 +827,10 @@ class FeishuRealtimeEventRouter:
                 if open_cid:
                     keys.add(str(open_cid).strip().casefold())
         keys.discard("")
+        if len(keys) > 1:
+            with self._lock:
+                for k in keys:
+                    self._known_chat_aliases.setdefault(k, set()).update(keys)
         return keys
 
     def _record_handled(
@@ -718,17 +839,24 @@ class FeishuRealtimeEventRouter:
         *,
         alias_id: str | None = None,
         chat_keys: set[str] | None = None,
+        thread_id: str = "",
+        sender_ids: set[str] | None = None,
         text: str = "",
         created_at_ms: int = 0,
     ) -> None:
         now = time.time()
         clean_mid = (message_id or "").strip()
         clean_alias = (alias_id or "").strip()
+        clean_tid = (thread_id or "").strip()
+        norm_senders = frozenset(
+            s.strip().casefold() for s in (sender_ids or set()) if s and s.strip()
+        )
         with self._lock:
             for mid in (clean_mid, clean_alias):
                 if mid:
                     self._handled_msg_ids[mid] = now
                     self._handled_msg_ids.move_to_end(mid)
+                    self._pending_fallbacks.pop(mid, None)
             while len(self._handled_msg_ids) > _MAX_HANDLED_LEDGER:
                 self._handled_msg_ids.popitem(last=False)
 
@@ -737,6 +865,8 @@ class FeishuRealtimeEventRouter:
                     web_msg_id=clean_mid,
                     canonical_msg_id=clean_alias or clean_mid,
                     chat_keys=frozenset(chat_keys or ()),
+                    thread_id=clean_tid,
+                    sender_ids=norm_senders,
                     content_hash=_content_fingerprint(text),
                     created_at_ms=created_at_ms,
                     recorded_at=now,
@@ -756,72 +886,73 @@ class FeishuRealtimeEventRouter:
         *,
         chat_id: str = "",
         thread_id: str = "",
+        sender_id: str = "",
         text: str = "",
         created_at_ms: int = 0,
     ) -> bool:
-        _ = thread_id
         clean_mid = (message_id or "").strip()
+        clean_tid = (thread_id or "").strip()
+        clean_sid = (sender_id or "").strip().casefold()
         with self._lock:
             if clean_mid and clean_mid in self._handled_msg_ids:
                 return True
             # Cross-transport bridge (OpenAPI om_... vs Web numeric ID):
-            # Never deduplicate two distinct message IDs in the same namespace by text!
+            # Require non-conflicting canonical alias, non-empty chat match, identical thread/topic,
+            # matching sender (when known), and identical second-precision creation timestamp.
             if clean_mid.startswith("om_") and text.strip():
-                now_s = time.time()
-                fp_hash = _content_fingerprint(text)
                 ck = chat_id.strip().casefold() if chat_id else ""
+                if not ck or created_at_ms <= 0:
+                    return False
+                fp_hash = _content_fingerprint(text)
                 for rec in reversed(self._cross_transport_records.values()):
                     if rec.web_msg_id.startswith("om_"):
                         continue
+                    if rec.canonical_msg_id.startswith("om_") and rec.canonical_msg_id != clean_mid:
+                        continue
                     if rec.content_hash != fp_hash:
                         continue
-                    if ck and rec.chat_keys and ck not in rec.chat_keys:
+                    if not rec.chat_keys or ck not in rec.chat_keys:
                         continue
-                    if created_at_ms > 0 and rec.created_at_ms > 0:
-                        if abs(created_at_ms - rec.created_at_ms) > _CROSS_TRANSPORT_MAX_DELTA_MS:
-                            continue
-                    elif abs(now_s - rec.recorded_at) * 1000.0 > _CROSS_TRANSPORT_MAX_DELTA_MS:
+                    if rec.thread_id != clean_tid:
                         continue
+                    if clean_sid and rec.sender_ids and clean_sid not in rec.sender_ids:
+                        continue
+                    if rec.created_at_ms <= 0 or (created_at_ms // 1000) != (
+                        rec.created_at_ms // 1000
+                    ):
+                        continue
+                    rec.canonical_msg_id = clean_mid
+                    self._handled_msg_ids[clean_mid] = rec.recorded_at
                     return True
         return False
 
-    def should_suppress_openapi_mention(
-        self,
-        message: Mapping[str, Any],
-        own_id: str,
-    ) -> bool:
+    def should_suppress_openapi_mention(self, message: Mapping[str, Any], own_id: str) -> bool:
         """Shared suppression gate for OpenAPI mention pollers (`events_bridge.poll_mentions`)."""
         msg_id = str(message.get("message_id") or "").strip()
         chat_id = str(message.get("chat_id") or "").strip()
         thread_id = str(message.get("thread_id") or message.get("root_id") or "").strip()
         reply_to = str(message.get("reply_to") or message.get("parent_id") or "").strip()
         raw_content = message.get("content", message.get("text", ""))
-        if isinstance(raw_content, Mapping):
-            text = str(raw_content.get("text") or raw_content.get("content") or "")
-        else:
-            text = str(raw_content or "")
+        text = (
+            str(raw_content.get("text") or raw_content.get("content") or "")
+            if isinstance(raw_content, Mapping)
+            else str(raw_content or "")
+        )
         created_ms = _parse_created_ms(message.get("create_time"))
-
-        if is_courtesy_or_ack_only(text):
-            return True
-        if self.is_message_handled(
-            msg_id,
-            chat_id=chat_id,
-            thread_id=thread_id,
-            text=text,
-            created_at_ms=created_ms,
-        ):
-            return True
-        if self.has_owner_replied(
-            chat_id=chat_id,
-            thread_id=thread_id,
-            reply_to=reply_to,
-            message_id=msg_id,
-            created_at_ms=created_ms,
-            owner_ids={own_id.strip()} if own_id and own_id.strip() else None,
-        ):
-            return True
-        return False
+        return bool(
+            is_courtesy_or_ack_only(text)
+            or self.is_message_handled(
+                msg_id, chat_id=chat_id, thread_id=thread_id, text=text, created_at_ms=created_ms
+            )
+            or self.has_owner_replied(
+                chat_id=chat_id,
+                thread_id=thread_id,
+                reply_to=reply_to,
+                message_id=msg_id,
+                created_at_ms=created_ms,
+                owner_ids={own_id.strip()} if own_id and own_id.strip() else None,
+            )
+        )
 
     def record_owner_pushed_message(
         self,
@@ -837,24 +968,26 @@ class FeishuRealtimeEventRouter:
             user_msg.thread_id or (msg.thread_id or msg.root_id if is_in_topic(msg) else "") or ""
         ).strip()
         mark = _OwnerReplyMark(
-            create_time_ms=max(user_msg.create_time_ms, msg.create_time_ms),
-            position=msg.position,
-            topic_position=int(getattr(msg, "topic_position", None) or 0),
-            message_id=user_msg.message_id,
+            max(user_msg.create_time_ms, msg.create_time_ms),
+            msg.position,
+            int(getattr(msg, "topic_position", None) or 0),
+            user_msg.message_id,
         )
+
+        def _put_mark(store: OrderedDict[Any, _OwnerReplyMark], k: Any) -> None:
+            prev = store.get(k)
+            if prev is None or _reply_mark_is_newer_or_equal(mark, prev):
+                store[k] = mark
+                store.move_to_end(k)
+                while len(store) > _MAX_REPLY_TRACKER:
+                    store.popitem(last=False)
+
         with self._lock:
             for ck in chat_keys:
                 if topic_id:
-                    key = (ck, topic_id)
-                    prev = self._owner_topic_replies.get(key)
-                    if prev is None or _reply_mark_is_newer_or_equal(mark, prev):
-                        self._owner_topic_replies[key] = mark
-                        self._owner_topic_replies.move_to_end(key)
+                    _put_mark(self._owner_topic_replies, (ck, topic_id))
                 else:
-                    prev_chat = self._owner_chat_replies.get(ck)
-                    if prev_chat is None or _reply_mark_is_newer_or_equal(mark, prev_chat):
-                        self._owner_chat_replies[ck] = mark
-                        self._owner_chat_replies.move_to_end(ck)
+                    _put_mark(self._owner_chat_replies, ck)
             for parent_ref in {
                 msg.parent_id.strip(),
                 msg.root_id.strip(),
@@ -863,26 +996,11 @@ class FeishuRealtimeEventRouter:
                 topic_id,
             }:
                 if parent_ref:
-                    prev_parent = self._owner_parent_replies.get(parent_ref)
-                    if prev_parent is None or _reply_mark_is_newer_or_equal(mark, prev_parent):
-                        self._owner_parent_replies[parent_ref] = mark
-                        self._owner_parent_replies.move_to_end(parent_ref)
+                    _put_mark(self._owner_parent_replies, parent_ref)
                     if web_transport is not None and hasattr(web_transport, "get_message_alias"):
                         alias = web_transport.get_message_alias(parent_ref)
                         if alias:
-                            prev_alias = self._owner_parent_replies.get(alias)
-                            if prev_alias is None or _reply_mark_is_newer_or_equal(
-                                mark, prev_alias
-                            ):
-                                self._owner_parent_replies[alias] = mark
-                                self._owner_parent_replies.move_to_end(alias)
-
-            while len(self._owner_topic_replies) > _MAX_REPLY_TRACKER:
-                self._owner_topic_replies.popitem(last=False)
-            while len(self._owner_chat_replies) > _MAX_REPLY_TRACKER:
-                self._owner_chat_replies.popitem(last=False)
-            while len(self._owner_parent_replies) > _MAX_REPLY_TRACKER:
-                self._owner_parent_replies.popitem(last=False)
+                            _put_mark(self._owner_parent_replies, alias)
 
     def has_owner_replied(
         self,
@@ -906,34 +1024,31 @@ class FeishuRealtimeEventRouter:
         def _mark_is_newer(mark: _OwnerReplyMark, *, direct_anchor: bool = False) -> bool:
             if mark.message_id and mark.message_id == clean_mid:
                 return False
-            if mark.create_time_ms > created_at_ms > 0:
-                return True
-            if mark.create_time_ms == created_at_ms and created_at_ms > 0:
-                if position > 0 and mark.position > 0:
-                    return mark.position > position
-                if topic_position > 0 and mark.topic_position > 0:
-                    return mark.topic_position > topic_position
-                return direct_anchor
-            return False
+            return _is_newer_reply(
+                mark.create_time_ms,
+                mark.position,
+                mark.topic_position,
+                target_ms=created_at_ms,
+                target_pos=position,
+                target_tpos=topic_position,
+                direct_anchor=direct_anchor,
+            )
 
         with self._lock:
-            # Direct reply to message_id itself is a true direct anchor
             if clean_mid and clean_mid in self._owner_parent_replies:
                 if _mark_is_newer(self._owner_parent_replies[clean_mid], direct_anchor=True):
                     return True
-            # Sibling reply to the same parent is a thread/parent peer, not a direct child of message_id
             if clean_reply_to and clean_reply_to in self._owner_parent_replies:
                 if _mark_is_newer(self._owner_parent_replies[clean_reply_to], direct_anchor=False):
                     return True
             for ck in chat_keys:
-                if clean_tid:
-                    mark = self._owner_topic_replies.get((ck, clean_tid))
-                    if mark is not None and _mark_is_newer(mark, direct_anchor=False):
-                        return True
-                else:
-                    mark = self._owner_chat_replies.get(ck)
-                    if mark is not None and _mark_is_newer(mark, direct_anchor=False):
-                        return True
+                mark = (
+                    self._owner_topic_replies.get((ck, clean_tid))
+                    if clean_tid
+                    else self._owner_chat_replies.get(ck)
+                )
+                if mark is not None and _mark_is_newer(mark, direct_anchor=False):
+                    return True
 
         if web_transport is not None and owner_ids:
             msg_cache = getattr(web_transport, "_msg_cache", None)
@@ -946,33 +1061,30 @@ class FeishuRealtimeEventRouter:
                     cached_text = describe(cached.type, cached.content, "").strip()
                     if cached_text.lower().startswith("/ai") and cached.parent_id != clean_mid:
                         continue
-                    cached_chat_keys = self._chat_keys(cached.chat_id, web_transport)
-                    if not (chat_keys & cached_chat_keys):
+                    if not (chat_keys & self._chat_keys(cached.chat_id, web_transport)):
                         continue
                     direct_reply = cached.parent_id == clean_mid or cached.root_id == clean_mid
                     same_parent = bool(clean_reply_to) and cached.parent_id == clean_reply_to
                     cached_topic = (
                         cached.thread_id or cached.root_id if is_in_topic(cached) else ""
                     ).strip()
-                    same_topic = bool(clean_tid) and cached_topic == clean_tid
-                    same_main_chat = not clean_tid and not cached_topic
-                    if not (direct_reply or same_parent or same_topic or same_main_chat):
+                    if not (
+                        direct_reply
+                        or same_parent
+                        or (bool(clean_tid) and cached_topic == clean_tid)
+                        or (not clean_tid and not cached_topic)
+                    ):
                         continue
-                    c_ms = cached.create_time_ms
-                    if c_ms > created_at_ms > 0:
+                    if _is_newer_reply(
+                        cached.create_time_ms,
+                        cached.position,
+                        int(getattr(cached, "topic_position", None) or 0),
+                        target_ms=created_at_ms,
+                        target_pos=position,
+                        target_tpos=topic_position,
+                        direct_anchor=direct_reply,
+                    ):
                         return True
-                    if c_ms == created_at_ms and created_at_ms > 0:
-                        if position > 0 and cached.position > 0:
-                            if cached.position > position:
-                                return True
-                            continue
-                        cached_tpos = int(getattr(cached, "topic_position", None) or 0)
-                        if topic_position > 0 and cached_tpos > 0:
-                            if cached_tpos > topic_position:
-                                return True
-                            continue
-                        if direct_reply:
-                            return True
         return False
 
     async def _verify_unanswered_via_client(
@@ -983,19 +1095,21 @@ class FeishuRealtimeEventRouter:
         thread_id: str,
         message_id: str,
         created_at_ms: int,
+        position: int = 0,
+        topic_position: int = 0,
+        web_transport: Any = None,
         owner_ids: set[str],
     ) -> bool:
         """Best-effort check of latest thread/chat messages; returns True if owner already replied."""
         if user_client is None or not hasattr(user_client, "list_messages_page"):
             return False
-        container_type = "thread" if thread_id else "chat"
         container_id = thread_id if thread_id else chat_id
         if not container_id:
             return False
         try:
             async with asyncio.timeout(2.5):
                 page = await user_client.list_messages_page(
-                    container_id_type=container_type,
+                    container_id_type="thread" if thread_id else "chat",
                     container_id=container_id,
                     sort_type="ByCreateTimeDesc",
                     page_size=20,
@@ -1005,37 +1119,40 @@ class FeishuRealtimeEventRouter:
         except Exception:
             return False
 
-        seen_target = False
+        msg_cache = (
+            getattr(web_transport, "_msg_cache", None) if web_transport is not None else None
+        )
         for item in getattr(page, "items", ()):
-            if not isinstance(item, FeishuUserMessage):
+            if (
+                not isinstance(item, FeishuUserMessage)
+                or item.message_id == message_id
+                or item.sender_open_id not in owner_ids
+            ):
                 continue
-            if item.message_id == message_id:
-                seen_target = True
-                continue
-            if item.sender_open_id not in owner_ids:
+            if item.text.strip().lower().startswith("/ai") and item.parent_id != message_id:
                 continue
             direct_reply = item.parent_id == message_id or item.root_id == message_id
-            same_scope = (
-                (bool(thread_id) and (item.thread_id == thread_id or item.root_id == thread_id))
+            if not (
+                direct_reply
+                or (bool(thread_id) and (item.thread_id == thread_id or item.root_id == thread_id))
                 or (not thread_id and not item.thread_id)
-                or direct_reply
-            )
-            if not same_scope:
+            ):
                 continue
-            if item.create_time_ms > created_at_ms > 0:
-                return True
-            if direct_reply and item.create_time_ms >= created_at_ms:
-                return True
-            # In ByCreateTimeDesc order, items appearing before message_id with equal timestamp are newer
-            if not seen_target and item.create_time_ms == created_at_ms and created_at_ms > 0:
+            wm = msg_cache.get(item.message_id) if isinstance(msg_cache, Mapping) else None
+            if _is_newer_reply(
+                item.create_time_ms,
+                wm.position if wm is not None else 0,
+                int(getattr(wm, "topic_position", None) or 0) if wm is not None else 0,
+                target_ms=created_at_ms,
+                target_pos=position,
+                target_tpos=topic_position,
+                direct_anchor=direct_reply,
+            ):
                 return True
         return False
 
     async def _ensure_chat_metadata(
-        self,
-        web_chat_id: str,
-        web_transport: Any,
-        cfg: FeishuRealtimeEventConfig,
+        self, web_chat_id: str, web_transport: Any, cfg: FeishuRealtimeEventConfig
     ) -> tuple[str, str]:
         """Resolve (open_chat_id, chat_name) from web_transport cache or gateway when needed."""
         if web_transport is None or not web_chat_id:
@@ -1047,16 +1164,14 @@ class FeishuRealtimeEventRouter:
             open_map.get(web_chat_id) or getattr(cached, "open_chat_id", "") or ""
         ).strip()
         chat_name = str(getattr(cached, "name", "") or "").strip()
-
-        needs_lookup = (
+        if (
             cached is None
             and (
                 any(cid.startswith("oc_") for cid in cfg.watch_chat_ids)
                 or bool(cfg.watch_chat_names)
             )
             and web_chat_id.strip().casefold() not in cfg.watch_chat_ids
-        )
-        if needs_lookup:
+        ):
             web_client = getattr(web_transport, "web_client", None) or getattr(
                 web_transport, "_web", None
             )
@@ -1076,11 +1191,7 @@ class FeishuRealtimeEventRouter:
                     pass
         return open_chat_id, chat_name
 
-    async def _deliver_event(
-        self,
-        event: ExternalEvent,
-        cfg: FeishuRealtimeEventConfig,
-    ) -> bool:
+    async def _deliver_event(self, event: ExternalEvent, cfg: FeishuRealtimeEventConfig) -> bool:
         if self._event_sink is not None:
             res = await self._event_sink(event)
             if isinstance(res, bool):
@@ -1088,7 +1199,6 @@ class FeishuRealtimeEventRouter:
             if isinstance(res, Mapping):
                 return res.get("status") in {"accepted", "duplicate", True}
             return True
-
         if cfg.events_url:
             headers = {"Content-Type": "application/json"}
             token = os.environ.get("CLAUDE_HUB_DOT_EVENTS_TOKEN", "").strip()
@@ -1102,7 +1212,6 @@ class FeishuRealtimeEventRouter:
                 )
                 resp.raise_for_status()
                 return True
-
         return await submit_external_event(event)
 
     async def handle_pushed_message(
@@ -1118,7 +1227,6 @@ class FeishuRealtimeEventRouter:
         """Inspect one pushed web message and emit an urgent Dot event when matched and unanswered."""
         if pushed.removed or pushed.message.recalled or pushed.message.type == TYPE_SYSTEM:
             return False
-
         eff_owner_ids = {oid.strip() for oid in (owner_ids or set()) if oid and oid.strip()}
         if (
             is_owner_sender
@@ -1127,41 +1235,30 @@ class FeishuRealtimeEventRouter:
         ):
             self.record_owner_pushed_message(pushed, user_msg, web_transport=web_transport)
             return False
-
         cfg = self.resolve_config()
-        if not cfg.enabled:
-            return False
-
         msg = pushed.message
         web_chat_id = (msg.chat_id or user_msg.chat_id).strip()
-        if not web_chat_id:
-            return False
-
-        # Automated sender prefix check
-        if user_msg.sender_open_id.startswith(("cli_", "app_", "bot_")) or msg.from_id.startswith(
-            ("cli_", "app_", "bot_")
+        if (
+            not cfg.enabled
+            or not web_chat_id
+            or user_msg.sender_open_id.startswith(("cli_", "app_", "bot_"))
+            or msg.from_id.startswith(("cli_", "app_", "bot_"))
         ):
             return False
-
         mentioned_ids = extract_mentioned_user_ids(msg.type, msg.content)
         full_text = describe(msg.type, msg.content, "").strip() or user_msg.text.strip()
         urls = extract_message_urls(msg.type, msg.content, full_text)
-
         mentioned_owner = bool(eff_owner_ids.intersection(mentioned_ids))
         only_at_all = bool(mentioned_ids) and set(mentioned_ids) <= {"all", "@all"}
         is_at_me = mentioned_owner or (bool(pushed.at_me) and not only_at_all)
-
         open_chat_id, chat_name = await self._ensure_chat_metadata(web_chat_id, web_transport, cfg)
         chat_keys = self._chat_keys(web_chat_id, web_transport)
         if open_chat_id:
             chat_keys.add(open_chat_id.casefold())
-
         if chat_keys & cfg.automated_chat_ids:
             return False
-
-        matched_urls: list[str] = []
-        if urls and (cfg.url_patterns or cfg.actionable_hosts):
-            matched_urls = matches_watch_group_url(
+        matched_urls = (
+            matches_watch_group_url(
                 web_chat_id,
                 chat_name,
                 full_text,
@@ -1169,14 +1266,15 @@ class FeishuRealtimeEventRouter:
                 extra_urls=urls,
                 extra_chat_ids=[open_chat_id] if open_chat_id else (),
             )
+            if urls and (cfg.url_patterns or cfg.actionable_hosts)
+            else []
+        )
         is_watch_group_url = bool(matched_urls)
-
         topic_id = (
             user_msg.thread_id or (msg.thread_id or msg.root_id if is_in_topic(msg) else "") or ""
         ).strip()
 
         if not is_at_me and not is_watch_group_url:
-            # Preserve slow patrol fallback when an uncovered P2P or thread message is actionable
             is_p2p = pushed.chat_type == CHAT_P2P
             in_participated_topic = bool(
                 topic_id and any((ck, topic_id) in self._owner_topic_replies for ck in chat_keys)
@@ -1188,8 +1286,17 @@ class FeishuRealtimeEventRouter:
                     or "？" in full_text
                     or bool(urls)
                 ):
-                    with self._lock:
-                        self._pending_fallback_count += 1
+                    self._add_fallback_record(
+                        item_id=user_msg.message_id,
+                        web_msg_id=user_msg.message_id,
+                        kind="uncovered_message",
+                        chat_name=chat_name,
+                        chat_keys=chat_keys,
+                        thread_id=topic_id,
+                        sender_id=user_msg.sender_open_id,
+                        text=full_text,
+                        created_at_ms=user_msg.create_time_ms,
+                    )
             return False
 
         alias_id = (
@@ -1202,32 +1309,41 @@ class FeishuRealtimeEventRouter:
             if isinstance(alias_id, str) and alias_id.startswith("om_")
             else user_msg.message_id
         )
+        sender_id_set = {
+            s.strip().casefold()
+            for s in (user_msg.sender_open_id, msg.from_id)
+            if isinstance(s, str) and s.strip()
+        }
 
         if self.is_message_handled(
             canonical_msg_id,
             chat_id=open_chat_id or web_chat_id,
             thread_id=topic_id,
+            sender_id=user_msg.sender_open_id,
             text=full_text,
             created_at_ms=user_msg.create_time_ms,
         ) or self.is_message_handled(
             user_msg.message_id,
             chat_id=web_chat_id,
             thread_id=topic_id,
+            sender_id=msg.from_id or user_msg.sender_open_id,
             text=full_text,
             created_at_ms=user_msg.create_time_ms,
         ):
             return False
 
-        # Gate 1: Courtesy / simple confirmation closing suppression
-        if not is_watch_group_url and (
-            is_courtesy_or_ack_only(user_msg.text) or is_courtesy_or_ack_only(full_text)
-        ):
+        async def _suppress(courtesy: bool) -> bool:
             self._suppressed_count += 1
-            self._suppressed_courtesy_count += 1
+            if courtesy:
+                self._suppressed_courtesy_count += 1
+            else:
+                self._suppressed_replied_count += 1
             self._record_handled(
                 user_msg.message_id,
                 alias_id=canonical_msg_id,
                 chat_keys=chat_keys,
+                thread_id=topic_id,
+                sender_ids=sender_id_set,
                 text=full_text,
                 created_at_ms=user_msg.create_time_ms,
             )
@@ -1239,9 +1355,14 @@ class FeishuRealtimeEventRouter:
                         pass
             return False
 
+        # Gate 1: Courtesy / simple confirmation closing suppression
+        if not is_watch_group_url and (
+            is_courtesy_or_ack_only(user_msg.text) or is_courtesy_or_ack_only(full_text)
+        ):
+            return await _suppress(courtesy=True)
+
         # Gate 2: Owner already replied in the same chat/topic after this message
-        # Only consider an owner's own `/ai ...` command as a reply when it is a direct reply to this message;
-        # an unrelated `/ai` command in the main chat is a Hub command, not a reply to a colleague's mention.
+        msg_tpos = int(getattr(msg, "topic_position", None) or 0)
         already_replied = self.has_owner_replied(
             chat_id=web_chat_id,
             thread_id=topic_id,
@@ -1249,7 +1370,7 @@ class FeishuRealtimeEventRouter:
             message_id=user_msg.message_id,
             created_at_ms=user_msg.create_time_ms,
             position=msg.position,
-            topic_position=int(getattr(msg, "topic_position", None) or 0),
+            topic_position=msg_tpos,
             web_transport=web_transport,
             owner_ids=eff_owner_ids,
         )
@@ -1260,25 +1381,13 @@ class FeishuRealtimeEventRouter:
                 thread_id=topic_id,
                 message_id=user_msg.message_id,
                 created_at_ms=user_msg.create_time_ms,
+                position=msg.position,
+                topic_position=msg_tpos,
+                web_transport=web_transport,
                 owner_ids=eff_owner_ids,
             )
         if already_replied:
-            self._suppressed_count += 1
-            self._suppressed_replied_count += 1
-            self._record_handled(
-                user_msg.message_id,
-                alias_id=canonical_msg_id,
-                chat_keys=chat_keys,
-                text=full_text,
-                created_at_ms=user_msg.create_time_ms,
-            )
-            for sup_key in {user_msg.message_id, canonical_msg_id}:
-                if sup_key:
-                    try:
-                        await record_suppressed_external_event("feishu", sup_key[:256])
-                    except Exception:
-                        pass
-            return False
+            return await _suppress(courtesy=False)
 
         primary_url_str = matched_urls[0] if matched_urls else (urls[0] if urls else "")
         parsed_url: HttpUrl | None = None
@@ -1292,19 +1401,14 @@ class FeishuRealtimeEventRouter:
         title = "Feishu mention" if is_at_me else "Feishu watch-group issue link"
         chat_label = chat_name or open_chat_id or web_chat_id
         summary_parts = [
-            part
-            for part in (
-                chat_label[:120],
-                user_msg.sender_open_id[:80],
-                full_text[:600],
-            )
-            if part
+            p for p in (chat_label[:120], user_msg.sender_open_id[:80], full_text[:600]) if p
         ]
+        chat_type_str = "p2p" if pushed.chat_type == CHAT_P2P else "group"
         payload: dict[str, JsonValue] = {
             "chat_id": open_chat_id or web_chat_id,
             "web_chat_id": web_chat_id,
             "chat_name": chat_name[:200],
-            "chat_type": "p2p" if pushed.chat_type == CHAT_P2P else "group",
+            "chat_type": chat_type_str,
             "message_id": canonical_msg_id,
             "web_message_id": user_msg.message_id,
             "thread_id": topic_id,
@@ -1323,27 +1427,37 @@ class FeishuRealtimeEventRouter:
             url=parsed_url,
             payload=payload,
         )
+        delivery_err: str | None = None
         try:
             delivered = await self._deliver_event(event, cfg)
+            if not delivered:
+                delivery_err = "rejected"
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            with self._lock:
-                self._delivery_failed_count += 1
-                self._pending_fallback_count += 1
-                self._last_delivery_error = str(exc) or type(exc).__name__
+            delivery_err = str(exc) or type(exc).__name__
             logger.warning(
                 "Feishu real-time event delivery failed for %s",
                 canonical_msg_id,
                 exc_info=True,
             )
-            return False
 
-        if not delivered:
-            with self._lock:
-                self._delivery_failed_count += 1
-                self._pending_fallback_count += 1
-                self._last_delivery_error = "rejected"
+        if delivery_err is not None:
+            self._add_fallback_record(
+                item_id=canonical_msg_id,
+                web_msg_id=user_msg.message_id,
+                alias_id=canonical_msg_id if canonical_msg_id != user_msg.message_id else "",
+                kind="failed_delivery",
+                chat_name=chat_name,
+                chat_keys=chat_keys,
+                thread_id=topic_id,
+                sender_id=user_msg.sender_open_id,
+                text=full_text,
+                created_at_ms=user_msg.create_time_ms,
+                matched_urls=matched_urls or urls,
+                event=event,
+                error=delivery_err,
+            )
             return False
 
         self._emitted_count += 1
@@ -1351,6 +1465,8 @@ class FeishuRealtimeEventRouter:
             user_msg.message_id,
             alias_id=canonical_msg_id,
             chat_keys=chat_keys,
+            thread_id=topic_id,
+            sender_ids=sender_id_set,
             text=full_text,
             created_at_ms=user_msg.create_time_ms,
         )

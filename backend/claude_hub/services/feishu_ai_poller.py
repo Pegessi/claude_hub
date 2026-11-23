@@ -222,8 +222,18 @@ class FeishuAiPoller:
         )
         self._realtime_event_queue.move_to_end(msg_id)
         while len(self._realtime_event_queue) > 256:
-            self._realtime_event_queue.popitem(last=False)
-            self._realtime_router._pending_fallback_count += 1
+            dropped_id, (_, dropped_um, _, _, _, _) = self._realtime_event_queue.popitem(last=False)
+            self._realtime_router._add_fallback_record(
+                item_id=dropped_id,
+                web_msg_id=dropped_id,
+                kind="uncovered_message",
+                chat_name="",
+                chat_keys={dropped_um.chat_id.casefold()} if dropped_um.chat_id else set(),
+                thread_id=dropped_um.thread_id or "",
+                sender_id=dropped_um.sender_open_id,
+                text=dropped_um.text,
+                created_at_ms=dropped_um.create_time_ms,
+            )
         if self._realtime_queue_worker is None or self._realtime_queue_worker.done():
             task = asyncio.create_task(
                 self._drain_realtime_event_queue(),

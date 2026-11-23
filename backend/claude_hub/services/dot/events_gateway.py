@@ -194,6 +194,7 @@ def _should_suppress_incoming_feishu_event(event: ExternalEvent) -> bool:
     if event.source != "feishu" or event.event_type != "im.mention":
         return False
     from claude_hub.services.feishu_realtime_events import (
+        _parse_created_ms,
         get_feishu_realtime_event_router,
         is_courtesy_or_ack_only,
     )
@@ -202,6 +203,9 @@ def _should_suppress_incoming_feishu_event(event: ExternalEvent) -> bool:
     text = str(payload.get("text") or "").strip()
     chat_id = str(payload.get("chat_id") or payload.get("web_chat_id") or "").strip()
     thread_id = str(payload.get("thread_id") or "").strip()
+    reply_to = str(payload.get("reply_to") or payload.get("parent_id") or "").strip()
+    sender_id = str(payload.get("sender_id") or "").strip()
+    created_ms = _parse_created_ms(payload.get("create_time") or payload.get("created_at_ms"))
     message_id = str(payload.get("message_id") or event.dedupe_key or "").strip()
     if text and is_courtesy_or_ack_only(text):
         return True
@@ -210,13 +214,17 @@ def _should_suppress_incoming_feishu_event(event: ExternalEvent) -> bool:
         message_id,
         chat_id=chat_id,
         thread_id=thread_id,
+        sender_id=sender_id,
         text=text,
+        created_at_ms=created_ms,
     ):
         return True
     if chat_id and router.has_owner_replied(
         chat_id=chat_id,
         thread_id=thread_id,
+        reply_to=reply_to,
         message_id=message_id,
+        created_at_ms=created_ms,
     ):
         return True
     return False

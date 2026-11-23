@@ -112,10 +112,13 @@ def feishu_due(
     router = get_feishu_realtime_event_router()
     rt_cfg = router.resolve_config()
     if realtime_healthy is None:
-        realtime_healthy = is_feishu_realtime_stream_healthy()
-    elif realtime_healthy and router.needs_patrol_fallback:
-        realtime_healthy = False
-    if realtime_healthy and rt_cfg.suppress_patrol_when_healthy:
+        if (
+            rt_cfg.suppress_patrol_when_healthy
+            and is_feishu_realtime_stream_healthy()
+            and not router.needs_patrol_fallback
+        ):
+            return False
+    elif realtime_healthy and not router.needs_patrol_fallback:
         return False
     local = now.astimezone(ZoneInfo(config.timezone))
     clock = local.strftime("%H:%M")
