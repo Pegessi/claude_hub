@@ -148,6 +148,7 @@ class SessionCore(ABC):
         # If that response is lost, completion or confirmed Stop still owns the
         # live turn; generic send failure cleanup must not release its guard.
         self._delivery_uncertain = False
+        self._submission_delivery_uncertain = False
         # Completion can settle execution while the request response reports a
         # contradictory rejection. Runtime input surfaces that response without
         # writing a second terminal edge.
@@ -401,10 +402,11 @@ class SessionCore(ABC):
         (both lock-free); this method owns the lock and the turn guard.
         """
         async with self._send_lock:
+            self._submission_delivery_uncertain = False
+            self._submission_outcome_uncertain = False
             await self._prepare_for_send()
             self.check_delivery_admission()
             self._delivery_uncertain = False
-            self._submission_outcome_uncertain = False
             self._begin_turn()
             try:
                 if images:

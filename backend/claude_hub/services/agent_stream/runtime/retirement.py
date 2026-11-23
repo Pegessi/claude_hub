@@ -46,9 +46,26 @@ class RetirementMixin(SessionState):
             # the same turn (or an untargeted manual Stop).
             if self._turn_teardown_pending:
                 return expected_turn_id is None or self._teardown_turn_id == expected_turn_id
-            if transport is not None and transport.turn_in_flight:
-                if expected_turn_id is not None and self._active_turn_id != expected_turn_id:
+            if transport is not None and (
+                transport.turn_in_flight or getattr(transport, "_delivery_uncertain", False)
+            ):
+                if transport.turn_in_flight:
+                    if expected_turn_id is not None and self._active_turn_id != expected_turn_id:
+                        return False
+                    await self._cancel_active_turn_locked(transport)
+                    return True
+                if self._active_turn_id is not None:
+                    if expected_turn_id is not None and self._active_turn_id != expected_turn_id:
+                        return False
+                    await self._cancel_active_turn_locked(transport)
+                    return True
+                orphan = await self._store.latest_unfinished_turn()
+                if expected_turn_id is not None and (
+                    orphan is None or orphan.turn_id != expected_turn_id
+                ):
                     return False
+                if orphan is not None:
+                    await self._terminalize_orphaned_turn_locked(orphan)
                 await self._cancel_active_turn_locked(transport)
                 return True
 
@@ -70,7 +87,10 @@ class RetirementMixin(SessionState):
             if active_turn_id is not None:
                 if active_turn_id != expected_turn_id:
                     return ExternalTurnRetirement.DIFFERENT_TURN
-                if not turn_in_flight or transport is None:
+                if (
+                    not (turn_in_flight or getattr(transport, "_delivery_uncertain", False))
+                    or transport is None
+                ):
                     return ExternalTurnRetirement.UNKNOWN
                 await self._cancel_active_turn_locked(
                     transport,

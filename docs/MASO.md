@@ -162,9 +162,13 @@ awaits exit/resume finalizers before allowing a fresh subscription.
 MASO's bounded event IDs can reset, so an interrupted connection or failed status
 monitor fails the display turn rather than claiming lossless replay. It does not
 automatically abort remote work. A possibly accepted POST or interrupted delivery
-is quarantined; inspect/stop the remote session in MASO and create a new Chat
-rather than retrying the prompt blindly. Reopening the UI after a backend crash
-is not a lossless backfill of provider output produced while disconnected.
+is quarantined and never automatically resent; later sends remain refused while
+the remote session is active, the pending message UUID is still queued, or
+service status cannot be verified, and unlock once MASO confirms the session
+tree is idle and the pending UUID returns `404` or after an explicit Stop
+completes pending removal, abort, exit and idle confirmation. Reopening the UI
+after a backend crash is not a lossless backfill of provider output produced
+while disconnected.
 
 ## Hub-managed Goals
 
@@ -202,13 +206,20 @@ Abort alone does not remove MASO broker messages. A small delivery sidecar besid
 the Hub event log preserves the owned UUID and session identity across crashes.
 Failed cleanup must succeed before a new prompt can be submitted.
 
-A failed HTTP send can leave acceptance unknown. MASO has no cancellation
-tombstone for a POST that has not reached the broker yet. Hub therefore never
-retries that POST, attempts pending-message removal and abort, and keeps the
-uncertain delivery record. Further sends on that Chat are refused, including
-after a Hub restart. The error explains that the service may still execute the
-message: inspect and stop the session in MASO before starting a new Chat. An
-idle status immediately after a timeout is not proof of cancellation.
+A failed HTTP send or mid-turn stream disconnect can leave acceptance or
+completion unknown. MASO has no cancellation tombstone for a POST that has not
+reached the broker yet. Hub therefore never automatically retries that POST and
+keeps the uncertain delivery record across restarts. Before refusing a subsequent
+send, Hub reconciles against MASO: if `GET /api/sessions/{id}/status` confirms
+the session tree is idle (`is_running=false`, `status=idle`, and no active
+children or condensation) and `GET /api/sessions/{id}/messages/pending/{message_id}`
+returns `404` (not queued), Hub clears the quarantine sidecar and admits the new
+prompt without resending the old one. If the remote session is still active, the
+message UUID remains pending, or the service returns an error/is unreachable,
+further sends stay refused (fail-closed). Explicit Stop (`cancel_active_turn`)
+also runs when `turn_in_flight` is false but an uncertain delivery sidecar is
+present: it deletes the pending message UUID, requests abort, exits the session,
+confirms an idle resumed session, and clears the quarantine sidecar.
 
 This integration supports local Chat, text, images, reasoning, tool output, tool
 confirmations and Hub-managed Goals. Plan mode and editing earlier turns are not

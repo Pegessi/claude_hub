@@ -108,6 +108,7 @@ class MasoServer:
         self.fail_runtime_options = False
         self.ignore_cron_policy = False
         self.fail_status = False
+        self.fail_pending_get = False
         self.malformed_status = False
         self.children: list[dict[str, Any]] = []
         self.indicator: dict[str, Any] = {"running": [], "condensing": {}}
@@ -220,6 +221,19 @@ class MasoServer:
                 await self.abort_release.wait()
             self.running = bool(self.pending)
             return httpx.Response(200, json={"result": "aborting"})
+        if request.method == "GET" and "/messages/pending/" in path:
+            if self.fail_pending_get:
+                return httpx.Response(503, json={"error": "pending lookup unavailable"})
+            message_id = path.rsplit("/", 1)[-1]
+            if message_id in self.pending:
+                return httpx.Response(
+                    200,
+                    json={"id": message_id, "content": self.pending[message_id]},
+                )
+            return httpx.Response(
+                404,
+                json={"detail": "This message has already been received or removed."},
+            )
         if request.method == "DELETE" and "/messages/pending/" in path:
             self.pending.pop(path.rsplit("/", 1)[-1], None)
             return httpx.Response(204)
@@ -2130,6 +2144,228 @@ async def test_input_retained_before_agent_start_can_finish_failed_turn() -> Non
         assert event.turn_id == "input-error" and event.payload["status"] == "failed"
         assert not provider.turn_in_flight and provider._awaiting_message_id is None
         assert not any(path.endswith(("/control", "/exit")) for _, path, _ in server.calls)
+    finally:
+        tailer.unsubscribe_completion(completion)
+        await tailer.stop()
+
+
+@pytest.mark.asyncio
+async def test_uncertain_delivery_reconciles_only_when_remote_idle_and_pending_absent() -> None:
+    server = MasoServer()
+    record = session()
+    provider = transport(server, record)
+    try:
+        await provider.send_message("first prompt", [])
+        first_message_id = provider._message_id
+        assert first_message_id is not None
+        server.streams[-1].queue.put_nowait(None)
+        while True:
+            event = await asyncio.wait_for(provider.read_line(), 2)
+            assert event is not None
+            if event["type"] == "hub_transport_error":
+                break
+        provider.acknowledge_turn_complete()
+        assert provider._delivery_uncertain and provider._delivery_path.exists()
+
+        # Remote still running: must stay fail-closed.
+        assert server.running
+        with pytest.raises(RuntimeError, match="Further sends are refused"):
+            await provider.send_message("blocked while running", [])
+        assert provider._delivery_uncertain and provider._delivery_path.exists()
+
+        # Remote idle, but status endpoint returns 503: must stay fail-closed.
+        server.running = False
+        server.fail_status = True
+        with pytest.raises(RuntimeError, match="Further sends are refused"):
+            await provider.send_message("blocked when status 503", [])
+        assert provider._delivery_uncertain and provider._delivery_path.exists()
+        server.fail_status = False
+
+        # Remote idle, but pending lookup returns 503: must stay fail-closed.
+        server.fail_pending_get = True
+        with pytest.raises(RuntimeError, match="Further sends are refused"):
+            await provider.send_message("blocked when pending 503", [])
+        assert provider._delivery_uncertain and provider._delivery_path.exists()
+        server.fail_pending_get = False
+
+        # Remote idle, but message is still in pending broker queue (200): must stay fail-closed.
+        server.pending[first_message_id] = "first prompt"
+        with pytest.raises(RuntimeError, match="Further sends are refused"):
+            await provider.send_message("blocked while pending queued", [])
+        assert provider._delivery_uncertain and provider._delivery_path.exists()
+
+        # Remote child still active: must stay fail-closed even when pending is absent (404).
+        server.pending.clear()
+        server.children = [{"status": "running", "children": []}]
+        with pytest.raises(RuntimeError, match="Further sends are refused"):
+            await provider.send_message("blocked while child active", [])
+        assert provider._delivery_uncertain and provider._delivery_path.exists()
+        server.children = []
+
+        # Remote confirmed idle and pending/{message_id} returns 404: reconcile and send new prompt.
+        await provider.send_message("second prompt", [])
+        assert not provider._delivery_uncertain
+        assert provider._last_error is None
+        posted = [body for method, path, body in server.calls if path.endswith("/messages")]
+        assert len(posted) == 2
+        assert posted[1]["content"] == "second prompt"
+        assert posted[1]["message_id"] != first_message_id
+        assert (
+            "GET",
+            f"/api/sessions/opaque-sid/messages/pending/{first_message_id}",
+            {},
+        ) in server.calls
+    finally:
+        await provider.stop()
+
+
+@pytest.mark.asyncio
+async def test_stop_clears_uncertain_delivery_when_turn_not_in_flight() -> None:
+    server = MasoServer()
+    server.fail_send = True
+    record = session()
+    provider = transport(server, record)
+    try:
+        with pytest.raises(RuntimeError, match="acceptance is uncertain"):
+            await provider.send_message("ambiguous prompt", [])
+        quarantined_id = provider._message_id
+        assert quarantined_id is not None
+        assert not provider.turn_in_flight
+        assert provider._delivery_uncertain and provider._delivery_path.exists()
+        assert quarantined_id in server.pending
+
+        # If abort fails during Stop, quarantine remains fail-closed.
+        server.fail_abort = True
+        with pytest.raises(RuntimeError, match="HTTP 503"):
+            await provider.cancel_active_turn()
+        assert provider._delivery_uncertain and provider._delivery_path.exists()
+        assert provider._needs_abort
+        server.fail_abort = False
+
+        # Explicit Stop with turn_in_flight=False deletes pending, aborts, exits, confirms idle, and clears sidecar.
+        await provider.cancel_active_turn()
+        assert not provider._delivery_uncertain
+        assert not provider._needs_abort
+        assert not provider._delivery_path.exists()
+        assert quarantined_id not in server.pending
+        assert (
+            "DELETE",
+            f"/api/sessions/opaque-sid/messages/pending/{quarantined_id}",
+            {},
+        ) in server.calls
+        assert ("POST", "/api/sessions/opaque-sid/control", {"action": "abort"}) in server.calls
+        assert ("POST", "/api/sessions/opaque-sid/exit", {}) in server.calls
+
+        server.fail_send = False
+        await provider.send_message("fresh prompt after stop", [])
+        posted = [body for _, path, body in server.calls if path.endswith("/messages")]
+        assert len(posted) == 2
+        assert posted[-1]["content"].endswith("fresh prompt after stop")
+    finally:
+        await provider.stop()
+
+
+@pytest.mark.asyncio
+async def test_local_rejection_under_existing_uncertain_quarantine_closes_user_and_scheduled_turns() -> (
+    None
+):
+    server = MasoServer()
+    record = session()
+    provider = transport(server, record)
+    tailer = SessionTailer(
+        workspace_id=record.workspace_id,
+        session_id=record.id,
+        adapter=MasoEventAdapter(),
+        session_getter=lambda: record,
+        native_transport=provider,
+    )
+    completion = await tailer.subscribe_completion()
+    try:
+        await tailer.send_message("first", [], "turn-1")
+        server.streams[-1].queue.put_nowait(None)
+        while True:
+            terminal = await asyncio.wait_for(completion.get(), 2)
+            if terminal.type == AgentStreamEventType.TURN_COMPLETED:
+                break
+        assert terminal.turn_id == "turn-1" and terminal.payload["status"] == "failed"
+        assert provider._delivery_uncertain and provider._delivery_path.exists()
+        assert server.running
+
+        # User retry rejected locally before reaching provider must close turn-2 immediately.
+        with pytest.raises(RuntimeError, match="Further sends are refused"):
+            await tailer.send_message("user retry", [], "turn-2")
+        assert tailer._active_turn_id is None
+        assert await tailer._store.latest_unfinished_turn() is None
+
+        # Scheduled patrol turn rejected locally before reaching provider must also close immediately
+        # without marking before_delivery or leaving an open ghost turn.
+        delivery_markers: list[str] = []
+        with pytest.raises(RuntimeError, match="Further sends are refused"):
+            await tailer.send_message(
+                "scheduled patrol",
+                [],
+                "scheduled-turn-3",
+                turn_metadata={
+                    "origin": "scheduled_task",
+                    "scheduled_task_id": "sched-1",
+                    "yields_to_user": True,
+                },
+                before_delivery=lambda: delivery_markers.append("submitted"),
+                allow_question_answer=False,
+            )
+        assert delivery_markers == []
+        assert tailer._active_turn_id is None
+        assert await tailer._store.latest_unfinished_turn() is None
+
+        page = await tailer._store.read_since(-1, 100)
+        by_turn: dict[str, list] = {}
+        for event in page.events:
+            if event.turn_id is not None:
+                by_turn.setdefault(event.turn_id, []).append(event)
+        for rejected_id in ("turn-2", "scheduled-turn-3"):
+            events = by_turn[rejected_id]
+            assert [e.type for e in events] == [
+                AgentStreamEventType.TURN_STARTED,
+                AgentStreamEventType.ERROR,
+                AgentStreamEventType.TURN_COMPLETED,
+            ]
+            assert events[-1].payload == {"status": "failed", "delivery_rejected": True}
+
+        # Cold tailer startup must not find any orphan or emit runtime_interrupted.
+        before_count = len(page.events)
+        restarted_record = record.model_copy(
+            update={"agent_session_id": "opaque-sid", "agent_session_id_verified": True}
+        )
+        restarted_provider = transport(server, restarted_record)
+        restarted = SessionTailer(
+            workspace_id=record.workspace_id,
+            session_id=record.id,
+            adapter=MasoEventAdapter(),
+            session_getter=lambda: restarted_record,
+            native_transport=restarted_provider,
+        )
+        try:
+            assert restarted_provider._delivery_uncertain
+            await restarted.start()
+            after_page = await restarted._store.read_since(-1, 100)
+            assert len(after_page.events) == before_count
+            assert not any(e.payload.get("runtime_interrupted") is True for e in after_page.events)
+        finally:
+            await restarted.stop()
+
+        # Stop via tailer when turn_in_flight=False clears the uncertain quarantine so the next turn succeeds.
+        assert await tailer.cancel_turn()
+        await tailer._await_turn_teardown()
+        assert not provider._delivery_uncertain and not provider._delivery_path.exists()
+        await tailer.send_message("recovered after stop", [], "turn-4")
+        server.streams[-1].emit("post_llm_response", {"agent_id": "main", "content": "ok"})
+        server.running = False
+        server.streams[-1].emit("agent_end", {"agent_id": "main", "stop_reason": "completed"})
+        while True:
+            done = await asyncio.wait_for(completion.get(), 2)
+            if done.turn_id == "turn-4" and done.type == AgentStreamEventType.TURN_COMPLETED:
+                assert done.payload["status"] == "completed"
+                break
     finally:
         tailer.unsubscribe_completion(completion)
         await tailer.stop()

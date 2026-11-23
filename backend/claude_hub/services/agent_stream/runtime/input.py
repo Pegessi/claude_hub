@@ -8,6 +8,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from ....models import AgentStreamEventType
 from ..base import NativeInputNotSubmittedError, NormalizeContext
+from ..native import ProviderSession
 from ..providers.spec import ApprovalChannel, Surface, get_spec
 from ..redaction import redact_event
 from ..transcript_fork import hash_provider_text
@@ -508,18 +509,47 @@ class InputMixin(SessionState):
             #    only provider submission in a child task; the parent task owns
             #    failure publication and observers so workspace mutation locks
             #    remain re-entrant for managed Chat callers.
+            prior_delivery_uncertain = bool(getattr(transport, "_delivery_uncertain", False))
+            if hasattr(transport, "_submission_delivery_uncertain"):
+                transport._submission_delivery_uncertain = False
+            if hasattr(transport, "_submission_outcome_uncertain"):
+                transport._submission_outcome_uncertain = False
+            before_delivery_called = False
+
+            def mark_before_delivery() -> None:
+                nonlocal before_delivery_called
+                if before_delivery is not None and not before_delivery_called:
+                    before_delivery_called = True
+                    before_delivery()
+
+            uses_provider_prepare = (
+                getattr(type(transport), "send_message", None) is ProviderSession.send_message
+                and "send_message" not in getattr(transport, "__dict__", {})
+                and hasattr(transport, "delivery_admission")
+            )
+
             async def submit_to_provider() -> None:
                 if self._send_admission is not None and not self._send_admission():
                     raise NativeInputNotSubmittedError(
                         "service is shutting down; try again after it reconnects"
                     )
-                if before_delivery is not None:
-                    before_delivery()
-                if delivery_guard is None:
+                if not uses_provider_prepare:
+                    mark_before_delivery()
+                if delivery_guard is None and not (
+                    uses_provider_prepare and before_delivery is not None
+                ):
                     await transport.send_message(text, images)
                 else:
-                    with transport.delivery_admission(delivery_guard):
-                        delivery_guard()
+
+                    def combined_admission() -> None:
+                        if delivery_guard is not None:
+                            delivery_guard()
+                        if uses_provider_prepare:
+                            mark_before_delivery()
+
+                    with transport.delivery_admission(combined_admission):
+                        if delivery_guard is not None:
+                            delivery_guard()
                         await transport.send_message(text, images)
 
             submit_task = asyncio.create_task(
@@ -550,8 +580,15 @@ class InputMixin(SessionState):
                 except Exception as exc:
                     submit_exception = exc
             if submit_exception is not None:
-                delivery_uncertain = getattr(transport, "_delivery_uncertain", False)
-                outcome_uncertain = getattr(transport, "_submission_outcome_uncertain", False)
+                submission_uncertain = getattr(transport, "_submission_delivery_uncertain", None)
+                if submission_uncertain is not None:
+                    delivery_uncertain = bool(submission_uncertain)
+                    transport._submission_delivery_uncertain = False
+                else:
+                    delivery_uncertain = not prior_delivery_uncertain and bool(
+                        getattr(transport, "_delivery_uncertain", False)
+                    )
+                outcome_uncertain = bool(getattr(transport, "_submission_outcome_uncertain", False))
                 if not retain_previews_on_delivery_failure:
                     # The caller rolls this turn back, which erases the
                     # turn_started that referenced these previews: keeping them

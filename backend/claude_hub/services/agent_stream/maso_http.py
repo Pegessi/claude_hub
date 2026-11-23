@@ -368,13 +368,64 @@ class MasoHttpSession(ProviderSession):
         if self._current_mode != "default":
             raise ValueError("MASO Chat only supports default mode")
         if self._delivery_uncertain:
-            raise RuntimeError(_UNCERTAIN_MESSAGE)
+            if not await self._reconcile_uncertain_delivery():
+                raise RuntimeError(_UNCERTAIN_MESSAGE)
         if self._stream_failed_generation == self._stdout_generation:
             raise RuntimeError(self._last_error or "MASO stream interrupted; inspect the session")
         if self._needs_abort:
             # Resume first so a persisted MASO session has an active broker.
             await self._request("GET", self._path("status"))
             await self._abort_and_wait()
+
+    async def _pending_message_is_absent(self, message_id: str) -> bool:
+        path = self._path(f"messages/pending/{quote(message_id, safe='')}")
+        try:
+            response = await self._http().request("GET", path)
+        except httpx.HTTPError:
+            return False
+        return response.status_code == 404
+
+    async def _delete_pending_message(self, message_id: str) -> None:
+        path = self._path(f"messages/pending/{quote(message_id, safe='')}")
+        try:
+            response = await self._http().request("DELETE", path)
+            if response.status_code != 404:
+                response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            raise RuntimeError(
+                f"MASO DELETE {path} returned HTTP {exc.response.status_code}"
+            ) from None
+        except httpx.HTTPError as exc:
+            raise RuntimeError(f"MASO DELETE request failed ({type(exc).__name__})") from None
+
+    async def _reconcile_uncertain_delivery(self) -> bool:
+        if (
+            self._needs_abort
+            or not self._conversation_id
+            or not self._conversation_id_verified
+            or not self._message_id
+        ):
+            return False
+        try:
+            status = await self._request("GET", self._path("status"))
+        except RuntimeError:
+            return False
+        if (
+            not isinstance(status, dict)
+            or not isinstance(status.get("agent_id"), str)
+            or status.get("is_running") is not False
+            or status.get("status") != "idle"
+            or _tree_is_active(status)
+        ):
+            return False
+        if not await self._pending_message_is_absent(self._message_id):
+            return False
+        await self._close_stream()
+        self._stream_failed_generation = None
+        self._last_error = None
+        self._apply_session_status(status)
+        self._clear_delivery()
+        return True
 
     async def prepare_capabilities(self) -> None:
         try:
@@ -560,10 +611,7 @@ class MasoHttpSession(ProviderSession):
         # this Hub-owned message before aborting; UUID correlation is not POST
         # idempotency. Retain the delivery sidecar until both steps succeed.
         if self._message_id:
-            await self._request(
-                "DELETE",
-                self._path(f"messages/pending/{quote(self._message_id, safe='')}"),
-            )
+            await self._delete_pending_message(self._message_id)
         await self._request("POST", self._path("control"), json={"action": "abort"})
         # MASO sets registry IDLE before its deferred cancellation finalizer
         # emits agent_end. Polling status (including indicator.running) cannot
@@ -576,13 +624,20 @@ class MasoHttpSession(ProviderSession):
         # A concurrent exit can return 200 while an earlier close is still
         # draining. Successful resume cannot register this same agent ID until
         # its old finalizers finish. An ended/non-live fallback is not proof.
-        if not isinstance(status, dict) or not isinstance(status.get("agent_id"), str):
+        if (
+            not isinstance(status, dict)
+            or not isinstance(status.get("agent_id"), str)
+            or status.get("is_running") is not False
+            or status.get("status") != "idle"
+            or _tree_is_active(status)
+        ):
             raise RuntimeError("MASO did not confirm a live resumed session after exit")
         self._root_agent_id = status["agent_id"]
         self._effective_model = status.get("preferred_model") or status.get("model")
-        if not self._delivery_uncertain:
-            self._clear_delivery()
+        self._clear_delivery()
         self._needs_abort = False
+        self._stream_failed_generation = None
+        self._last_error = None
         return status
 
     def _save_delivery(self, message_id: str, *, uncertain: bool = False) -> None:
@@ -751,6 +806,7 @@ class MasoHttpSession(ProviderSession):
             if post_started:
                 # A failed POST can still enqueue later. Quarantine its
                 # identity, never abort unrelated native children as cleanup.
+                self._submission_delivery_uncertain = True
                 self._end_turn()
                 raise RuntimeError(_UNCERTAIN_MESSAGE) from None
             self._end_turn()
@@ -968,12 +1024,14 @@ class MasoHttpSession(ProviderSession):
         return True
 
     async def cancel_active_turn(self) -> None:
-        if not self.turn_in_flight:
+        if not self.turn_in_flight and not self._delivery_uncertain and not self._needs_abort:
             return
         # Stop retires the Hub turn before service-side abort completes. Fence
         # late records immediately so they cannot reopen an unattributed turn.
         await self._close_stream()
         try:
+            if not self._handshake_complete:
+                await self._request("GET", self._path("status"))
             await self._abort_and_wait()
         finally:
             # Failed abort stays recorded in _needs_abort and the sidecar.
