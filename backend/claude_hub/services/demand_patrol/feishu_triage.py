@@ -479,7 +479,9 @@ def filter_unanswered(
             chat_id=message.chat_id,
             chat_name=message.chat_name,
             thread_id=message.thread_id,
+            reply_to=message.reply_to,
             sender_id=message.sender_id,
+            sender_name=message.sender_name,
             text=message.text,
             created_at_ms=created_ms,
         ) or realtime_router.has_owner_replied(

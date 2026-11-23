@@ -1931,3 +1931,208 @@ async def test_c4_r3_duplicate_durable_ingress_receipt_treated_as_handled_not_fa
     cands, answered = filter_unanswered([cand], OWNER_OPEN_ID, [], realtime_healthy=True)
     assert cands == []
     assert answered == ["om_dup_9301"]
+
+
+@pytest.mark.asyncio
+async def test_c5_r1_topic_dedupe_across_namespaces_and_singleton_sender_isolation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """C5-R1 regression:
+    1) A genuine Web topic @me message (numeric root/thread ID) deduplicates against its OpenAPI patrol candidate (omt_... thread_id).
+    2) A lone pending failed Web message from Alice is NOT cleared when OpenAPI patrol recovers only Bob's same-second/same-text message.
+    3) A lone handled Web receipt from Alice does NOT suppress Bob's distinct same-second/same-text OpenAPI patrol candidate when Alice's row is absent.
+    """
+    from claude_hub.services.demand_patrol import feishu_triage as triage_mod
+    from claude_hub.services.demand_patrol.feishu_triage import _candidate, filter_unanswered
+    from claude_hub.services.feishu_web_session.rich import WebChat
+
+    emitted: list[ExternalEvent] = []
+    should_fail = False
+
+    async def sink(ev: ExternalEvent) -> bool:
+        if should_fail:
+            return False
+        emitted.append(ev)
+        return True
+
+    poller, _svc, uc = _setup_poller(
+        tmp_path,
+        realtime_config=FeishuRealtimeEventConfig(
+            enabled=True,
+            suppress_patrol_when_healthy=True,
+        ),
+        event_sink=sink,
+    )
+    wt = uc._get_web_transport()
+    assert wt is not None
+    wt._remember_chat(
+        WebChat(id=ORDINARY_CHAT_WEB_ID, open_chat_id="oc_group_1", name="研发排障群")
+    )
+    monkeypatch.setattr(
+        triage_mod, "get_feishu_realtime_event_router", lambda: poller.realtime_router
+    )
+
+    # 1. Genuine topic message deduplication across Web numeric root_id and OpenAPI omt_... thread_id
+    topic_push = _build_pushed_via_wire(
+        msg_id="7400000000000006901",
+        from_id=COLLEAGUE_WEB_UID,
+        chat_id=ORDINARY_CHAT_WEB_ID,
+        root_id="7400000000000006900",
+        parent_id="7400000000000006900",
+        thread_id="7400000000000006900",
+        nodes=[Node(text="@Owner", at=OWNER_WEB_UID), T(" 话题里的报错帮忙看下")],
+        create_time_s=1_760_009_500,
+        at_me=True,
+    )
+    assert await poller.handle_pushed_web_message(topic_push) is True
+    assert len(emitted) == 1
+
+    openapi_topic_cand = _candidate(
+        {
+            "message_id": "om_same_topic_message",
+            "chat_id": "oc_group_1",
+            "chat_name": "研发排障群",
+            "chat_type": "group",
+            "thread_id": "omt_same_topic",
+            "reply_to": "om_topic_root_6900",
+            "create_time": "1760009500000",
+            "sender": {"id": "ou_colleague", "name": "Alice"},
+            "content": f'<at user_id="{OWNER_OPEN_ID}">@Owner</at> 话题里的报错帮忙看下',
+            "mentions": [{"id": OWNER_OPEN_ID}],
+        }
+    )
+    cands_topic, answered_topic = filter_unanswered(
+        [openapi_topic_cand], OWNER_OPEN_ID, [], realtime_healthy=True
+    )
+    assert cands_topic == []
+    assert answered_topic == ["om_same_topic_message"]
+
+    # 2. Lone Alice pending fallback must NOT be cleared when patrol recovers only Bob's message
+    should_fail = True
+    alice_fail_push = _build_pushed_via_wire(
+        msg_id="7400000000000006910",
+        from_id=COLLEAGUE_WEB_UID,
+        chat_id=ORDINARY_CHAT_WEB_ID,
+        nodes=[Node(text="@Owner", at=OWNER_WEB_UID), T(" 同一秒单条恢复碰撞测试？")],
+        create_time_s=1_760_009_510,
+        at_me=True,
+    )
+    assert await poller.handle_pushed_web_message(alice_fail_push) is False
+    assert poller.realtime_router.pending_fallback_count == 1
+
+    bob_recovered_cand = _candidate(
+        {
+            "message_id": "om_bob_recovered_only",
+            "chat_id": "oc_group_1",
+            "chat_name": "研发排障群",
+            "chat_type": "group",
+            "create_time": "1760009510000",
+            "sender": {"id": "ou_bob", "name": "Bob"},
+            "content": f'<at user_id="{OWNER_OPEN_ID}">@Owner</at> 同一秒单条恢复碰撞测试？',
+            "mentions": [{"id": OWNER_OPEN_ID}],
+        }
+    )
+    poller.realtime_router.acknowledge_patrol_fallback(
+        recovered_ids=["om_bob_recovered_only"],
+        recovered_candidates=[bob_recovered_cand],
+    )
+    assert poller.realtime_router.pending_fallback_count == 1
+    assert poller.realtime_router.is_message_handled("7400000000000006910") is False
+
+    # 3. Lone Alice handled receipt must NOT suppress Bob's distinct OpenAPI candidate when Alice's row is absent
+    should_fail = False
+    alice_ok_push = _build_pushed_via_wire(
+        msg_id="7400000000000006920",
+        from_id=COLLEAGUE_WEB_UID,
+        chat_id=ORDINARY_CHAT_WEB_ID,
+        nodes=[Node(text="@Owner", at=OWNER_WEB_UID), T(" 同一秒单条去重碰撞测试？")],
+        create_time_s=1_760_009_520,
+        at_me=True,
+    )
+    assert await poller.handle_pushed_web_message(alice_ok_push) is True
+
+    bob_search_cand = _candidate(
+        {
+            "message_id": "om_bob_distinct",
+            "chat_id": "oc_group_1",
+            "chat_name": "研发排障群",
+            "chat_type": "group",
+            "create_time": "1760009520000",
+            "sender": {"id": "ou_bob", "name": "Bob"},
+            "content": f'<at user_id="{OWNER_OPEN_ID}">@Owner</at> 同一秒单条去重碰撞测试？',
+            "mentions": [{"id": OWNER_OPEN_ID}],
+        }
+    )
+    cands_bob, answered_bob = filter_unanswered(
+        [bob_search_cand], OWNER_OPEN_ID, [], realtime_healthy=True
+    )
+    assert [c.message_id for c in cands_bob] == ["om_bob_distinct"]
+    assert answered_bob == []
+
+
+@pytest.mark.asyncio
+async def test_c5_r2_renamed_watch_group_refreshes_cached_chat_metadata_and_routes_url(
+    tmp_path: Path,
+) -> None:
+    """C5-R2 regression: when a cached ordinary group is renamed to a configured watch_chat_names entry, subsequent URL messages refresh chat metadata and trigger im.watch_chat_url."""
+    from claude_hub.services.feishu_web_session.rich import WebChat
+
+    emitted: list[ExternalEvent] = []
+
+    async def sink(ev: ExternalEvent) -> bool:
+        emitted.append(ev)
+        return True
+
+    poller, _svc, uc = _setup_poller(
+        tmp_path,
+        realtime_config=FeishuRealtimeEventConfig(
+            enabled=True,
+            watch_chat_names=frozenset({"priority group"}),
+            actionable_hosts=frozenset({" tickets.example.com ".strip()}),
+        ),
+        event_sink=sink,
+    )
+    wt = uc._get_web_transport()
+    assert wt is not None
+
+    current_name = "Ordinary group"
+    lookup_names: list[str] = []
+
+    async def fake_chats(chat_ids: list[str]) -> dict[str, WebChat]:
+        lookup_names.append(current_name)
+        return {
+            cid: WebChat(id=cid, open_chat_id="oc_renamed_group", name=current_name)
+            for cid in chat_ids
+        }
+
+    wt.web_client.chats = fake_chats  # type: ignore[method-assign]
+
+    # 1. Initial URL message while group is named "Ordinary group" -> cached and ignored
+    first_push = _build_pushed_via_wire(
+        msg_id="7400000000000006951",
+        from_id=COLLEAGUE_WEB_UID,
+        chat_id=ORDINARY_CHAT_WEB_ID,
+        nodes=[T("https://tickets.example.com/issues/501")],
+        create_time_s=1_760_009_551,
+        at_me=False,
+    )
+    assert await poller.handle_pushed_web_message(first_push) is False
+    assert len(emitted) == 0
+    assert lookup_names == ["Ordinary group"]
+
+    # 2. Group is renamed on Feishu to "Priority group"
+    current_name = "Priority group"
+    second_push = _build_pushed_via_wire(
+        msg_id="7400000000000006952",
+        from_id=COLLEAGUE_WEB_UID,
+        chat_id=ORDINARY_CHAT_WEB_ID,
+        nodes=[T("https://tickets.example.com/issues/502")],
+        create_time_s=1_760_009_552,
+        at_me=False,
+    )
+    assert await poller.handle_pushed_web_message(second_push) is True
+    assert len(emitted) == 1
+    assert emitted[0].event_type == "im.watch_chat_url"
+    assert "Priority group" in lookup_names
+    assert poller.realtime_router.watched_openapi_chat_ids() == ("oc_renamed_group",)
