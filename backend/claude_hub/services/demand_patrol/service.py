@@ -11,13 +11,28 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Literal
 from zoneinfo import ZoneInfo
 
-from ...models import AgentReport, AgentReportState, TaskLifecycle, TaskPhase, WorkspaceTask
-from ..feishu_realtime_events import is_feishu_realtime_stream_healthy
+from ...models import (
+    AgentReport,
+    AgentReportState,
+    TaskLifecycle,
+    TaskPhase,
+    WorkspaceTask,
+)
+from ..feishu_realtime_events import (
+    get_feishu_realtime_event_router,
+    is_feishu_realtime_stream_healthy,
+)
 from .commands import CommandRunner, run_command
 from .daily_digest import DecisionModel, build_daily_digest
 from .digest_provider import recommend_daily_decisions
 from .feishu_triage import TriageCallback, run_feishu_triage
-from .models import PatrolChannel, PatrolConfig, PatrolNotifier, PatrolRunRecord, PatrolState
+from .models import (
+    PatrolChannel,
+    PatrolConfig,
+    PatrolNotifier,
+    PatrolRunRecord,
+    PatrolState,
+)
 from .state import PatrolStateStore
 
 logger = logging.getLogger(__name__)
@@ -94,9 +109,13 @@ def feishu_due(
     config = state.config
     if not config.enabled or not config.feishu_enabled:
         return False
+    router = get_feishu_realtime_event_router()
+    rt_cfg = router.resolve_config()
     if realtime_healthy is None:
         realtime_healthy = is_feishu_realtime_stream_healthy()
-    if realtime_healthy:
+    elif realtime_healthy and router.needs_patrol_fallback:
+        realtime_healthy = False
+    if realtime_healthy and rt_cfg.suppress_patrol_when_healthy:
         return False
     local = now.astimezone(ZoneInfo(config.timezone))
     clock = local.strftime("%H:%M")
@@ -286,7 +305,12 @@ class DemandPatrolService:
             for key in due_daily_slots(state, now):
                 records.append(
                     await self._run_channel(
-                        state, "daily", now=now, dry_run=False, notify=True, slot_key=key
+                        state,
+                        "daily",
+                        now=now,
+                        dry_run=False,
+                        notify=True,
+                        slot_key=key,
                     )
                 )
             if feishu_due(state, now):

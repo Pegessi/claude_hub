@@ -28,7 +28,13 @@ EVENTS_PER_HOUR = 60
 PASSIVE_INBOX_LIMIT = 200
 _WINDOW_SECONDS = 3600
 _LOCAL_HOST = re.compile(r"(?:localhost|127\.0\.0\.1|\[::1\])(?::[0-9]+)?", re.IGNORECASE)
-_PROXY_HEADERS = ("forwarded", "x-forwarded-for", "x-forwarded-host", "x-forwarded-proto", "via")
+_PROXY_HEADERS = (
+    "forwarded",
+    "x-forwarded-for",
+    "x-forwarded-host",
+    "x-forwarded-proto",
+    "via",
+)
 
 
 class ExternalEvent(BaseModel):
@@ -149,6 +155,73 @@ def render_external_event(event: dict[str, Any]) -> str:
     )
 
 
+def _record_suppressed_ingress(store: DotStore, source: str, dedupe_key: str) -> bool:
+    """Record a suppressed dedupe_key in ingress so out-of-process pollers cannot re-alert it."""
+    if not source or not dedupe_key:
+        return False
+    store.ensure()
+    path = store.home / "index.sqlite.events"
+    key = "external:" + hashlib.sha256(f"{source}\0{dedupe_key}".encode()).hexdigest()
+    with closing(sqlite3.connect(path)) as db, db:
+        db.execute(
+            "CREATE TABLE IF NOT EXISTS ingress "
+            "(key TEXT PRIMARY KEY, source TEXT NOT NULL, accepted_at REAL NOT NULL)"
+        )
+        db.execute("CREATE INDEX IF NOT EXISTS ingress_window ON ingress(source, accepted_at)")
+        db.execute("BEGIN IMMEDIATE")
+        if db.execute("SELECT 1 FROM ingress WHERE key = ?", (key,)).fetchone():
+            return False
+        # Record with accepted_at=0.0 so suppressed noise never consumes the hourly source quota.
+        db.execute("INSERT INTO ingress VALUES (?, ?, ?)", (key, source, 0.0))
+    return True
+
+
+async def record_suppressed_external_event(
+    source: str,
+    dedupe_key: str,
+    service: DotService | None = None,
+) -> bool:
+    """Persist a suppressed external event key in Dot's ingress ledger without adding an inbox item."""
+    if service is None:
+        from . import get_dot_service
+
+        service = get_dot_service()
+    return await asyncio.to_thread(_record_suppressed_ingress, service.store, source, dedupe_key)
+
+
+def _should_suppress_incoming_feishu_event(event: ExternalEvent) -> bool:
+    """Suppress courtesy/already-replied Feishu mention events submitted by external pollers."""
+    if event.source != "feishu" or event.event_type != "im.mention":
+        return False
+    from claude_hub.services.feishu_realtime_events import (
+        get_feishu_realtime_event_router,
+        is_courtesy_or_ack_only,
+    )
+
+    payload = event.payload if isinstance(event.payload, dict) else {}
+    text = str(payload.get("text") or "").strip()
+    chat_id = str(payload.get("chat_id") or payload.get("web_chat_id") or "").strip()
+    thread_id = str(payload.get("thread_id") or "").strip()
+    message_id = str(payload.get("message_id") or event.dedupe_key or "").strip()
+    if text and is_courtesy_or_ack_only(text):
+        return True
+    router = get_feishu_realtime_event_router()
+    if router.is_message_handled(
+        message_id,
+        chat_id=chat_id,
+        thread_id=thread_id,
+        text=text,
+    ):
+        return True
+    if chat_id and router.has_owner_replied(
+        chat_id=chat_id,
+        thread_id=thread_id,
+        message_id=message_id,
+    ):
+        return True
+    return False
+
+
 async def submit_external_event(
     event: ExternalEvent,
     service: DotService | None = None,
@@ -158,6 +231,9 @@ async def submit_external_event(
         from . import get_dot_service
 
         service = get_dot_service()
+    if _should_suppress_incoming_feishu_event(event):
+        await record_suppressed_external_event(event.source, event.dedupe_key, service)
+        return False
     accepted = await asyncio.to_thread(_enqueue, service.store, event)
     if accepted and event.severity == "urgent" and service.is_set_up():
         await service.wake_for_external_event()

@@ -99,6 +99,10 @@ class FeishuAiPoller:
         self._frontier_connected = False
         self._last_frontier_connected_at: float | None = None
         self._last_frontier_error: str | None = None
+        self._realtime_event_queue: OrderedDict[
+            str, tuple[Any, FeishuUserMessage, Any, Any, set[str], bool]
+        ] = OrderedDict()
+        self._realtime_queue_worker: asyncio.Task[None] | None = None
         self._worker_tasks: set[asyncio.Task[None]] = set()
         self._in_flight_ids: set[str] = set()
         self._search_msg_cache: OrderedDict[str, FeishuUserMessage | None] = OrderedDict()
@@ -135,6 +139,7 @@ class FeishuAiPoller:
             and self._frontier_connected
             and self._last_frontier_error is None
             and self._realtime_router.resolve_config().enabled
+            and not self._realtime_router.needs_patrol_fallback
         )
 
     def _on_frontier_state(self, exc: Exception | None) -> None:
@@ -192,10 +197,78 @@ class FeishuAiPoller:
             "recent_runs": self._service.get_recent_runs(),
         }
 
-    async def handle_pushed_web_message(self, pushed: Any) -> bool:
+    def _enqueue_realtime_event(
+        self,
+        pushed: Any,
+        user_msg: FeishuUserMessage,
+        *,
+        web_transport: Any,
+        user_client: Any,
+        owner_ids: set[str],
+        is_owner_sender: bool,
+    ) -> None:
+        msg_id = (
+            user_msg.message_id or getattr(getattr(pushed, "message", None), "id", "") or ""
+        ).strip()
+        if not msg_id:
+            return
+        self._realtime_event_queue[msg_id] = (
+            pushed,
+            user_msg,
+            web_transport,
+            user_client,
+            owner_ids,
+            is_owner_sender,
+        )
+        self._realtime_event_queue.move_to_end(msg_id)
+        while len(self._realtime_event_queue) > 256:
+            self._realtime_event_queue.popitem(last=False)
+            self._realtime_router._pending_fallback_count += 1
+        if self._realtime_queue_worker is None or self._realtime_queue_worker.done():
+            task = asyncio.create_task(
+                self._drain_realtime_event_queue(),
+                name="feishu-realtime-event-worker",
+            )
+            self._realtime_queue_worker = task
+            self._worker_tasks.add(task)
+            task.add_done_callback(self._worker_tasks.discard)
+
+    async def _drain_realtime_event_queue(self) -> None:
+        while self._realtime_event_queue and not self._stopping:
+            _mid, (pushed, user_msg, wt, uc, owner_ids, is_owner) = (
+                self._realtime_event_queue.popitem(last=False)
+            )
+            try:
+                await self._realtime_router.handle_pushed_message(
+                    pushed,
+                    user_msg,
+                    web_transport=wt,
+                    user_client=uc,
+                    owner_ids=owner_ids,
+                    is_owner_sender=is_owner,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.warning(
+                    "Feishu real-time event background worker failed for %s",
+                    user_msg.message_id,
+                    exc_info=True,
+                )
+
+    async def _handle_frontier_pushed_web_message(self, pushed: Any) -> bool:
+        return await self.handle_pushed_web_message(pushed, background_realtime=True)
+
+    async def handle_pushed_web_message(
+        self,
+        pushed: Any,
+        *,
+        background_realtime: bool = False,
+    ) -> bool:
         """Process a ``PushedMessage`` delivered over ``FeishuWebFrontierListener``."""
         cfg = await self._service.aget_config()
-        if not cfg.enabled or cfg.send_mode == "openapi":
+        rt_cfg = self._realtime_router.resolve_config()
+        if (not cfg.enabled and not rt_cfg.enabled) or cfg.send_mode == "openapi":
             return False
         user_client = self._service.build_user_client(cfg)
         if (
@@ -218,30 +291,48 @@ class FeishuAiPoller:
             user_msg.sender_type == "user"
             and self._service._matches_owner_sender(user_msg.sender_open_id, cfg)
         )
-        if self._service.is_owner_ai_command_candidate(
+        if cfg.enabled and self._service.is_owner_ai_command_candidate(
             sender_open_id=user_msg.sender_open_id,
             sender_type=user_msg.sender_type,
             text=user_msg.text,
             config=cfg,
         ):
-            self._realtime_router.record_owner_pushed_message(
-                pushed,
-                user_msg,
-                web_transport=wt,
-            )
             self._commands_detected += 1
             self._service.enqueue_pending_command(user_msg, source="web_frontier")
             self._schedule_durable_pending_queue()
             return True
 
         owner_ids = self._resolve_owner_ids(cfg, wt)
+        if (
+            is_owner
+            or user_msg.sender_open_id in owner_ids
+            or getattr(pushed.message, "from_id", "") in owner_ids
+        ):
+            self._realtime_router.record_owner_pushed_message(
+                pushed,
+                user_msg,
+                web_transport=wt,
+            )
+            return False
+
+        if background_realtime:
+            self._enqueue_realtime_event(
+                pushed,
+                user_msg,
+                web_transport=wt,
+                user_client=user_client,
+                owner_ids=owner_ids,
+                is_owner_sender=False,
+            )
+            return True
+
         return await self._realtime_router.handle_pushed_message(
             pushed,
             user_msg,
             web_transport=wt,
             user_client=user_client,
             owner_ids=owner_ids,
-            is_owner_sender=is_owner,
+            is_owner_sender=False,
         )
 
     def _ensure_frontier_task(self, cfg: Any) -> None:
@@ -274,11 +365,11 @@ class FeishuAiPoller:
             self._frontier_stop = asyncio.Event()
             try:
                 listener = wt.create_frontier_listener(
-                    self.handle_pushed_web_message,
+                    self._handle_frontier_pushed_web_message,
                     on_state=self._on_frontier_state,
                 )
             except TypeError:
-                listener = wt.create_frontier_listener(self.handle_pushed_web_message)
+                listener = wt.create_frontier_listener(self._handle_frontier_pushed_web_message)
             self._frontier_task = asyncio.create_task(
                 listener.run(stop_event=self._frontier_stop),
                 name="feishu-web-frontier",
@@ -328,6 +419,8 @@ class FeishuAiPoller:
             await asyncio.gather(*list(self._worker_tasks), return_exceptions=True)
             self._worker_tasks.clear()
             self._in_flight_ids.clear()
+        self._realtime_event_queue.clear()
+        self._realtime_queue_worker = None
 
     async def stop(self) -> None:
         await self.quiesce()

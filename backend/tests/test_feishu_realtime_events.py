@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import time
@@ -41,7 +42,7 @@ from claude_hub.services.feishu_web_session.client import (
     build_frontier_frame,
     parse_frontier_frame,
 )
-from claude_hub.services.feishu_web_session.codec import encode
+from claude_hub.services.feishu_web_session.codec import decode, encode
 from claude_hub.services.feishu_web_session.rich import (
     CHAT_GROUP,
     CHAT_P2P,
@@ -171,37 +172,37 @@ def _setup_poller(
     )
 
     def gateway_handler(request: httpx.Request) -> httpx.Response:
-        cmd = request.headers.get("x-command", "")
-        if cmd.endswith("PutReactionRequest") or cmd.endswith("DeleteReactionRequest"):
-            return httpx.Response(200, content=b"\x08\x00")
-        if cmd.endswith("PutMessageRequest"):
-            msg_pb = encode(
-                "lark_entities_Message",
+        pkt = decode("Packet", request.content) if request.content else {}
+        cmd_id = int(pkt.get("cmd") or 0)
+        if cmd_id == 25:  # PutReactionRequest
+            resp_bytes = encode("reactions_PutReactionResponse", {"count": 1})
+        elif cmd_id == 26:  # DeleteReactionRequest
+            resp_bytes = encode("reactions_DeleteReactionResponse", {})
+        elif cmd_id == 5:  # PutMessageRequest
+            resp_bytes = encode(
+                "lark_messages_PutMessageResponse",
                 {
-                    "id": "7400000000000009999",
-                    "type": TYPE_POST,
-                    "fromId": OWNER_WEB_UID,
-                    "createTime": 1_760_000_200,
-                    "chatId": ORDINARY_CHAT_WEB_ID,
-                    "position": 99,
+                    "message": {
+                        "id": "7400000000000009999",
+                        "type": TYPE_POST,
+                        "fromId": OWNER_WEB_UID,
+                        "createTime": 1_760_000_200,
+                        "chatId": ORDINARY_CHAT_WEB_ID,
+                        "position": 99,
+                    }
                 },
             )
-            pkt = encode(
-                "Packet",
-                {
-                    "cmd": 5,
-                    "payloadType": 1,
-                    "payload": base64.b64encode(
-                        encode(
-                            "lark_im_PutMessageResponse",
-                            {"message": json.loads(json.dumps({"id": "7400000000000009999"}))},
-                        )
-                    ).decode("ascii"),
-                },
-            )
-            _ = msg_pb
-            return httpx.Response(200, content=pkt)
-        return httpx.Response(200, content=b"")
+        else:
+            resp_bytes = b""
+        out_pkt = encode(
+            "Packet",
+            {
+                "cmd": cmd_id or 5,
+                "payloadType": 1,
+                "payload": base64.b64encode(resp_bytes).decode("ascii"),
+            },
+        )
+        return httpx.Response(200, content=out_pkt)
 
     mock_http = httpx.AsyncClient(transport=httpx.MockTransport(gateway_handler))
     user_client = FeishuUserClient(
@@ -218,11 +219,11 @@ def _setup_poller(
     async def fake_turn_dispatcher(
         tab_id: str,
         prompt: str,
-        provider: str,
-        model: str,
-        extra: Any,
+        turn_id: str,
+        visible_text: str,
+        metadata: Any,
     ) -> str:
-        _ = tab_id, provider, model, extra
+        _ = tab_id, turn_id, visible_text, metadata
         prompts.append(prompt)
         return "处理完成"
 
@@ -232,7 +233,7 @@ def _setup_poller(
         web_session_store=web_store,
         dedup_store=FeishuMessageDedupStore(tmp_path / "dedup.json"),
         user_client_factory=lambda _cfg: user_client,
-        tab_creator=lambda title, _prov, _mod, _env: f"tab-{title}",
+        tab_creator=lambda **kwargs: f"tab-{kwargs.get('name', 'ai')}",
         tab_getter=lambda tab_id: {"id": tab_id},
         turn_dispatcher=fake_turn_dispatcher,
     )
@@ -288,7 +289,9 @@ def test_extract_mentions_and_urls_from_richtext() -> None:
 
 
 @pytest.mark.asyncio
-async def test_realtime_at_me_triggers_immediately_and_deduplicates(tmp_path: Path) -> None:
+async def test_realtime_at_me_triggers_immediately_and_deduplicates(
+    tmp_path: Path,
+) -> None:
     emitted: list[ExternalEvent] = []
 
     async def sink(event: ExternalEvent) -> bool:
@@ -578,8 +581,347 @@ async def test_ai_command_unaffected_and_records_owner_activity(tmp_path: Path) 
     assert accepted is True
     assert poller.status_dict()["commands_detected"] == 1
     assert len(emitted) == 0
-    assert len(service.list_pending_commands()) >= 0
+    await poller.wait_for_inflight(timeout=3.0)
+    assert len(dispatched_prompts) == 1
+    assert "总结当前话题" in dispatched_prompts[0]
     await poller.quiesce()
+
+
+@pytest.mark.asyncio
+async def test_r2_frontier_intake_never_blocks_subsequent_ai_command_when_sink_stalls(
+    tmp_path: Path,
+) -> None:
+    """R2 regression: a stalled event sink in a multi-push frame must not delay /ai intake."""
+    sink_entered = asyncio.Event()
+    release_sink = asyncio.Event()
+    emitted: list[ExternalEvent] = []
+    dispatched_prompts: list[str] = []
+
+    async def slow_sink(event: ExternalEvent) -> bool:
+        sink_entered.set()
+        await release_sink.wait()
+        emitted.append(event)
+        return True
+
+    poller, _service, uc = _setup_poller(
+        tmp_path,
+        realtime_config=FeishuRealtimeEventConfig(enabled=True),
+        event_sink=slow_sink,
+        dispatched_prompts=dispatched_prompts,
+    )
+    wt = uc._get_web_transport()
+    assert wt is not None
+    listener = wt.create_frontier_listener(
+        poller._handle_frontier_pushed_web_message,
+        on_state=poller._on_frontier_state,
+    )
+
+    p1 = _build_pushed_via_wire(
+        msg_id="7400000000000000701",
+        from_id=COLLEAGUE_WEB_UID,
+        chat_id=ORDINARY_CHAT_WEB_ID,
+        nodes=[Node(text="@Owner", at=OWNER_WEB_UID), T(" 帮忙排查超时问题")],
+        create_time_s=1_760_000_701,
+        position=1,
+        at_me=True,
+    )
+    p2 = _build_pushed_via_wire(
+        msg_id="7400000000000000702",
+        from_id=OWNER_WEB_UID,
+        chat_id=ORDINARY_CHAT_WEB_ID,
+        nodes=[T("/ai 立即执行命令")],
+        create_time_s=1_760_000_702,
+        position=2,
+    )
+
+    # Deliver a single frame with two pushes ([mention, /ai]) or two consecutive frames while slow_sink is blocked
+    _, m1_bytes = _encode_rich_message(
+        [Node(text="@Owner", at=OWNER_WEB_UID), T(" 帮忙排查超时问题")]
+    )
+    _, m2_bytes = _encode_rich_message([T("/ai 立即执行命令")])
+    push_payload = {
+        "messages": {
+            p1.message.id: {
+                "id": p1.message.id,
+                "type": TYPE_TEXT,
+                "fromId": COLLEAGUE_WEB_UID,
+                "createTime": 1_760_000_701,
+                "content": base64.b64encode(m1_bytes).decode("ascii"),
+                "chatId": ORDINARY_CHAT_WEB_ID,
+                "position": 1,
+                "chatType": CHAT_GROUP,
+            },
+            p2.message.id: {
+                "id": p2.message.id,
+                "type": TYPE_TEXT,
+                "fromId": OWNER_WEB_UID,
+                "createTime": 1_760_000_702,
+                "content": base64.b64encode(m2_bytes).decode("ascii"),
+                "chatId": ORDINARY_CHAT_WEB_ID,
+                "position": 2,
+                "chatType": CHAT_GROUP,
+            },
+        },
+        "messagesAtMe": {p1.message.id: True},
+    }
+    raw_frame = build_frontier_frame(
+        {
+            "payloadType": 1,
+            "cmd": CMD_PUSH_MESSAGES,
+            "sid": "sid-multi",
+            "payload": base64.b64encode(encode("PushMessagesRequest", push_payload)).decode(
+                "ascii"
+            ),
+        },
+        now_ms=1_760_000_702_000,
+    )
+
+    await listener.handle_raw_frame(raw_frame, AsyncMock())
+    # Even while slow_sink is still blocked, the second message (/ai command) is already detected!
+    assert poller.status_dict()["commands_detected"] == 1
+    await asyncio.wait_for(sink_entered.wait(), timeout=2.0)
+    assert len(emitted) == 0
+    release_sink.set()
+    await poller.wait_for_inflight(timeout=3.0)
+    assert len(emitted) == 1
+    assert len(dispatched_prompts) == 1
+    await poller.quiesce()
+
+
+@pytest.mark.asyncio
+async def test_r3_distinct_message_ids_with_identical_text_both_trigger(
+    tmp_path: Path,
+) -> None:
+    """R3 regression: two distinct wire message IDs with identical text (24h apart or another topic) both trigger."""
+    emitted: list[ExternalEvent] = []
+
+    async def sink(event: ExternalEvent) -> bool:
+        emitted.append(event)
+        return True
+
+    poller, _svc, _uc = _setup_poller(
+        tmp_path,
+        realtime_config=FeishuRealtimeEventConfig(enabled=True),
+        event_sink=sink,
+    )
+    first = _build_pushed_via_wire(
+        msg_id="7400000000000000801",
+        from_id=COLLEAGUE_WEB_UID,
+        chat_id=ORDINARY_CHAT_WEB_ID,
+        nodes=[
+            Node(text="@Owner", at=OWNER_WEB_UID),
+            T(" 线上推理服务报错 OOM，麻烦看下"),
+        ],
+        create_time_s=1_760_000_000,
+        position=10,
+        at_me=True,
+    )
+    second_24h_later = _build_pushed_via_wire(
+        msg_id="7400000000000000802",
+        from_id=COLLEAGUE_WEB_UID,
+        chat_id=ORDINARY_CHAT_WEB_ID,
+        nodes=[
+            Node(text="@Owner", at=OWNER_WEB_UID),
+            T(" 线上推理服务报错 OOM，麻烦看下"),
+        ],
+        create_time_s=1_760_086_400,
+        position=25,
+        at_me=True,
+    )
+    third_other_topic = _build_pushed_via_wire(
+        msg_id="7400000000000000803",
+        from_id=COLLEAGUE_WEB_UID,
+        chat_id=ORDINARY_CHAT_WEB_ID,
+        nodes=[
+            Node(text="@Owner", at=OWNER_WEB_UID),
+            T(" 线上推理服务报错 OOM，麻烦看下"),
+        ],
+        create_time_s=1_760_000_005,
+        position=11,
+        root_id="7500000000000000800",
+        thread_id="7500000000000000800",
+        at_me=True,
+    )
+    assert await poller.handle_pushed_web_message(first) is True
+    assert await poller.handle_pushed_web_message(second_24h_later) is True
+    assert await poller.handle_pushed_web_message(third_other_topic) is True
+    assert [e.dedupe_key for e in emitted] == [
+        "7400000000000000801",
+        "7400000000000000802",
+        "7400000000000000803",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_r4_same_second_owner_message_preceding_question_does_not_suppress(
+    tmp_path: Path,
+) -> None:
+    """R4 regression: owner message at position 10 followed by a new question at position 11 in the same second must trigger."""
+    emitted: list[ExternalEvent] = []
+
+    async def sink(event: ExternalEvent) -> bool:
+        emitted.append(event)
+        return True
+
+    poller, _svc, _uc = _setup_poller(
+        tmp_path,
+        realtime_config=FeishuRealtimeEventConfig(enabled=True),
+        event_sink=sink,
+    )
+    owner_msg = _build_pushed_via_wire(
+        msg_id="7400000000000000901",
+        from_id=OWNER_WEB_UID,
+        chat_id=ORDINARY_CHAT_WEB_ID,
+        nodes=[T("我先把上个问题关了")],
+        create_time_s=1_760_000_900,
+        position=10,
+    )
+    colleague_q_same_second = _build_pushed_via_wire(
+        msg_id="7400000000000000902",
+        from_id=COLLEAGUE_WEB_UID,
+        chat_id=ORDINARY_CHAT_WEB_ID,
+        nodes=[Node(text="@Owner", at=OWNER_WEB_UID), T(" 新集群节点报错，帮忙看下")],
+        create_time_s=1_760_000_900,
+        position=11,
+        at_me=True,
+    )
+    assert await poller.handle_pushed_web_message(owner_msg) is False
+    assert await poller.handle_pushed_web_message(colleague_q_same_second) is True
+    assert len(emitted) == 1
+    assert poller.realtime_router.suppressed_replied_count == 0
+
+
+def test_r5_regex_with_comma_quantifiers_parsed_intact_from_env_and_json(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R5 regression: regex quantifiers like {2,4} must not be split on commas in ENV or JSON config."""
+    from claude_hub.services.feishu_realtime_events import matches_fault_or_task_url
+
+    monkeypatch.setenv("CLAUDE_HUB_HOME", str(tmp_path / "hub"))
+    monkeypatch.setenv("CLAUDE_HUB_STATE_ROOT", str(tmp_path / "hub" / "workspaces"))
+    (tmp_path / "hub").mkdir(parents=True, exist_ok=True)
+    pattern = r"https://compute\.example\.com/job/\d{2,4}$"
+
+    # 1. ENV form
+    monkeypatch.setenv("CLAUDE_HUB_FEISHU_WATCH_URL_REGEX", pattern)
+    cfg_env = FeishuRealtimeEventConfig.from_runtime()
+    assert cfg_env.url_patterns == (pattern,)
+    assert matches_fault_or_task_url("https://compute.example.com/job/123", cfg_env) is True
+    assert matches_fault_or_task_url("https://compute.example.com/job/1", cfg_env) is False
+
+    # 2. JSON-list form
+    monkeypatch.delenv("CLAUDE_HUB_FEISHU_WATCH_URL_REGEX", raising=False)
+    (tmp_path / "hub" / "local_runtime_settings.json").write_text(
+        json.dumps({"url_patterns": [pattern]}),
+        encoding="utf-8",
+    )
+    cfg_json = FeishuRealtimeEventConfig.from_runtime()
+    assert cfg_json.url_patterns == (pattern,)
+    assert matches_fault_or_task_url("https://compute.example.com/job/123", cfg_json) is True
+
+
+@pytest.mark.asyncio
+async def test_r1_uncovered_p2p_and_delivery_failure_preserve_patrol_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R1 regression: unmentioned P2P questions and delivery failures keep feishu_due=True for fallback patrol."""
+    import claude_hub.services.feishu_ai_poller as poller_mod
+    from claude_hub.services.feishu_realtime_events import (
+        is_feishu_realtime_stream_healthy,
+    )
+
+    should_fail = True
+
+    async def flaky_sink(_event: ExternalEvent) -> bool:
+        if should_fail:
+            raise httpx.ConnectError("dot gateway temporarily unreachable")
+        return True
+
+    poller, _svc, _uc = _setup_poller(
+        tmp_path,
+        realtime_config=FeishuRealtimeEventConfig(enabled=True),
+        event_sink=flaky_sink,
+    )
+    monkeypatch.setattr(poller_mod, "_DEFAULT_AI_POLLER", poller)
+    monkeypatch.setattr(
+        "claude_hub.services.demand_patrol.service.get_feishu_realtime_event_router",
+        lambda: poller.realtime_router,
+    )
+    poller._frontier_task = type("FakeTask", (), {"done": lambda self: False})()  # type: ignore[assignment]
+    poller._on_frontier_state(None)
+
+    now = datetime(2026, 11, 14, 3, 0, tzinfo=timezone.utc)
+    state = PatrolState(config=PatrolConfig(enabled=True, feishu_enabled=True))
+    assert is_feishu_realtime_stream_healthy() is True
+    assert feishu_due(state, now) is False
+
+    # 1. Unmentioned actionable P2P question is not covered by @me/watch-URL realtime rules -> marks fallback needed
+    plain_dm = _build_pushed_via_wire(
+        msg_id="7400000000000001001",
+        from_id=COLLEAGUE_WEB_UID,
+        chat_id=P2P_CHAT_WEB_ID,
+        chat_type=CHAT_P2P,
+        nodes=[T("服务启动报错 OOM 了，能帮忙看看吗？")],
+        create_time_s=1_760_001_001,
+        at_me=False,
+    )
+    assert await poller.handle_pushed_web_message(plain_dm) is False
+    assert poller.realtime_router.needs_patrol_fallback is True
+    assert is_feishu_realtime_stream_healthy() is False
+    assert feishu_due(state, now, realtime_healthy=True) is True
+
+    poller.realtime_router.acknowledge_patrol_fallback()
+    assert is_feishu_realtime_stream_healthy() is True
+    assert feishu_due(state, now) is False
+
+    # 2. Delivery failure on @me event also marks fallback needed so patrol can catch it
+    mention_msg = _build_pushed_via_wire(
+        msg_id="7400000000000001002",
+        from_id=COLLEAGUE_WEB_UID,
+        chat_id=ORDINARY_CHAT_WEB_ID,
+        nodes=[Node(text="@Owner", at=OWNER_WEB_UID), T(" 任务卡住了，麻烦看下")],
+        create_time_s=1_760_001_002,
+        at_me=True,
+    )
+    assert await poller.handle_pushed_web_message(mention_msg) is False
+    assert poller.realtime_router.delivery_failed_count == 1
+    assert poller.realtime_router.needs_patrol_fallback is True
+    assert feishu_due(state, now) is True
+    poller._frontier_task = None
+
+
+@pytest.mark.asyncio
+async def test_sibling_29c6249b_gateway_coexistence_suppresses_courtesy_and_suppressed_ids(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Coexistence with 29c6249b: courtesy mentions or messages suppressed by realtime are rejected at submit_external_event."""
+    from claude_hub.services.dot.events_gateway import submit_external_event
+
+    dot = DotService(DotStore(tmp_path / "dot"))
+    monkeypatch.setattr(dot, "is_set_up", lambda: True)
+    dot.wake_for_external_event = AsyncMock()  # type: ignore[method-assign]
+    monkeypatch.setattr("claude_hub.services.dot.get_dot_service", lambda: dot)
+
+    # 1. Legacy 90s bridge submits a courtesy @me mention ("@Owner 收到，谢谢！") -> suppressed at gateway
+    courtesy_bridge_event = ExternalEvent(
+        source="feishu",
+        event_type="im.mention",
+        dedupe_key="om_bridge_courtesy_1",
+        severity="urgent",
+        title="Feishu mention",
+        summary=" Group · Alice · @Owner 收到，谢谢！",
+        payload={
+            "chat_id": "oc_group_1",
+            "message_id": "om_bridge_courtesy_1",
+            "text": "@Owner 收到，谢谢！",
+        },
+    )
+    assert await submit_external_event(courtesy_bridge_event, dot) is False
+    assert dot.store.list_inbox() == []
+    dot.wake_for_external_event.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -628,7 +970,9 @@ async def test_default_dot_event_gateway_integration_and_20m_patrol_suppression(
 
     # Also verify automatic health tracking on the singleton poller
     import claude_hub.services.feishu_ai_poller as poller_mod
-    from claude_hub.services.feishu_realtime_events import is_feishu_realtime_stream_healthy
+    from claude_hub.services.feishu_realtime_events import (
+        is_feishu_realtime_stream_healthy,
+    )
 
     monkeypatch.setattr(poller_mod, "_DEFAULT_AI_POLLER", poller)
     poller._frontier_task = type("FakeTask", (), {"done": lambda self: False})()  # type: ignore[assignment]
