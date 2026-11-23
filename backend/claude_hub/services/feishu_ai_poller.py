@@ -24,6 +24,10 @@ from claude_hub.services.feishu_ai_command import (
     get_feishu_ai_command_service,
     parse_ai_command,
 )
+from claude_hub.services.feishu_realtime_events import (
+    FeishuRealtimeEventRouter,
+    get_feishu_realtime_event_router,
+)
 from claude_hub.services.feishu_user_client import (
     FeishuMessageSearchPage,
     FeishuUserClient,
@@ -79,17 +83,22 @@ class FeishuAiPoller:
         self,
         service: FeishuAiCommandService | None = None,
         *,
+        realtime_router: FeishuRealtimeEventRouter | None = None,
         initial_lookback_ms: int = _INITIAL_WATERMARK_LOOKBACK_MS,
         max_pages_per_chat: int = _MAX_POLL_PAGES_PER_CHAT,
         max_concurrent_dispatches: int = _MAX_CONCURRENT_DISPATCHES,
     ) -> None:
         self._service = service or get_feishu_ai_command_service()
+        self._realtime_router = realtime_router or get_feishu_realtime_event_router()
         self._initial_lookback_ms = initial_lookback_ms
         self._max_pages_per_chat = max(1, max_pages_per_chat)
         self._dispatch_sem = asyncio.Semaphore(max(1, max_concurrent_dispatches))
         self._task: asyncio.Task[None] | None = None
         self._frontier_task: asyncio.Task[None] | None = None
         self._frontier_stop = asyncio.Event()
+        self._frontier_connected = False
+        self._last_frontier_connected_at: float | None = None
+        self._last_frontier_error: str | None = None
         self._worker_tasks: set[asyncio.Task[None]] = set()
         self._in_flight_ids: set[str] = set()
         self._search_msg_cache: OrderedDict[str, FeishuUserMessage | None] = OrderedDict()
@@ -104,6 +113,10 @@ class FeishuAiPoller:
         self._skipped_count = 0
 
     @property
+    def realtime_router(self) -> FeishuRealtimeEventRouter:
+        return self._realtime_router
+
+    @property
     def running(self) -> bool:
         return self._task is not None and not self._task.done() and not self._stopping
 
@@ -115,11 +128,57 @@ class FeishuAiPoller:
             and not self._stopping
         )
 
+    @property
+    def realtime_stream_healthy(self) -> bool:
+        return (
+            self.frontier_running
+            and self._frontier_connected
+            and self._last_frontier_error is None
+            and self._realtime_router.resolve_config().enabled
+        )
+
+    def _on_frontier_state(self, exc: Exception | None) -> None:
+        if exc is None:
+            self._frontier_connected = True
+            self._last_frontier_connected_at = time.time()
+            self._last_frontier_error = None
+        else:
+            self._frontier_connected = False
+            self._last_frontier_error = str(exc) or type(exc).__name__
+
+    def _resolve_owner_ids(self, cfg: FeishuAiCommandConfig, wt: Any) -> set[str]:
+        ids: set[str] = set()
+        if cfg.owner_open_id and cfg.owner_open_id.strip():
+            ids.add(cfg.owner_open_id.strip())
+        if wt is not None and hasattr(wt, "resolve_owner_identity"):
+            try:
+                resolved = wt.resolve_owner_identity()
+                if isinstance(resolved, str) and resolved.strip():
+                    ids.add(resolved.strip())
+            except Exception:
+                pass
+        web_store = getattr(self._service, "web_session_store", None)
+        if web_store is not None and hasattr(web_store, "load"):
+            try:
+                sess = web_store.load(auto_import_larkx=False)
+                if sess is not None:
+                    for attr in ("user_id", "open_id"):
+                        val = getattr(sess, attr, "")
+                        if isinstance(val, str) and val.strip():
+                            ids.add(val.strip())
+            except Exception:
+                pass
+        return ids
+
     def status_dict(self) -> dict[str, Any]:
         watermarks = self._service.get_watermarks()
         return {
             "running": self.running,
             "frontier_running": self.frontier_running,
+            "frontier_connected": self._frontier_connected,
+            "realtime_stream_healthy": self.realtime_stream_healthy,
+            "realtime_events_emitted": self._realtime_router.emitted_count,
+            "realtime_events_suppressed": self._realtime_router.suppressed_count,
             "poll_count": self._poll_count,
             "last_poll_at": self._last_poll_at,
             "last_error": self._last_error,
@@ -149,26 +208,48 @@ class FeishuAiPoller:
         )
         if wt is None:
             return False
+        if self.frontier_running:
+            self._frontier_connected = True
+            self._last_frontier_error = None
         user_msg = wt.ingest_pushed_message(pushed)
         if user_msg is None:
             return False
-        if not self._service.is_owner_ai_command_candidate(
+        is_owner = bool(
+            user_msg.sender_type == "user"
+            and self._service._matches_owner_sender(user_msg.sender_open_id, cfg)
+        )
+        if self._service.is_owner_ai_command_candidate(
             sender_open_id=user_msg.sender_open_id,
             sender_type=user_msg.sender_type,
             text=user_msg.text,
             config=cfg,
         ):
-            return False
-        self._commands_detected += 1
-        self._service.enqueue_pending_command(user_msg, source="web_frontier")
-        self._schedule_durable_pending_queue()
-        return True
+            self._realtime_router.record_owner_pushed_message(
+                pushed,
+                user_msg,
+                web_transport=wt,
+            )
+            self._commands_detected += 1
+            self._service.enqueue_pending_command(user_msg, source="web_frontier")
+            self._schedule_durable_pending_queue()
+            return True
+
+        owner_ids = self._resolve_owner_ids(cfg, wt)
+        return await self._realtime_router.handle_pushed_message(
+            pushed,
+            user_msg,
+            web_transport=wt,
+            user_client=user_client,
+            owner_ids=owner_ids,
+            is_owner_sender=is_owner,
+        )
 
     def _ensure_frontier_task(self, cfg: Any) -> None:
         if self._stopping or not cfg.enabled or cfg.send_mode == "openapi":
             if self._frontier_task is not None and not self._frontier_task.done():
                 self._frontier_stop.set()
                 self._frontier_task.cancel()
+            self._frontier_connected = False
             return
         user_client = self._service.build_user_client(cfg)
         if (
@@ -178,6 +259,7 @@ class FeishuAiPoller:
             if self._frontier_task is not None and not self._frontier_task.done():
                 self._frontier_stop.set()
                 self._frontier_task.cancel()
+            self._frontier_connected = False
             return
         wt = (
             user_client._get_web_transport() if hasattr(user_client, "_get_web_transport") else None
@@ -186,10 +268,17 @@ class FeishuAiPoller:
             if self._frontier_task is not None and not self._frontier_task.done():
                 self._frontier_stop.set()
                 self._frontier_task.cancel()
+            self._frontier_connected = False
             return
         if self._frontier_task is None or self._frontier_task.done():
             self._frontier_stop = asyncio.Event()
-            listener = wt.create_frontier_listener(self.handle_pushed_web_message)
+            try:
+                listener = wt.create_frontier_listener(
+                    self.handle_pushed_web_message,
+                    on_state=self._on_frontier_state,
+                )
+            except TypeError:
+                listener = wt.create_frontier_listener(self.handle_pushed_web_message)
             self._frontier_task = asyncio.create_task(
                 listener.run(stop_event=self._frontier_stop),
                 name="feishu-web-frontier",
@@ -218,6 +307,7 @@ class FeishuAiPoller:
 
     async def quiesce(self) -> None:
         self._stopping = True
+        self._frontier_connected = False
         self._wake_event.set()
         self._frontier_stop.set()
         if self._frontier_task is not None and not self._frontier_task.done():

@@ -12,6 +12,7 @@ from typing import Any, Literal
 from zoneinfo import ZoneInfo
 
 from ...models import AgentReport, AgentReportState, TaskLifecycle, TaskPhase, WorkspaceTask
+from ..feishu_realtime_events import is_feishu_realtime_stream_healthy
 from .commands import CommandRunner, run_command
 from .daily_digest import DecisionModel, build_daily_digest
 from .digest_provider import recommend_daily_decisions
@@ -84,9 +85,18 @@ def due_daily_slots(state: PatrolState, now: datetime) -> list[str]:
     return due
 
 
-def feishu_due(state: PatrolState, now: datetime) -> bool:
+def feishu_due(
+    state: PatrolState,
+    now: datetime,
+    *,
+    realtime_healthy: bool | None = None,
+) -> bool:
     config = state.config
     if not config.enabled or not config.feishu_enabled:
+        return False
+    if realtime_healthy is None:
+        realtime_healthy = is_feishu_realtime_stream_healthy()
+    if realtime_healthy:
         return False
     local = now.astimezone(ZoneInfo(config.timezone))
     clock = local.strftime("%H:%M")

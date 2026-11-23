@@ -43,6 +43,11 @@ from claude_hub.services.demand_patrol.models import (
     PatrolRunRecord,
     PatrolState,
 )
+from claude_hub.services.feishu_realtime_events import (
+    get_feishu_realtime_event_router,
+    is_courtesy_or_ack_only,
+    matches_watch_group_url,
+)
 from claude_hub.services.local_runtime_settings import local_setting
 from claude_hub.services.maso_discovery import discover_maso_service
 from claude_hub.services.subagents import SubagentError
@@ -62,6 +67,8 @@ _ACTIONABLE = re.compile(
 
 
 def _is_actionable(text: str) -> bool:
+    if is_courtesy_or_ack_only(text):
+        return False
     if _ACTIONABLE.search(text):
         return True
     return any(
@@ -419,20 +426,37 @@ def _is_answered_by(message: FeishuCandidate, own: FeishuCandidate) -> bool:
             return own.created_at >= message.created_at
         if message.reply_to and own.reply_to == message.reply_to:
             return own.created_at > message.created_at
+        if (
+            bool(message.thread_id)
+            and own.thread_id == message.thread_id
+            and own.created_at >= message.created_at
+        ):
+            return True
+        if own.thread_id and own.thread_id == message.message_id:
+            return own.created_at >= message.created_at
         return False
     if own.created_at <= message.created_at:
         return False
     if message.thread_id or own.thread_id:
+        if own.thread_id == message.message_id:
+            return True
         return bool(message.thread_id) and own.thread_id == message.thread_id
+    if (
+        message.chat_type == "group"
+        and message.sender_id
+        and message.sender_id in own.mentioned_ids
+    ):
+        return True
     return message.chat_type == "p2p"
 
 
 def filter_unanswered(
     messages: Sequence[FeishuCandidate], user_open_id: str, processed_ids: Sequence[str]
 ) -> tuple[list[FeishuCandidate], list[str]]:
-    """Admit only direct, explicitly mentioned, or participated-thread human questions."""
+    """Admit only direct, explicitly mentioned, watch-group URL, or participated-thread human questions."""
     own_messages = [message for message in messages if message.sender_id == user_open_id]
     seen = set(processed_ids)
+    realtime_router = get_feishu_realtime_event_router()
     candidates, answered = [], []
     for message in sorted(messages, key=lambda item: item.created_at):
         if message.message_id in seen or message.sender_id == user_open_id:
@@ -441,12 +465,33 @@ def filter_unanswered(
         if _is_automated_candidate(message):
             answered.append(message.message_id)
             continue
+        created_ms = int(message.created_at.timestamp() * 1000)
+        if realtime_router.is_message_handled(
+            message.message_id,
+            chat_id=message.chat_id,
+            thread_id=message.thread_id,
+            text=message.text,
+        ) or realtime_router.has_owner_replied(
+            chat_id=message.chat_id,
+            thread_id=message.thread_id,
+            reply_to=message.reply_to,
+            message_id=message.message_id,
+            created_at_ms=created_ms,
+        ):
+            answered.append(message.message_id)
+            continue
         if any(_is_answered_by(message, own) for own in own_messages):
             answered.append(message.message_id)
             continue
+        watch_urls = matches_watch_group_url(
+            message.chat_id,
+            message.chat_name,
+            message.text,
+        )
         relevant = (
             message.chat_type == "p2p"
             or user_open_id in message.mentioned_ids
+            or bool(watch_urls)
             or (
                 bool(message.thread_id)
                 and any(
@@ -457,7 +502,12 @@ def filter_unanswered(
                 )
             )
         )
-        if relevant and _is_actionable(message.text):
+        if not relevant:
+            continue
+        if is_courtesy_or_ack_only(message.text):
+            answered.append(message.message_id)
+            continue
+        if bool(watch_urls) or _is_actionable(message.text):
             candidates.append(message)
     return candidates, answered
 

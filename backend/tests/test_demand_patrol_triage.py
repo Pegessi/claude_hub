@@ -1767,3 +1767,79 @@ async def test_patrol_keeps_original_fallback_when_configured_model_unavailable(
     monkeypatch.setattr(triage_module, "_run_workspace_triage_turn", fake_run_turn)
     await diagnose_message(candidate_for_adapter())
     assert wm.ensure_calls[0][1].agent_type == AgentType.CODEX
+
+
+async def test_courtesy_closings_thread_root_replies_and_realtime_dedup_are_suppressed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from claude_hub.services.feishu_realtime_events import FeishuRealtimeEventRouter
+
+    router = FeishuRealtimeEventRouter()
+    router._record_handled(
+        "7400000000000000999",
+        alias_id="om_realtime_handled",
+        chat_keys={"oc_chat"},
+        thread_id="omt_rt",
+        text="@Example Person 实时通道已处理的故障 https://compute.example.invalid/job/999",
+    )
+    monkeypatch.setattr(triage_module, "get_feishu_realtime_event_router", lambda: router)
+
+    rows = [
+        # 1. Courtesy closing with @me and question-like punctuation -> suppressed
+        message(
+            "om_courtesy_1",
+            chat_type="group",
+            mentions=[{"id": ME}],
+            minutes_ago=25,
+            text="@Example Person 收到，谢谢！",
+        ),
+        message(
+            "om_courtesy_2",
+            chat_type="p2p",
+            minutes_ago=22,
+            text="好的，已经恢复了，不用看了，多谢！",
+        ),
+        # 2. Thread reply where user replied anchored to root_id ("om_root") rather than followup ("om_thread_q")
+        {
+            **message(
+                "om_thread_q",
+                chat_type="group",
+                thread="omt_thread_root",
+                minutes_ago=20,
+                mentions=[{"id": ME}],
+                text="@Example Person 这里还是报错 OOM",
+            ),
+            "reply_to": "om_earlier_msg",
+        },
+        {
+            **message(
+                "om_own_thread_reply",
+                chat_type="group",
+                sender=ME,
+                thread="omt_thread_root",
+                minutes_ago=10,
+                text="已经定位并修复了",
+            ),
+            "reply_to": "om_thread_root",
+        },
+        # 3. Already handled by real-time WebSocket stream -> suppressed
+        message(
+            "om_realtime_handled",
+            chat_type="group",
+            thread="omt_rt",
+            minutes_ago=15,
+            mentions=[{"id": ME}],
+            text="@Example Person 实时通道已处理的故障 https://compute.example.invalid/job/999",
+        ),
+    ]
+    state = PatrolState()
+    result = await run_feishu_triage(state, now=NOW, dot=FakeDot(), runner=FakeRunner(rows))
+    assert (result.candidates, result.llm_invoked, result.notified) == (0, 0, 0)
+    assert result.details["answered_skipped"] == 4
+    for suppressed_id in (
+        "om_courtesy_1",
+        "om_courtesy_2",
+        "om_thread_q",
+        "om_realtime_handled",
+    ):
+        assert suppressed_id in state.processed_feishu_ids

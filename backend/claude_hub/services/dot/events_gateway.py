@@ -149,6 +149,21 @@ def render_external_event(event: dict[str, Any]) -> str:
     )
 
 
+async def submit_external_event(
+    event: ExternalEvent,
+    service: DotService | None = None,
+) -> bool:
+    """Enqueue a validated ExternalEvent and wake Dot immediately on urgent events."""
+    if service is None:
+        from . import get_dot_service
+
+        service = get_dot_service()
+    accepted = await asyncio.to_thread(_enqueue, service.store, event)
+    if accepted and event.severity == "urgent" and service.is_set_up():
+        await service.wake_for_external_event()
+    return accepted
+
+
 async def receive_external_event(request: Request, service: DotService) -> dict[str, str]:
     authorize_event(request)
     body = bytearray()
@@ -163,7 +178,5 @@ async def receive_external_event(request: Request, service: DotService) -> dict[
             value.encode()
     except (ValidationError, UnicodeError):
         raise HTTPException(422, "Invalid Dot event fields") from None
-    accepted = await asyncio.to_thread(_enqueue, service.store, event)
-    if accepted and event.severity == "urgent" and service.is_set_up():
-        await service.wake_for_external_event()
+    accepted = await submit_external_event(event, service)
     return {"status": "accepted" if accepted else "duplicate"}

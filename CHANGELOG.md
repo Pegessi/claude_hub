@@ -7,6 +7,11 @@
 
 ## Released
 
+### feat(feishu): route real-time WebSocket mention and watch-group URL events with self-reply suppression
+
+- Add `services/feishu_realtime_events.py` and hook `FeishuAiPoller.handle_pushed_web_message` so non-self `@current_user` mentions in any chat/DM and configured fault/task URLs in priority watch groups emit immediate `urgent` Dot events without affecting `/ai` command parsing.
+- Suppress courtesy-only closings and conversations/threads where the current user has already replied after the trigger message, and automatically suppress redundant 20-minute slow patrol ticks while the WebSocket frontier stream is healthy.
+
 ### fix(dot): prefer strong scouting verification models
 
 - Rank high-reasoning models ahead of base and inexpensive fallback choices.
