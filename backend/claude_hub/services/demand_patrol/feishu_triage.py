@@ -476,6 +476,7 @@ def filter_unanswered(
         if realtime_router.is_message_handled(
             message.message_id,
             chat_id=message.chat_id,
+            chat_name=message.chat_name,
             thread_id=message.thread_id,
             sender_id=message.sender_id,
             text=message.text,
@@ -501,7 +502,9 @@ def filter_unanswered(
             message_id=message.message_id,
         )
         is_mention = user_open_id in message.mentioned_ids
-        is_watch_url = bool(watch_urls)
+        is_watch_url = bool(watch_urls) or realtime_router.is_pending_failed_watch_candidate(
+            message
+        )
         is_participated_thread = bool(message.thread_id) and any(
             own.chat_id == message.chat_id
             and own.thread_id == message.thread_id
@@ -724,6 +727,49 @@ async def _thread_window_messages(
         seen_tokens.add(next_token)
         page_token = next_token
 
+    raise CommandError("Feishu search is incomplete; watermark retained")
+
+
+async def _watched_chat_window_messages(
+    runner: CommandRunner,
+    chat_id: str,
+    *,
+    start_iso: str,
+    end_iso: str,
+    start: datetime,
+    now: datetime,
+    tz: str | ZoneInfo | timezone = "Asia/Shanghai",
+) -> list[FeishuCandidate]:
+    defaults = {"chat_id": chat_id, "chat_type": "group"}
+    collected: list[FeishuCandidate] = []
+    seen_ids: set[str] = set()
+    seen_tokens: set[str] = set()
+    page_token: str | None = None
+    for _ in range(_MAX_THREAD_PAGES):
+        extra = ("--chat-id", chat_id, *(("--page-token", page_token) if page_token else ()))
+        payload = await runner(_search_command(start_iso, end_iso, *extra), timeout=60)
+        data = _object(payload)
+        if data.get("truncated") is True or data.get("errors"):
+            raise CommandError("Feishu search is incomplete; watermark retained")
+        rows = data.get("messages", data.get("items"))
+        if not isinstance(rows, list) or len(rows) > _MAX_SEARCH_ROWS:
+            raise CommandError("Feishu search did not return a bounded message list")
+        for row in rows:
+            if not isinstance(row, dict):
+                raise CommandError("Feishu search returned a malformed message")
+            if row.get("deleted"):
+                continue
+            item = _candidate(row, tz=tz, defaults=defaults)
+            if start <= item.created_at <= now and item.message_id not in seen_ids:
+                seen_ids.add(item.message_id)
+                collected.append(item)
+        next_token = _next_page_token(payload, data)
+        if not _page_has_more(payload, data, next_token):
+            return collected
+        if not rows or not next_token or next_token in seen_tokens:
+            raise CommandError("Feishu search is incomplete; watermark retained")
+        seen_tokens.add(next_token)
+        page_token = next_token
     raise CommandError("Feishu search is incomplete; watermark retained")
 
 
@@ -1284,12 +1330,6 @@ async def run_feishu_triage(
             ("--chat-type", "p2p"),
             ("--sender", uid),
         ]
-        if (
-            rt_cfg.watch_chat_ids
-            or rt_cfg.watch_chat_names
-            or realtime_router.needs_patrol_fallback
-        ):
-            search_flags.append(("--chat-type", "group"))
         by_id: dict[str, FeishuCandidate] = {}
         for extra_flags in search_flags:
             payload = await runner(
@@ -1299,6 +1339,17 @@ async def run_feishu_triage(
             for item in _search_messages(payload, tz=tz):
                 if start <= item.created_at <= now:
                     by_id.setdefault(item.message_id, item)
+        for watch_chat_id in realtime_router.watched_openapi_chat_ids(rt_cfg):
+            for item in await _watched_chat_window_messages(
+                runner,
+                watch_chat_id,
+                start_iso=start_iso,
+                end_iso=end_iso,
+                start=start,
+                now=now,
+                tz=tz,
+            ):
+                by_id.setdefault(item.message_id, item)
         participated_threads: dict[str, FeishuCandidate] = {}
         for item in by_id.values():
             if item.sender_id == uid and item.thread_id and item.chat_type != "p2p":
@@ -1424,6 +1475,7 @@ async def run_feishu_triage(
         recovered_ids=completed,
         recovered_candidates=[item for item in candidates if item.message_id in completed_set],
         seen_ids=[item.message_id for item in messages],
+        seen_candidates=messages,
         window_start_ms=int(start.timestamp() * 1000),
         window_end_ms=int(now.timestamp() * 1000),
         max_generation=fallback_gen,

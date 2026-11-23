@@ -1397,3 +1397,262 @@ async def test_default_dot_event_gateway_integration_and_20m_patrol_suppression(
     assert is_feishu_realtime_stream_healthy() is False
     assert feishu_due(state, now) is True
     poller._frontier_task = None
+
+
+@pytest.mark.asyncio
+async def test_c3_r1_probe_a_and_b_strict_fallback_identity_matching(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """C3-R1 regression: failed watch delivery must not leak watch eligibility to ordinary groups or overwrite aliases across chats."""
+    from claude_hub.services.demand_patrol.feishu_triage import _candidate
+
+    async def fail_sink(_ev: ExternalEvent) -> bool:
+        return False
+
+    router = FeishuRealtimeEventRouter(
+        config=FeishuRealtimeEventConfig(
+            enabled=True,
+            watch_chat_ids=frozenset({"oc_watch_A"}),
+            url_patterns=(r"https://compute\.example\.com/job/\d+",),
+        ),
+        event_sink=fail_sink,
+    )
+    monkeypatch.setattr(
+        "claude_hub.services.feishu_realtime_events._DEFAULT_REALTIME_ROUTER", router
+    )
+    pushed_a = _build_pushed_via_wire(
+        msg_id="7400000000000000901",
+        from_id=COLLEAGUE_WEB_UID,
+        chat_id="oc_watch_A",
+        nodes=[T("服务报错 https://compute.example.com/job/901")],
+        create_time_s=1_760_000_901,
+    )
+    um_a = FeishuUserMessage(
+        message_id="7400000000000000901",
+        chat_id="oc_watch_A",
+        sender_open_id="ou_alice",
+        sender_type="user",
+        msg_type="post",
+        text="服务报错 https://compute.example.com/job/901",
+        create_time_ms=1_760_000_901_000,
+    )
+    assert (
+        await router.handle_pushed_message(pushed_a, um_a, owner_ids={OWNER_OPEN_ID, OWNER_WEB_UID})
+        is False
+    )
+    assert router.pending_fallback_count == 1
+
+    # Probe A: Same text/URL sent in an unconfigured ordinary group must NOT trigger watch-group alert
+    emitted: list[ExternalEvent] = []
+
+    async def ok_sink(ev: ExternalEvent) -> bool:
+        emitted.append(ev)
+        return True
+
+    router._event_sink = ok_sink
+    pushed_b = _build_pushed_via_wire(
+        msg_id="7400000000000000902",
+        from_id="7100000000000000009",
+        chat_id=ORDINARY_CHAT_WEB_ID,
+        nodes=[T("服务报错 https://compute.example.com/job/901")],
+        create_time_s=1_760_000_902,
+    )
+    um_b = FeishuUserMessage(
+        message_id="7400000000000000902",
+        chat_id=ORDINARY_CHAT_WEB_ID,
+        sender_open_id="ou_bob",
+        sender_type="user",
+        msg_type="post",
+        text="服务报错 https://compute.example.com/job/901",
+        create_time_ms=1_760_000_902_000,
+    )
+    assert (
+        await router.handle_pushed_message(pushed_b, um_b, owner_ids={OWNER_OPEN_ID, OWNER_WEB_UID})
+        is False
+    )
+    assert emitted == []
+
+    # Probe B: Cross-chat / cross-sender / conflicting-alias candidate must NOT ack fallback or overwrite alias
+    router2 = FeishuRealtimeEventRouter()
+    router2._add_fallback_record(
+        "om_known_A",
+        "7400000000000000910",
+        "failed_delivery",
+        "Watch A",
+        {"oc_watch_a"},
+        "omt_t1",
+        "ou_alice",
+        "请看 https://compute.example.com/job/910",
+        1_760_000_910_000,
+        "om_known_A",
+        "",
+        ("https://compute.example.com/job/910",),
+    )
+    cand_b = _candidate(
+        {
+            "message_id": "om_other_B",
+            "chat_id": "oc_other_B",
+            "chat_type": "group",
+            "thread_id": "omt_t1",
+            "create_time": "1760000911000",
+            "sender": {"id": "ou_bob", "name": "Bob"},
+            "content": "请看 https://compute.example.com/job/910",
+            "mentions": [{"id": OWNER_OPEN_ID}],
+        }
+    )
+    router2.acknowledge_patrol_fallback(recovered_ids=["om_other_B"], recovered_candidates=[cand_b])
+    assert router2.pending_fallback_count == 1
+    assert router2.is_message_handled("om_other_B") is False
+
+
+@pytest.mark.asyncio
+async def test_c3_r2_probe_c_real_web_push_numeric_sender_deduplicates_with_openapi_patrol(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """C3-R2 regression: real Web push with numeric from_id deduplicates against OpenAPI patrol with ou_... sender."""
+    from claude_hub.services.demand_patrol import feishu_triage as triage_mod
+    from claude_hub.services.demand_patrol.feishu_triage import _candidate, filter_unanswered
+    from claude_hub.services.feishu_web_session.rich import WebChat
+
+    emitted: list[ExternalEvent] = []
+
+    async def sink(ev: ExternalEvent) -> bool:
+        emitted.append(ev)
+        return True
+
+    poller, _svc, uc = _setup_poller(
+        tmp_path,
+        realtime_config=FeishuRealtimeEventConfig(enabled=True),
+        event_sink=sink,
+    )
+    wt = uc._get_web_transport()
+    assert wt is not None
+    wt._remember_chat(
+        WebChat(id=ORDINARY_CHAT_WEB_ID, open_chat_id="oc_group_1", name="研发排障群")
+    )
+    monkeypatch.setattr(
+        triage_mod, "get_feishu_realtime_event_router", lambda: poller.realtime_router
+    )
+
+    pushed = _build_pushed_via_wire(
+        msg_id="7400000000000000950",
+        from_id=COLLEAGUE_WEB_UID,
+        chat_id=ORDINARY_CHAT_WEB_ID,
+        nodes=[Node(text="@Owner", at=OWNER_WEB_UID), T(" 线上推理服务报错 OOM，麻烦看下")],
+        create_time_s=1_760_000_950,
+        at_me=True,
+    )
+    assert await poller.handle_pushed_web_message(pushed) is True
+    assert len(emitted) == 1
+
+    openapi_cand = _candidate(
+        {
+            "message_id": "om_openapi_950",
+            "chat_id": "oc_group_1",
+            "chat_name": "研发排障群",
+            "chat_type": "group",
+            "thread_id": "",
+            "create_time": "1760000950000",
+            "sender": {"id": "ou_colleague", "name": "Alice"},
+            "content": f'<at user_id="{OWNER_OPEN_ID}">@Owner</at> 线上推理服务报错 OOM，麻烦看下',
+            "mentions": [{"id": OWNER_OPEN_ID}],
+        }
+    )
+    cands, answered = filter_unanswered([openapi_cand], OWNER_OPEN_ID, [], realtime_healthy=True)
+    assert cands == []
+    assert answered == ["om_openapi_950"]
+
+
+@pytest.mark.asyncio
+async def test_c3_r3_probe_d_scoped_watched_chat_search_avoids_501_all_group_starvation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """C3-R3 regression: 501 unrelated group messages must not starve @me mentions or watched-group URL patrol."""
+    from claude_hub.services.demand_patrol import feishu_triage as triage_mod
+    from claude_hub.services.demand_patrol.feishu_triage import (
+        TriageDiagnosis,
+        TriageEvidenceLink,
+        run_feishu_triage,
+    )
+    from tests.test_demand_patrol_triage import ME, FakeDot, FakeRunner, capabilities
+
+    monkeypatch.setenv("INFOWALL_URL", "http://127.0.0.1:18899")
+    monkeypatch.setenv("INFOWALL_API_KEY_FILE", "/home/tiger/.local/state/infowall/api-key")
+    router = FeishuRealtimeEventRouter(
+        config=FeishuRealtimeEventConfig(
+            enabled=True,
+            watch_chat_ids=frozenset({"oc_watch_priority"}),
+            url_patterns=(r"https://compute\.example\.com/job/\d+",),
+        )
+    )
+    monkeypatch.setattr(triage_mod, "get_feishu_realtime_event_router", lambda: router)
+    monkeypatch.setattr(
+        "claude_hub.services.feishu_realtime_events._DEFAULT_REALTIME_ROUTER", router
+    )
+
+    now = datetime(2026, 11, 14, 3, 0, tzinfo=timezone.utc)
+    ts_ms = str((int(now.timestamp()) - 120) * 1000)
+    rows: list[dict[str, Any]] = [
+        {
+            "message_id": f"om_noise_{i}",
+            "chat_id": "oc_noisy_unwatched",
+            "chat_type": "group",
+            "create_time": ts_ms,
+            "sender": {"id": "ou_other", "name": "Other"},
+            "content": f"chatter {i}",
+            "mentions": [],
+        }
+        for i in range(505)
+    ] + [
+        {
+            "message_id": "om_valid_at_me",
+            "chat_id": "oc_ordinary_group",
+            "chat_type": "group",
+            "create_time": ts_ms,
+            "sender": {"id": "ou_alice", "name": "Alice"},
+            "content": "@Owner 请帮忙看下这个报错？",
+            "mentions": [{"id": ME}],
+            "message_app_link": "https://applink.feishu.cn/client/message/om_valid_at_me",
+        },
+        {
+            "message_id": "om_watch_url",
+            "chat_id": "oc_watch_priority",
+            "chat_type": "group",
+            "create_time": ts_ms,
+            "sender": {"id": "ou_bob", "name": "Bob"},
+            "content": "重保群故障链接 https://compute.example.com/job/777",
+            "mentions": [],
+            "message_app_link": "https://applink.feishu.cn/client/message/om_watch_url",
+        },
+    ]
+
+    async def fake_triage(_cand: Any) -> TriageDiagnosis:
+        return TriageDiagnosis(
+            headline="定位线上服务故障并核对日志",
+            root_cause="日志显示节点连接超时，需进一步检查依赖服务状态。",
+            evidence_links=[
+                TriageEvidenceLink(title="故障链接", url="https://compute.example.com/job/777")
+            ],
+            reply_draft=(
+                "已收到排障请求并初步查看故障现场，目前观察到连接超时异常。"
+                "建议先核对对应实例状态与上下游依赖配置，确认后再决定下一步修复操作。"
+            ),
+            project_hint="服务稳定性",
+            next_action="检查故障实例与日志",
+            needs_code_fix=False,
+        )
+
+    runner = FakeRunner(rows)
+    res = await run_feishu_triage(
+        PatrolState(),
+        now=now,
+        dot=FakeDot(),
+        runner=runner,
+        triage=fake_triage,
+        capabilities=capabilities,
+    )
+    assert res.errors == []
+    assert res.candidates == 2
+    assert res.notified == 2
+    assert not any("--chat-type" in argv and "group" in argv for argv, _, _ in runner.calls)
