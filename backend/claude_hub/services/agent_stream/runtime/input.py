@@ -628,9 +628,20 @@ class InputMixin(SessionState):
                         "agent_stream store append failed for error session %s",
                         self.session_id,
                     )
+                completed_payload: Dict[str, Any] = {
+                    "status": "failed",
+                    "delivery_rejected": True,
+                }
+                if getattr(transport, "_delivery_uncertain", False) or getattr(
+                    transport, "_needs_abort", False
+                ):
+                    completed_payload["delivery_uncertain"] = True
+                    quarantined_id = getattr(transport, "_quarantined_turn_id", None)
+                    if isinstance(quarantined_id, str) and quarantined_id:
+                        completed_payload["quarantined_turn_id"] = quarantined_id
                 completed = ctx.event(
                     AgentStreamEventType.TURN_COMPLETED,
-                    {"status": "failed", "delivery_rejected": True},
+                    completed_payload,
                 )
                 completed = redact_event(completed)
                 try:

@@ -605,6 +605,8 @@ class SessionCore(ABC):
         """Makes a guarded constructive rotation the active conversation."""
         self._conversation_id = conversation_id
         self._conversation_id_verified = False
+        self._hub_runtime_guidance_injected = False
+        self._dot_hidden_system_pack_delivered = False
 
     async def discard_rotated_conversation(self, conversation_id: str) -> None:
         """Releases a candidate rejected before its identity was adopted."""
@@ -866,6 +868,8 @@ class SessionCore(ABC):
                 raise
         self._conversation_id = conversation_id
         self._conversation_id_verified = True
+        self._hub_runtime_guidance_injected = False
+        self._dot_hidden_system_pack_delivered = False
 
     def maybe_capture_conversation_id(self, record: Dict[str, Any]) -> None:
         """Provider-specific hook to extract the conversation id from a record.

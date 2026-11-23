@@ -112,6 +112,8 @@ export interface StreamCapabilities {
   available_models: StreamModelOption[]
   current_model: string | null
   current_reasoning_effort: string | null
+  recovery_required?: boolean
+  quarantined_turn_id?: string | null
 }
 
 // ── Chat Goal control plane ────────────────────────────────────────────────

@@ -345,6 +345,7 @@ class SessionState(ABC):
         run_epoch: Optional[int],
         status: str,
         error_message: Optional[str] = None,
+        extra_payload: Optional[Dict[str, Any]] = None,
     ) -> AgentStreamEvent:
         raise NotImplementedError()
 

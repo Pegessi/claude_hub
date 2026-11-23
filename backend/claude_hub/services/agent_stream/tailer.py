@@ -595,13 +595,23 @@ def _native_runtime_snapshot(
     tailer: _RuntimeSessionTailer,
 ) -> Optional[NativeRuntimeSnapshot]:
     pending_question = tailer.has_pending_question()
+    transport = tailer.native_transport
+    if transport is not None and (
+        getattr(transport, "_delivery_uncertain", False)
+        or getattr(transport, "_needs_abort", False)
+        or getattr(transport, "_adoption_journal", None) is not None
+    ):
+        return NativeRuntimeSnapshot(
+            status=AgentRuntimeStatus.ATTENTION,
+            detail=UNCERTAIN_DELIVERY_DETAIL,
+            pending_question=pending_question,
+        )
     if tailer.hard_failed or tailer.native_error is not None:
         return NativeRuntimeSnapshot(
             status=AgentRuntimeStatus.OFFLINE,
             detail=tailer.native_error or tailer.last_error or "native provider unavailable",
             pending_question=pending_question,
         )
-    transport = tailer.native_transport
     if transport is None:
         return None
     if transport.last_error is not None:
@@ -629,12 +639,6 @@ def _native_runtime_snapshot(
         return NativeRuntimeSnapshot(
             status=AgentRuntimeStatus.ATTENTION,
             detail=transport.exit_error,
-            pending_question=pending_question,
-        )
-    if getattr(transport, "_delivery_uncertain", False):
-        return NativeRuntimeSnapshot(
-            status=AgentRuntimeStatus.ATTENTION,
-            detail=UNCERTAIN_DELIVERY_DETAIL,
             pending_question=pending_question,
         )
     return NativeRuntimeSnapshot(

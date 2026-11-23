@@ -47,29 +47,40 @@ class RetirementMixin(SessionState):
             if self._turn_teardown_pending:
                 return expected_turn_id is None or self._teardown_turn_id == expected_turn_id
             if transport is not None and (
-                transport.turn_in_flight or getattr(transport, "_delivery_uncertain", False)
+                transport.turn_in_flight
+                or getattr(transport, "_delivery_uncertain", False)
+                or getattr(transport, "_needs_abort", False)
             ):
                 if transport.turn_in_flight:
                     if expected_turn_id is not None and self._active_turn_id != expected_turn_id:
                         return False
-                    await self._cancel_active_turn_locked(transport)
+                    # MASO recovery can change durable conversation identity.
+                    # Return success only after that cleanup has completed;
+                    # other providers retain their responsive background Stop.
+                    session = self._session_getter()
+                    confirm_cleanup = session is not None and session.agent_type == AgentType.MASO
+                    await self._cancel_active_turn_locked(
+                        transport,
+                        await_teardown=confirm_cleanup,
+                        require_teardown=confirm_cleanup,
+                    )
                     return True
                 if self._active_turn_id is not None:
                     if expected_turn_id is not None and self._active_turn_id != expected_turn_id:
                         return False
-                    await self._cancel_active_turn_locked(transport)
+                    await self._cancel_active_turn_locked(
+                        transport, await_teardown=True, require_teardown=True
+                    )
                     return True
                 orphan = await self._store.latest_unfinished_turn()
                 quarantined_turn_id = getattr(transport, "_quarantined_turn_id", None)
-                if expected_turn_id is not None:
-                    if orphan is not None:
-                        if orphan.turn_id != expected_turn_id:
-                            return False
-                    elif quarantined_turn_id != expected_turn_id:
-                        return False
+                if expected_turn_id is not None and quarantined_turn_id != expected_turn_id:
+                    return False
                 if orphan is not None:
                     await self._terminalize_orphaned_turn_locked(orphan)
-                await self._cancel_active_turn_locked(transport)
+                await self._cancel_active_turn_locked(
+                    transport, await_teardown=True, require_teardown=True
+                )
                 return True
 
             return await self._recover_orphaned_turn_locked(expected_turn_id)
@@ -133,6 +144,11 @@ class RetirementMixin(SessionState):
 
     async def _terminalize_orphaned_turn_locked(self, orphan: AgentStreamEvent) -> None:
         """Persist one already-identified orphan's interrupted terminal edge."""
+        transport = self._native_transport
+        delivery_uncertain = transport is not None and (
+            getattr(transport, "_delivery_uncertain", False)
+            or getattr(transport, "_needs_abort", False)
+        )
         if orphan.agent_type == AgentType.MASO:
             # A fresh tailer has no in-memory cards. Rebuild only the orphan's
             # pending confirmations from durable events before retiring them.
@@ -151,11 +167,18 @@ class RetirementMixin(SessionState):
         # Every other terminalization path notifies after publishing; the orphan
         # path must do the same, or a scheduled turn whose runtime died stays
         # RUNNING forever and blocks its FIFO backlog.
+        extra_payload: Optional[Dict[str, Any]] = None
+        if delivery_uncertain:
+            extra_payload = {"delivery_uncertain": True}
+            quarantined_id = getattr(transport, "_quarantined_turn_id", None)
+            if isinstance(quarantined_id, str) and quarantined_id:
+                extra_payload["quarantined_turn_id"] = quarantined_id
         completed = await self._publish_turn_completion(
             turn_id=orphan.turn_id,
             run_epoch=orphan.run_epoch,
             status="cancelled",
             error_message=self._deps._RUNTIME_INTERRUPTED_MESSAGE,
+            extra_payload=extra_payload,
         )
         self._notify_post_persist(completed)
 
@@ -166,6 +189,7 @@ class RetirementMixin(SessionState):
         run_epoch: Optional[int],
         status: str,
         error_message: Optional[str] = None,
+        extra_payload: Optional[Dict[str, Any]] = None,
     ) -> AgentStreamEvent:
         """Persist and fan out one authoritative terminal lifecycle edge."""
         session = self._session_getter()
@@ -178,9 +202,12 @@ class RetirementMixin(SessionState):
             run_epoch=run_epoch,
             turn_id=turn_id,
         )
+        completed_payload: Dict[str, Any] = {"status": status}
+        if extra_payload:
+            completed_payload.update(extra_payload)
         completed = ctx.event(
             AgentStreamEventType.TURN_COMPLETED,
-            {"status": status},
+            completed_payload,
         )
         # Runtime loss is not a user-requested cancellation. Persist a visible
         # terminal error before the completion so the reconstructed timeline
@@ -294,7 +321,11 @@ class RetirementMixin(SessionState):
         if await_teardown:
             try:
                 await transport.cancel_active_turn()
-                if turn_id is None and not getattr(transport, "_delivery_uncertain", False):
+                if (
+                    turn_id is None
+                    and not getattr(transport, "_delivery_uncertain", False)
+                    and not getattr(transport, "_needs_abort", False)
+                ):
                     self._native_terminal_status = None
             except Exception as exc:
                 logger.exception(
@@ -343,8 +374,10 @@ class RetirementMixin(SessionState):
                 teardown_turn_id = self._teardown_turn_id
                 try:
                     await transport.cancel_active_turn()
-                    if teardown_turn_id is None and not getattr(
-                        transport, "_delivery_uncertain", False
+                    if (
+                        teardown_turn_id is None
+                        and not getattr(transport, "_delivery_uncertain", False)
+                        and not getattr(transport, "_needs_abort", False)
                     ):
                         self._native_terminal_status = None
                 except Exception:

@@ -306,11 +306,14 @@ class MasoEventAdapter(AgentStreamAdapter):
             for item in list(self._messages):
                 if item[:2] == key[:2]:
                     self._messages.pop(item, None)
+            completed_payload: Dict[str, Any] = {"status": "failed", "delivery_uncertain": True}
+            if ctx.turn_id:
+                completed_payload["quarantined_turn_id"] = ctx.turn_id
             return [
                 event(
                     AgentStreamEventType.ERROR, {"message": data.get("error", "MASO stream failed")}
                 ),
-                event(AgentStreamEventType.TURN_COMPLETED, {"status": "failed"}),
+                event(AgentStreamEventType.TURN_COMPLETED, completed_payload),
             ]
         if kind in {"agent_start", "agent_end"} and child:
             reason = data.get("stop_reason")

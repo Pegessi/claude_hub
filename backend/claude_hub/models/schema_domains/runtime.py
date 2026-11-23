@@ -138,6 +138,8 @@ class StreamCapabilities(BaseModel):
     # False when metadata (for example provider model catalogs) is a fallback
     # that should not receive long-lived client or backend capability caching.
     metadata_cacheable: bool = True
+    recovery_required: bool = False
+    quarantined_turn_id: Optional[str] = None
 
 
 class ExecutionTarget(str, Enum):

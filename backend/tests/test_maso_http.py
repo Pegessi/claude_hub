@@ -5,6 +5,7 @@ import base64
 import json
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -26,6 +27,7 @@ from claude_hub.services.agent_stream.maso_events import MasoEventAdapter
 from claude_hub.services.agent_stream.maso_http import MasoHttpSession
 from claude_hub.services.agent_stream.native import create_native_session
 from claude_hub.services.agent_stream.registry import get_adapter_for_session
+from claude_hub.services.agent_stream.store import AgentStreamStore
 from claude_hub.services.agent_stream.tailer import (
     SessionTailer,
     TailerManager,
@@ -144,7 +146,7 @@ class MasoServer:
             metadata = {"ref": ref, "media_type": mime, "bytes": len(image)}
             return httpx.Response(
                 200,
-                json=self.image_metadata if self.image_metadata is not None else metadata,
+                json=(self.image_metadata if self.image_metadata is not None else metadata),
             )
         body = json.loads(request.content) if request.content else {}
         self.calls.append((request.method, path, body))
@@ -1160,8 +1162,9 @@ async def test_stop_fences_late_events_before_abort_is_confirmed(tmp_path, monke
     try:
         await tailer.send_message("stop me", [], "stopped")
         generation = provider._stdout_generation
-        assert await tailer.cancel_turn("stopped")
+        stopping = asyncio.create_task(tailer.cancel_turn("stopped"))
         await asyncio.wait_for(server.abort_entered.wait(), 2)
+        assert not stopping.done()  # MASO Stop confirms teardown before returning.
         assert server.streams[-1].closed
         late_events: list[tuple[str, dict[str, Any]]] = [
             ("llm_token", {"content": "late output", "content_offset": 0}),
@@ -1172,7 +1175,7 @@ async def test_stop_fences_late_events_before_abort_is_confirmed(tmp_path, monke
             assert not provider.accepts_notification(late)
             await provider._stdout_queue.put((generation, late))
         server.abort_release.set()
-        await tailer._await_turn_teardown()
+        assert await asyncio.wait_for(stopping, 2)
         page = await tailer._store.read_since(0, 100)
         assert all(e.turn_id == "stopped" for e in page.events)
         assert not any(e.type == AgentStreamEventType.TEXT_DELTA for e in page.events)
@@ -1201,14 +1204,16 @@ async def test_next_turn_waits_for_cancel_finalizers_after_registry_is_idle() ->
     second = None
     try:
         await tailer.send_message("first", [], "first")
-        assert await tailer.cancel_turn("first")
+        stopping = asyncio.create_task(tailer.cancel_turn("first"))
         await asyncio.wait_for(server.exit_entered.wait(), 2)
+        assert not stopping.done()
         assert not server.running  # idle is observable before old agent_end
         second = asyncio.create_task(tailer.send_message("second", [], "second"))
         await asyncio.sleep(0)
         assert not second.done()
         assert len(server.streams) == 1
         server.exit_release.set()
+        assert await asyncio.wait_for(stopping, 2)
         await asyncio.wait_for(second, 2)
         assert len(server.streams) == 2
         await asyncio.sleep(0)
@@ -2595,7 +2600,12 @@ async def test_local_rejection_under_existing_uncertain_quarantine_closes_user_a
                 AgentStreamEventType.ERROR,
                 AgentStreamEventType.TURN_COMPLETED,
             ]
-            assert events[-1].payload == {"status": "failed", "delivery_rejected": True}
+            assert events[-1].payload == {
+                "status": "failed",
+                "delivery_rejected": True,
+                "delivery_uncertain": True,
+                "quarantined_turn_id": "turn-1",
+            }
 
         # Cold tailer startup must not find any orphan or emit runtime_interrupted.
         before_count = len(page.events)
@@ -2634,4 +2644,493 @@ async def test_local_rejection_under_existing_uncertain_quarantine_closes_user_a
                 break
     finally:
         tailer.unsubscribe_completion(completion)
+        await tailer.stop()
+
+
+@pytest.mark.asyncio
+async def test_stop_rotation_after_unacknowledged_followup_reinjects_guidance_and_seeds_prior_turns() -> (
+    None
+):
+    server = MasoServer()
+    record = session()
+    provider = transport(server, record)
+    tailer = SessionTailer(
+        workspace_id=record.workspace_id,
+        session_id=record.id,
+        adapter=MasoEventAdapter(),
+        session_getter=lambda: record,
+        native_transport=provider,
+    )
+    completion = await tailer.subscribe_completion()
+    try:
+        await tailer.send_message("Remember token ALPHA-42", [], "turn-1")
+        server.streams[-1].emit(
+            "post_llm_response",
+            {"agent_id": "main", "content": "Acknowledged ALPHA-42."},
+        )
+        server.running = False
+        server.streams[-1].emit("agent_end", {"agent_id": "main", "stop_reason": "completed"})
+        while True:
+            done = await asyncio.wait_for(completion.get(), 2)
+            if done.turn_id == "turn-1" and done.type == AgentStreamEventType.TURN_COMPLETED:
+                break
+        assert provider._hub_runtime_guidance_injected is True
+
+        # Second turn fails during POST /messages (post_acknowledged=False).
+        server.fail_send = True
+        with pytest.raises(RuntimeError, match="acceptance is uncertain"):
+            await tailer.send_message("ambiguous follow-up", [], "turn-2")
+        assert provider._delivery_uncertain and not provider._post_acknowledged
+
+        # Explicit Stop rotates to a fresh MASO session, resets guidance flags,
+        # and seeds the completed turn-1 Q/A transcript into the new session.
+        assert await tailer.cancel_turn("turn-2") is True
+        assert provider._conversation_id == "opaque-sid-2"
+        assert provider._hub_runtime_guidance_injected is False
+        assert provider._seed_history is not None
+        assert "Remember token ALPHA-42" in provider._seed_history
+        assert "Acknowledged ALPHA-42." in provider._seed_history
+        assert "ambiguous follow-up" not in provider._seed_history
+
+        server.fail_send = False
+        await tailer.send_message("continue", [], "turn-3")
+        message_calls = [
+            body
+            for method, path, body in server.calls
+            if method == "POST" and path == "/api/sessions/opaque-sid-2/messages"
+        ]
+        assert len(message_calls) == 1
+        sent_content = message_calls[0]["content"]
+        assert "CLAUDE_HUB_TAB_ID=" in sent_content
+        assert "<claude_hub_instructions>" in sent_content
+        assert "<<<FORK_SEED_HISTORY_V1>>>" in sent_content
+        assert "Remember token ALPHA-42" in sent_content
+        assert "Acknowledged ALPHA-42." in sent_content
+        assert sent_content.endswith("continue")
+        assert provider._hub_runtime_guidance_injected is True
+        assert provider._seed_history is None
+        from claude_hub.services.agent_stream.fork_seed import read_seed_sidecar
+
+        assert read_seed_sidecar(record.workspace_id, record.id) is None
+        # Consumption callbacks are one-shot, but this live transport can
+        # recover again. The second durable seed must also be consumed.
+        assert await tailer.cancel_turn("turn-3")
+        server.fail_send = True
+        with pytest.raises(RuntimeError, match="acceptance is uncertain"):
+            await tailer.send_message("another ambiguous action", [], "turn-4")
+        assert await tailer.cancel_turn("turn-4")
+        server.fail_send = False
+        await tailer.send_message("continue again", [], "turn-5")
+        assert read_seed_sidecar(record.workspace_id, record.id) is None
+    finally:
+        tailer.unsubscribe_completion(completion)
+        await tailer.stop()
+
+
+@pytest.mark.asyncio
+async def test_stop_rotation_adoption_is_crash_safe_when_sidecar_unlink_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    server = MasoServer()
+    server.fail_send = True
+    record = session()
+    persisted_ids: list[str] = []
+
+    def persist_cid(cid: str) -> None:
+        persisted_ids.append(cid)
+
+    provider = MasoHttpSession(record, conversation_id_persist=persist_cid)
+    provider._client = httpx.AsyncClient(
+        base_url="http://127.0.0.1:9796",
+        transport=httpx.MockTransport(server.handle),
+    )
+    try:
+        with pytest.raises(RuntimeError, match="acceptance is uncertain"):
+            await provider.send_message("uncertain post", [])
+        assert provider._delivery_uncertain and not provider._post_acknowledged
+
+        original_unlink = Path.unlink
+
+        def failing_unlink(self_path: Path, *args: Any, **kwargs: Any) -> None:
+            if self_path == provider._delivery_path:
+                raise OSError("simulated unlink failure after adoption")
+            original_unlink(self_path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "unlink", failing_unlink)
+        with pytest.raises(OSError, match="simulated unlink failure"):
+            await provider.cancel_active_turn()
+        monkeypatch.setattr(Path, "unlink", original_unlink)
+
+        assert persisted_ids[-1] == "opaque-sid-2"
+        assert provider._delivery_path.exists()
+        journal = json.loads(provider._delivery_path.read_text())
+        assert journal.get("adopted_session_id") == "opaque-sid-2"
+
+        # A cold restart after a crash before sidecar unlink must reconcile
+        # cleanly onto opaque-sid-2 and remove the journal sidecar instead of
+        # raising "MASO pending delivery identity could not be verified".
+        cold_record = record.model_copy(
+            update={"agent_session_id": "opaque-sid", "agent_session_id_verified": True}
+        )
+        cold_provider = MasoHttpSession(cold_record, conversation_id_persist=persist_cid)
+        try:
+            assert cold_provider._conversation_id == "opaque-sid-2"
+            assert not cold_provider._delivery_uncertain
+            assert not cold_provider._needs_abort
+            assert not cold_provider._delivery_path.exists()
+        finally:
+            await cold_provider.stop()
+    finally:
+        await provider.stop()
+
+
+@pytest.mark.asyncio
+async def test_legacy_sidecar_cold_targeted_stop_and_failed_stop_teardown_contract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from claude_hub.models import AgentRuntimeStatus
+    from claude_hub.services import managed_chat
+    from claude_hub.services.agent_stream import tailer as tailer_module
+    from claude_hub.services.agent_stream.tailer import get_native_runtime_snapshot
+
+    server = MasoServer()
+    server.fail_send = True
+    record = session()
+    current_record = record
+
+    def fake_create_native_session(
+        sess: ManagedSession,
+        conversation_id_persist: Any = None,
+        seed_history: Any = None,
+        on_seed_consumed: Any = None,
+    ) -> MasoHttpSession:
+        inst = MasoHttpSession(
+            sess,
+            conversation_id_persist=conversation_id_persist,
+            seed_history=seed_history,
+            on_seed_consumed=on_seed_consumed,
+        )
+        inst._client = httpx.AsyncClient(
+            base_url="http://127.0.0.1:9796",
+            transport=httpx.MockTransport(server.handle),
+        )
+        return inst
+
+    monkeypatch.setattr(tailer_module, "create_native_session", fake_create_native_session)
+
+    def persist_cid(_sid: str, cid: str) -> None:
+        nonlocal current_record
+        current_record = current_record.model_copy(
+            update={"agent_session_id": cid, "agent_session_id_verified": True}
+        )
+
+    manager1 = TailerManager(lambda _id: current_record, persist_session_id=persist_cid)
+    try:
+        with pytest.raises(RuntimeError, match="acceptance is uncertain"):
+            await manager1.send_message(
+                current_record, "legacy uncertain prompt", [], "turn-legacy"
+            )
+    finally:
+        await manager1.stop_all()
+
+    # Rewrite sidecar to the legacy pre-fix schema (no turn_id, no post_acknowledged).
+    sidecar_path = AgentStreamStore(
+        current_record.workspace_id, current_record.id
+    ).path.with_suffix(".maso-delivery.json")
+    legacy_payload = json.loads(sidecar_path.read_text())
+    legacy_payload.pop("turn_id", None)
+    legacy_payload.pop("post_acknowledged", None)
+    sidecar_path.write_text(json.dumps(legacy_payload))
+
+    manager2 = TailerManager(lambda _id: current_record, persist_session_id=persist_cid)
+    monkeypatch.setattr(managed_chat, "_manager", lambda: manager2)
+    try:
+        sub = await manager2.subscribe(current_record)
+        tailer2 = manager2.get_tailer(current_record.id)
+        assert tailer2 is not None
+        tailer2.unsubscribe(sub)
+        assert getattr(tailer2.native_transport, "_quarantined_turn_id", None) == "turn-legacy"
+        assert tailer2.native_transport is not None
+        caps = tailer2.native_transport.capabilities()
+        assert caps.recovery_required is True
+        assert caps.quarantined_turn_id == "turn-legacy"
+
+        # If provider abort fails (HTTP 503), targeted Stop propagates RuntimeError
+        # instead of returning True while quarantine remains active.
+        server.fail_abort = True
+        with pytest.raises(RuntimeError, match="native provider turn cancellation failed"):
+            await manager2.cancel_turn(current_record, expected_turn_id="turn-legacy")
+        assert getattr(tailer2.native_transport, "_delivery_uncertain", False) is True
+        assert getattr(tailer2.native_transport, "_needs_abort", False) is True
+
+        # Stale turn ID is still rejected.
+        assert await manager2.cancel_turn(current_record, expected_turn_id="other-turn") is False
+
+        # Once abort succeeds, targeted Stop on legacy sidecar completes and rotates.
+        server.fail_abort = False
+        assert await manager2.cancel_turn(current_record, expected_turn_id="turn-legacy") is True
+        assert getattr(tailer2.native_transport, "_delivery_uncertain", False) is False
+        assert getattr(tailer2.native_transport, "_needs_abort", False) is False
+    finally:
+        await manager2.stop_all()
+
+    # Also verify C2-5: accepted POST -> Stop abort 503 -> cold restart with
+    # uncertain=False, abort_required=True reports ATTENTION both before and
+    # after tailer hydration.
+    server3 = MasoServer()
+    record3 = session()
+    current_record3 = record3
+
+    def persist_cid3(_sid: str, cid: str) -> None:
+        nonlocal current_record3
+        current_record3 = current_record3.model_copy(
+            update={"agent_session_id": cid, "agent_session_id_verified": True}
+        )
+
+    def fake_create_native_session3(
+        sess: ManagedSession,
+        conversation_id_persist: Any = None,
+        seed_history: Any = None,
+        on_seed_consumed: Any = None,
+    ) -> MasoHttpSession:
+        inst = MasoHttpSession(
+            sess,
+            conversation_id_persist=conversation_id_persist,
+            seed_history=seed_history,
+            on_seed_consumed=on_seed_consumed,
+        )
+        inst._client = httpx.AsyncClient(
+            base_url="http://127.0.0.1:9796",
+            transport=httpx.MockTransport(server3.handle),
+        )
+        return inst
+
+    monkeypatch.setattr(tailer_module, "create_native_session", fake_create_native_session3)
+    manager3 = TailerManager(lambda _id: current_record3, persist_session_id=persist_cid3)
+    try:
+        await manager3.send_message(current_record3, "accepted prompt", [], "turn-abort-503")
+        server3.fail_abort = True
+        with pytest.raises(RuntimeError, match="native provider turn cancellation failed"):
+            await manager3.cancel_turn(current_record3, expected_turn_id="turn-abort-503")
+        tailer3 = manager3.get_tailer(current_record3.id)
+        assert tailer3 is not None
+        await tailer3._await_turn_teardown()
+        assert getattr(tailer3.native_transport, "_delivery_uncertain", False) is False
+        assert getattr(tailer3.native_transport, "_needs_abort", False) is True
+    finally:
+        await manager3.stop_all()
+
+    manager4 = TailerManager(lambda _id: current_record3, persist_session_id=persist_cid3)
+    monkeypatch.setattr(managed_chat, "_manager", lambda: manager4)
+    try:
+        assert managed_chat.runtime_status(current_record3) == AgentRuntimeStatus.ATTENTION
+        sub4 = await manager4.subscribe(current_record3)
+        tailer4 = manager4.get_tailer(current_record3.id)
+        assert tailer4 is not None
+        tailer4.unsubscribe(sub4)
+        snap4 = get_native_runtime_snapshot(current_record3.id)
+        assert snap4 is not None
+        assert snap4.status == AgentRuntimeStatus.ATTENTION
+        assert snap4.detail != "Ready"
+        assert managed_chat.runtime_status(current_record3) == AgentRuntimeStatus.ATTENTION
+        assert tailer4.native_transport is not None
+        assert tailer4.native_transport.capabilities().recovery_required is True
+
+        server3.fail_abort = False
+        assert (
+            await manager4.cancel_turn(current_record3, expected_turn_id="turn-abort-503") is True
+        )
+        snap4_after = get_native_runtime_snapshot(current_record3.id)
+        assert snap4_after is not None and snap4_after.status == AgentRuntimeStatus.IDLE
+        assert managed_chat.runtime_status(current_record3) == AgentRuntimeStatus.IDLE
+    finally:
+        await manager4.stop_all()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "boundary",
+    ["identity_before", "identity_after", "seed_before", "seed_after", "unlink"],
+)
+async def test_recovery_adoption_restarts_at_each_durable_boundary(
+    monkeypatch: pytest.MonkeyPatch, boundary: str
+) -> None:
+    from claude_hub.services.agent_stream import maso_http
+    from claude_hub.services.agent_stream import tailer as tailer_module
+    from claude_hub.services.agent_stream.fork_seed import read_seed_sidecar
+
+    server = MasoServer()
+    server.fail_send = True
+    record = session()
+    persisted: dict[str, str] = {}
+    fail = False
+
+    def persist(cid: str) -> None:
+        if fail and boundary == "identity_before":
+            raise OSError("identity write interrupted")
+        persisted["id"] = cid
+        if fail and boundary == "identity_after":
+            raise OSError("identity receipt interrupted")
+
+    provider = MasoHttpSession(record, conversation_id_persist=persist)
+    provider._client = httpx.AsyncClient(
+        base_url="http://127.0.0.1:9796", transport=httpx.MockTransport(server.handle)
+    )
+    store = AgentStreamStore(record.workspace_id, record.id)
+    ctx = NormalizeContext(
+        session_id=record.id,
+        tab_id=record.tab_id,
+        agent_type=record.agent_type,
+        run_epoch=1,
+        turn_id="prior-completed",
+    )
+    for kind, payload in [
+        (AgentStreamEventType.TURN_STARTED, {"summary": "Remember the blue marker"}),
+        (AgentStreamEventType.TEXT_DELTA, {"text": "The marker is blue."}),
+        (AgentStreamEventType.TURN_COMPLETED, {"status": "completed"}),
+    ]:
+        await store.append(ctx.event(kind, payload))
+    with pytest.raises(RuntimeError, match="acceptance is uncertain"):
+        await provider.send_message("ambiguous action must not be replayed", [])
+
+    original_seed = maso_http.write_seed_sidecar
+    original_unlink = Path.unlink
+
+    def write_seed(workspace_id: str, session_id: str, body: str) -> None:
+        if boundary == "seed_before":
+            raise OSError("seed write interrupted")
+        original_seed(workspace_id, session_id, body)
+        if boundary == "seed_after":
+            raise OSError("seed receipt interrupted")
+
+    def unlink(path: Path, *args: Any, **kwargs: Any) -> None:
+        if boundary == "unlink" and path == provider._delivery_path:
+            raise OSError("journal cleanup interrupted")
+        original_unlink(path, *args, **kwargs)
+
+    fail = True
+    with monkeypatch.context() as faults:
+        faults.setattr(maso_http, "write_seed_sidecar", write_seed)
+        faults.setattr(Path, "unlink", unlink)
+        with pytest.raises(OSError, match="interrupted"):
+            await provider.cancel_active_turn()
+        assert provider.capabilities().recovery_required
+        assert provider._delivery_path.exists()
+        assert not any(path == "/api/sessions/opaque-sid-2/exit" for _, path, _ in server.calls)
+    fail = False
+    await provider.stop()
+    assert not any(path == "/api/sessions/opaque-sid-2/exit" for _, path, _ in server.calls)
+
+    # Restart with whichever identity actually reached storage. Both old and
+    # adopted identities are covered; the old message UUID is never rebound.
+    cold_record = record.model_copy(
+        update={
+            "agent_session_id": persisted["id"],
+            "agent_session_id_verified": True,
+        }
+    )
+    cold = MasoHttpSession(cold_record, conversation_id_persist=persist)
+    assert cold.active_thread_id == "opaque-sid-2"
+    assert not cold.capabilities().recovery_required
+    assert not cold._delivery_path.exists()
+    assert "marker is blue" in (read_seed_sidecar(record.workspace_id, record.id) or "")
+    await cold.stop()
+
+    # Another restart after journal cleanup must still preserve the one-shot
+    # text seed through the real manager/factory lifecycle.
+    current = cold_record.model_copy(update={"agent_session_id": persisted["id"]})
+
+    def factory(sess: ManagedSession, **kwargs: Any) -> MasoHttpSession:
+        instance = MasoHttpSession(sess, **kwargs)
+        instance._client = httpx.AsyncClient(
+            base_url="http://127.0.0.1:9796",
+            transport=httpx.MockTransport(server.handle),
+        )
+        return instance
+
+    monkeypatch.setattr(tailer_module, "create_native_session", factory)
+    manager = TailerManager(lambda _id: current)
+    server.fail_send = False
+    try:
+        await manager.send_message(current, "continue", [], "next-turn")
+        posts = [
+            (path, body)
+            for method, path, body in server.calls
+            if method == "POST" and path.endswith("/messages")
+        ]
+        assert len(posts) == 2
+        path, body = posts[-1]
+        assert path == "/api/sessions/opaque-sid-2/messages"
+        assert "marker is blue" in body["content"]
+        assert "<claude_hub_instructions>" in body["content"]
+        assert "ambiguous action must not be replayed" not in body["content"]
+        assert read_seed_sidecar(record.workspace_id, record.id) is None
+    finally:
+        await manager.stop_all()
+
+
+@pytest.mark.asyncio
+async def test_legacy_target_ignores_rejected_turns_and_never_accepts_arbitrary_terminal() -> None:
+    server = MasoServer()
+    server.fail_send = True
+    record = session()
+    provider = transport(server, record)
+    with pytest.raises(RuntimeError, match="acceptance is uncertain"):
+        await provider.send_message("ambiguous", [])
+    store = AgentStreamStore(record.workspace_id, record.id)
+    for turn_id, rejected in [("uncertain-turn", False), ("rejected-retry", True)]:
+        ctx = NormalizeContext(
+            session_id=record.id,
+            tab_id=record.tab_id,
+            agent_type=record.agent_type,
+            run_epoch=1,
+            turn_id=turn_id,
+        )
+        await store.append(ctx.event(AgentStreamEventType.TURN_STARTED, {"summary": turn_id}))
+        await store.append(
+            ctx.event(
+                AgentStreamEventType.TURN_COMPLETED,
+                {"status": "failed", "delivery_rejected": rejected},
+            )
+        )
+    await provider.stop()
+    cold = transport(
+        server,
+        record.model_copy(
+            update={"agent_session_id": "opaque-sid", "agent_session_id_verified": True}
+        ),
+    )
+    tailer = SessionTailer(
+        workspace_id=record.workspace_id,
+        session_id=record.id,
+        adapter=MasoEventAdapter(),
+        session_getter=lambda: record,
+        native_transport=cold,
+    )
+    try:
+        assert cold.capabilities().quarantined_turn_id == "uncertain-turn"
+        before = len(server.calls)
+        assert not await tailer.cancel_turn("rejected-retry")
+        assert len(server.calls) == before
+        # Original versions left locally rejected ghost starts without the
+        # delivery_rejected marker, then cold recovery marked them cancelled.
+        ghost = NormalizeContext(
+            session_id=record.id,
+            tab_id=record.tab_id,
+            agent_type=record.agent_type,
+            run_epoch=2,
+            turn_id="old-ghost",
+        )
+        await store.append(
+            ghost.event(AgentStreamEventType.TURN_STARTED, {"summary": "refused locally"})
+        )
+        await store.append(
+            ghost.event(AgentStreamEventType.TURN_COMPLETED, {"status": "cancelled"})
+        )
+        assert cold._recover_legacy_quarantined_turn_id() is None
+        cold._quarantined_turn_id = None  # Uncorrelated legacy recovery stays untargeted.
+        assert not await tailer.cancel_turn("uncertain-turn")
+        assert len(server.calls) == before
+        assert await tailer.cancel_turn()
+    finally:
         await tailer.stop()

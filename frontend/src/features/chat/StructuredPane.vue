@@ -258,6 +258,7 @@ const attachmentsController = useChatAttachments({
 const delivery = useChatDelivery({
   get attachments() { return attachmentsController.attachments },
   get authoritativeTurns() { return timeline.authoritativeTurns },
+  get capabilities() { return capabilities },
   get connectionState() { return connectionState },
   get draftQueue() { return queue.draftQueue },
   get enqueueDraft() { return queue.enqueueDraft },
@@ -278,6 +279,7 @@ const delivery = useChatDelivery({
   get isUpdatingModel() { return settings.isUpdatingModel },
   get isUpdatingReasoningEffort() { return settings.isUpdatingReasoningEffort },
   get nudge() { return nudge },
+  get refreshCapabilities() { return refreshCapabilities },
   get requestLatestAnchor() { return timeline.requestLatestAnchor },
   get streamBasePath() { return streamBasePath },
   get syncComposerTextareaHeight() { return composer.syncComposerTextareaHeight },

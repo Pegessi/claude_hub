@@ -383,7 +383,11 @@ def _maso_delivery_uncertain_for_ids(workspace_id: str, session_id: str) -> bool
         return True
     if not isinstance(payload, dict):
         return True
-    return payload.get("uncertain") is True or payload.get("abort_required") is True
+    return (
+        payload.get("uncertain") is True
+        or payload.get("abort_required") is True
+        or bool(payload.get("adopted_session_id"))
+    )
 
 
 def _maso_delivery_uncertain(session: ManagedSession) -> bool:
@@ -408,6 +412,16 @@ def _runtime_snapshot(session: ManagedSession) -> Optional[NativeRuntimeSnapshot
         return None
     transport = tailer.native_transport
     pending_question = tailer.has_pending_question()
+    if transport is not None and (
+        getattr(transport, "_delivery_uncertain", False)
+        or getattr(transport, "_needs_abort", False)
+        or getattr(transport, "_adoption_journal", None) is not None
+    ):
+        return NativeRuntimeSnapshot(
+            AgentRuntimeStatus.ATTENTION,
+            UNCERTAIN_DELIVERY_DETAIL,
+            pending_question=pending_question,
+        )
     if tailer.hard_failed or tailer.native_error is not None:
         return NativeRuntimeSnapshot(
             AgentRuntimeStatus.OFFLINE,
@@ -439,12 +453,6 @@ def _runtime_snapshot(session: ManagedSession) -> Optional[NativeRuntimeSnapshot
         return NativeRuntimeSnapshot(
             AgentRuntimeStatus.ATTENTION,
             str(transport.exit_error),
-            pending_question=pending_question,
-        )
-    if getattr(transport, "_delivery_uncertain", False):
-        return NativeRuntimeSnapshot(
-            AgentRuntimeStatus.ATTENTION,
-            UNCERTAIN_DELIVERY_DETAIL,
             pending_question=pending_question,
         )
     return NativeRuntimeSnapshot(

@@ -733,6 +733,10 @@ async def main(browser_run: BrowserRun) -> None:
                     "agent_type": agent_type,
                     "supports_mode_switch": False,
                     "current_model": tab["env"].get(model_key, "seed-high"),
+                    "recovery_required": bool(state.get("quarantined")),
+                    "quarantined_turn_id": (
+                        state.get("quarantined_turn_id") if state.get("quarantined") else None
+                    ),
                     "available_models": [
                         {
                             "id": "seed",
@@ -827,7 +831,12 @@ async def main(browser_run: BrowserRun) -> None:
                             event(
                                 sequence + 3,
                                 "turn_completed",
-                                {"status": "failed", "delivery_rejected": True},
+                                {
+                                    "status": "failed",
+                                    "delivery_rejected": True,
+                                    "delivery_uncertain": True,
+                                    "quarantined_turn_id": state.get("quarantined_turn_id"),
+                                },
                                 turn_id=rejected_turn,
                                 message_id=rejected_turn,
                             ),
@@ -906,7 +915,23 @@ async def main(browser_run: BrowserRun) -> None:
                 cancel_body = json.loads(request.post_data or "{}")
                 interrupts.append(cancel_body)
                 if state.get("quarantined"):
+                    if state.get("fail_quarantine_cancel"):
+                        state["fail_quarantine_cancel"] = False
+                        await route.fulfill(
+                            status=503,
+                            content_type="application/json",
+                            body=json.dumps({"detail": "native provider turn cancellation failed"}),
+                        )
+                        return
+                    if state.get("noop_quarantine_cancel"):
+                        state["noop_quarantine_cancel"] = False
+                        await route.fulfill(
+                            content_type="application/json",
+                            body=json.dumps({"ok": True, "cancelled": False}),
+                        )
+                        return
                     state["quarantined"] = False
+                    state["quarantined_turn_id"] = None
                     body = {
                         "ok": True,
                         "cancelled": True,
@@ -1791,7 +1816,11 @@ async def main(browser_run: BrowserRun) -> None:
                 event(
                     sequence + 2,
                     "turn_completed",
-                    {"status": "failed"},
+                    {
+                        "status": "failed",
+                        "delivery_uncertain": True,
+                        "quarantined_turn_id": quarantined_turn_id,
+                    },
                     turn_id=quarantined_turn_id,
                     message_id=quarantined_turn_id,
                 ),
@@ -1799,9 +1828,30 @@ async def main(browser_run: BrowserRun) -> None:
         )
         state["turn_open"] = False
         state["quarantined"] = True
+        state["quarantined_turn_id"] = quarantined_turn_id
+        state["fail_quarantine_cancel"] = True
+        state["noop_quarantine_cancel"] = True
+        # A cold UI must restore recovery from capabilities without another send.
+        await page.reload()
+        await expect(page.locator(".composer-recovery")).to_contain_text("completed messages")
         await expect(send_button).to_have_text("Send")
         await expect(page.locator(".composer-stop-btn")).to_be_visible()
         await expect(page.locator(".composer-stop-btn")).to_be_enabled()
+        recovery_viewport = page.viewport_size
+        for width in (1440, 390):
+            await page.set_viewport_size({"width": width, "height": 844})
+            notice = page.locator(".composer-recovery")
+            await expect(notice).to_be_visible()
+            notice_box = await notice.bounding_box()
+            assert notice_box is not None and notice_box["x"] >= 0
+            assert notice_box["x"] + notice_box["width"] <= width, notice_box
+            await page.screenshot(
+                path=str(output / f"maso-recovery-{width}.png"),
+                full_page=True,
+                animations="disabled",
+            )
+        if recovery_viewport:
+            await page.set_viewport_size(recovery_viewport)
         await composer.fill("Follow-up while quarantined")
         await send_button.click()
         await expect(page.locator(".composer-error")).to_contain_text(
@@ -1810,8 +1860,22 @@ async def main(browser_run: BrowserRun) -> None:
         await expect(page.locator(".composer-stop-btn")).to_be_visible()
         await expect(page.locator(".composer-stop-btn")).to_be_enabled()
         interrupts_before_quarantine_stop = len(interrupts)
+        # First Stop attempt fails teardown (HTTP 503): Stop must stay visible and retryable.
         await page.locator(".composer-stop-btn").click()
         assert len(interrupts) == interrupts_before_quarantine_stop + 1, interrupts
+        assert interrupts[-1] == {"expected_turn_id": quarantined_turn_id}, interrupts[-1]
+        await expect(page.locator(".composer-error")).to_contain_text(
+            "native provider turn cancellation failed"
+        )
+        await expect(page.locator(".composer-stop-btn")).to_be_visible()
+        await expect(page.locator(".composer-stop-btn")).to_be_enabled()
+        # A no-op Stop also leaves the authoritative recovery target retryable.
+        await page.locator(".composer-stop-btn").click()
+        await expect(page.locator(".composer-stop-btn")).to_be_enabled()
+        assert len(interrupts) == interrupts_before_quarantine_stop + 2, interrupts
+        # Third Stop attempt succeeds and clears quarantine.
+        await page.locator(".composer-stop-btn").click()
+        assert len(interrupts) == interrupts_before_quarantine_stop + 3, interrupts
         assert interrupts[-1] == {"expected_turn_id": quarantined_turn_id}, interrupts[-1]
         await expect(page.locator(".composer-stop-btn")).to_have_count(0)
         await expect(page.locator(".composer-error")).to_have_count(0)
