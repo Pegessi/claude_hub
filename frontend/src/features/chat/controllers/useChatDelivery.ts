@@ -36,6 +36,97 @@ interface Dependencies {
   terminalStore: ReturnType<typeof useTerminalStore>
 }
 
+const QUARANTINE_STOP_PATTERNS = [
+  'MASO message acceptance is uncertain',
+  'MASO event stream disconnected; remote execution was not stopped',
+  'MASO stream failed before message acceptance was confirmed',
+]
+
+function isQuarantineErrorText(value: unknown): boolean {
+  if (typeof value !== 'string' || !value) return false
+  return QUARANTINE_STOP_PATTERNS.some(pattern => value.includes(pattern))
+}
+
+function findQuarantinedTurnId(
+  events: AgentStreamEvent[],
+  turns: TimelineTurn[],
+  composerError: string | null,
+  clearedTurnId: string | null,
+): string | null {
+  let activeQuarantineTurnId: string | null = null
+  let lastNonRejectedTurnId: string | null = null
+  const turnErrors = new Map<string, string[]>()
+
+  for (const event of events) {
+    const turnId = event.turn_id
+    if (!turnId) continue
+    if (event.type === 'turn_started') {
+      if (!turnErrors.has(turnId)) turnErrors.set(turnId, [])
+      continue
+    }
+    if (event.type === 'error') {
+      const msg = event.payload?.message
+      if (typeof msg === 'string' && msg) {
+        const list = turnErrors.get(turnId) ?? []
+        list.push(msg)
+        turnErrors.set(turnId, list)
+      }
+      continue
+    }
+    if (event.type === 'turn_completed') {
+      const rejected = event.payload?.delivery_rejected === true
+      const status = typeof event.payload?.status === 'string' ? event.payload.status : 'completed'
+      const errMsg = event.payload?.error_message
+      const hasQuarantineErr =
+        isQuarantineErrorText(errMsg) ||
+        (turnErrors.get(turnId) ?? []).some(isQuarantineErrorText)
+      if (!rejected) {
+        lastNonRejectedTurnId = turnId
+        if (
+          status === 'completed' ||
+          status === 'success' ||
+          status === 'cancelled' ||
+          status === 'interrupted'
+        ) {
+          activeQuarantineTurnId = null
+        } else if (hasQuarantineErr) {
+          activeQuarantineTurnId = turnId
+        }
+      } else if (!activeQuarantineTurnId && hasQuarantineErr && lastNonRejectedTurnId) {
+        activeQuarantineTurnId = lastNonRejectedTurnId
+      }
+    }
+  }
+
+  if (!activeQuarantineTurnId && events.length === 0) {
+    for (let i = turns.length - 1; i >= 0; i -= 1) {
+      const turn = turns[i]
+      if (!turn?.turnId) continue
+      if (
+        turn.completionStatus === 'completed' ||
+        turn.completionStatus === 'cancelled' ||
+        turn.completionStatus === 'interrupted'
+      ) {
+        break
+      }
+      if (turn.errors?.some(err => isQuarantineErrorText(err.message))) {
+        activeQuarantineTurnId = turn.turnId
+        break
+      }
+    }
+  }
+
+  if (!activeQuarantineTurnId && isQuarantineErrorText(composerError)) {
+    const candidate = lastNonRejectedTurnId ?? turns[turns.length - 1]?.turnId ?? null
+    if (candidate) activeQuarantineTurnId = candidate
+  }
+
+  if (activeQuarantineTurnId && activeQuarantineTurnId === clearedTurnId) {
+    return null
+  }
+  return activeQuarantineTurnId
+}
+
 export function useChatDelivery(deps: Dependencies) {
   const retrySendAttempt = ref<RetriableSend | null>(null)
 
@@ -76,6 +167,7 @@ export function useChatDelivery(deps: Dependencies) {
   // never exists server-side; the reducer's turn_completed is idempotent, and
   // the optimism is dropped as soon as the real edge lands in ``events``.
   const optimisticCancelledTurnId = ref<string | null>(null)
+  const clearedQuarantineTurnId = ref<string | null>(null)
 
   const pendingTurns = computed(() => {
     const observedTurnIds = new Set(deps.authoritativeTurns.value.map(turn => turn.turnId).filter(Boolean))
@@ -112,17 +204,28 @@ export function useChatDelivery(deps: Dependencies) {
   // error already released the composer lock, but the turn is still unfinished in
   // the timeline — Stop stays mounted so the user can terminalize it. Stop in
   // the reconnecting/FAILED banners shares this same gate.
+  const quarantinedTurnId = computed(() =>
+    findQuarantinedTurnId(
+      deps.events.value,
+      deps.authoritativeTurns.value,
+      composerError.value,
+      clearedQuarantineTurnId.value,
+    ),
+  )
+
   const stopArmed = computed(() => {
     if (pendingDirectTurns.value.length > 0) return true
     const latest = deps.authoritativeTurns.value[deps.authoritativeTurns.value.length - 1]
-    return Boolean(latest && !latest.completed)
+    if (latest && !latest.completed) return true
+    return Boolean(quarantinedTurnId.value)
   })
 
   const stopTargetTurnId = computed(() => {
     const latest = deps.authoritativeTurns.value[deps.authoritativeTurns.value.length - 1]
     if (latest && !latest.completed && latest.turnId) return latest.turnId
     const pending = pendingDirectTurns.value[pendingDirectTurns.value.length - 1]
-    return pending?.turnId ?? null
+    if (pending?.turnId) return pending.turnId
+    return quarantinedTurnId.value
   })
 
   /** Stop is enabled by the same rule that lets its request actually run.
@@ -207,7 +310,13 @@ export function useChatDelivery(deps: Dependencies) {
       // uses the explicit outcome so a stale Stop can never unlock a newer turn,
       // while an already-terminal retry still repairs a wedged local view.
       if (cancelledTurnId) {
-        optimisticCancelledTurnId.value = cancelledTurnId
+        const targetTurn = deps.authoritativeTurns.value.find(turn => turn.turnId === cancelledTurnId)
+        if (!targetTurn || !targetTurn.completed) {
+          optimisticCancelledTurnId.value = cancelledTurnId
+        }
+        if (quarantinedTurnId.value === cancelledTurnId) {
+          clearedQuarantineTurnId.value = cancelledTurnId
+        }
       }
       deps.nudge()
       void deps.terminalStore.fetchAgentStatuses()
@@ -375,6 +484,9 @@ export function useChatDelivery(deps: Dependencies) {
         source === 'queue' ? 15_000 : null,
         questionIdentity,
       )
+      if (quarantinedTurnId.value) {
+        clearedQuarantineTurnId.value = quarantinedTurnId.value
+      }
       retrySendAttempt.value = null
       if (!deps.isManagedChat.value && (messageOverride || (deps.goal.value && delivery === 'steer'))) await deps.hydrateGoal()
       // Deliberate user input may resume a queue moved into the composer, but

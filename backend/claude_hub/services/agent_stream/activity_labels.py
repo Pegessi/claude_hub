@@ -17,6 +17,7 @@ from typing import Any, Dict, Optional
 WORKING_ACTIVITY = "Responding"
 IDLE_DETAIL = "Ready"
 FAILED_TURN_DETAIL = "Last turn failed"
+UNCERTAIN_DELIVERY_DETAIL = "Delivery uncertain — stop or inspect session"
 
 # Argv/command budgets keep a row's activity line readable next to a name.
 _MAX_SUBJECT_CHARS = 56

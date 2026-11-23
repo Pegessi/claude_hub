@@ -354,3 +354,139 @@ test('nudge() re-issues the in-flight /wait at once and stays live', async () =>
     app.unmount()
   }
 })
+
+test('MASO uncertain-delivery quarantine keeps Stop armed after turn failure and local rejection, scoped to quarantined turn', async t => {
+  const { useChatDelivery } = await loadTs('features/chat/controllers/useChatDelivery')
+  const { IncrementalTimelineReducer } = await loadTimeline()
+  const cancelPayloads = []
+  t.mock.method(globalThis, 'fetch', async (url, options) => {
+    if (String(url).endsWith('/cancel')) {
+      cancelPayloads.push(options?.body ? JSON.parse(options.body) : null)
+      return {
+        ok: true,
+        json: async () => ({ cancelled: true, outcome: 'cancelled_matching' }),
+      }
+    }
+    return { ok: true, json: async () => ({}) }
+  })
+
+  const events = ref([
+    {
+      stream_sequence: 1,
+      session_id: 's1',
+      tab_id: 't1',
+      agent_type: 'maso',
+      type: 'turn_started',
+      turn_id: 'turn-quarantined',
+      message_id: 'turn-quarantined',
+      call_id: null,
+      payload: { summary: 'First MASO prompt' },
+      created_at: '2026-11-23T01:00:00Z',
+    },
+    {
+      stream_sequence: 2,
+      session_id: 's1',
+      tab_id: 't1',
+      agent_type: 'maso',
+      type: 'error',
+      turn_id: 'turn-quarantined',
+      message_id: null,
+      call_id: null,
+      payload: {
+        message: 'MASO event stream disconnected; remote execution was not stopped. Inspect the MASO session before retrying.',
+      },
+      created_at: '2026-11-23T01:00:05Z',
+    },
+    {
+      stream_sequence: 3,
+      session_id: 's1',
+      tab_id: 't1',
+      agent_type: 'maso',
+      type: 'turn_completed',
+      turn_id: 'turn-quarantined',
+      message_id: 'turn-quarantined',
+      call_id: null,
+      payload: { status: 'failed' },
+      created_at: '2026-11-23T01:00:05Z',
+    },
+    {
+      stream_sequence: 4,
+      session_id: 's1',
+      tab_id: 't1',
+      agent_type: 'maso',
+      type: 'turn_started',
+      turn_id: 'turn-rejected',
+      message_id: 'turn-rejected',
+      call_id: null,
+      payload: { summary: 'Rejected follow-up' },
+      created_at: '2026-11-23T01:00:10Z',
+    },
+    {
+      stream_sequence: 5,
+      session_id: 's1',
+      tab_id: 't1',
+      agent_type: 'maso',
+      type: 'error',
+      turn_id: 'turn-rejected',
+      message_id: null,
+      call_id: null,
+      payload: {
+        message: 'MASO message acceptance is uncertain. Further sends are refused for this Chat. The service may still execute the message; inspect and stop the session in MASO.',
+      },
+      created_at: '2026-11-23T01:00:10Z',
+    },
+    {
+      stream_sequence: 6,
+      session_id: 's1',
+      tab_id: 't1',
+      agent_type: 'maso',
+      type: 'turn_completed',
+      turn_id: 'turn-rejected',
+      message_id: 'turn-rejected',
+      call_id: null,
+      payload: { status: 'failed', delivery_rejected: true },
+      created_at: '2026-11-23T01:00:10Z',
+    },
+  ])
+  const authoritativeTurns = computed(() => new IncrementalTimelineReducer().reduce(events.value))
+
+  const controller = useChatDelivery({
+    attachments: ref([]),
+    authoritativeTurns,
+    connectionState: ref('live'),
+    draftQueue: ref([]),
+    enqueueDraft() {},
+    events,
+    goal: ref(null),
+    goalComposerReason: ref(null),
+    goalError: ref(null),
+    goalImageRecovery: ref(false),
+    goalInputBlocked: ref(false),
+    goalSteerOnly: ref(false),
+    async hydrateGoal() {},
+    isDraftQueuePaused: ref(false),
+    isGoalHydrating: ref(false),
+    isGoalMutating: ref(false),
+    isManagedChat: ref(true),
+    isPreparingAttachments: ref(false),
+    isUpdatingMode: ref(false),
+    isUpdatingModel: ref(false),
+    isUpdatingReasoningEffort: ref(false),
+    nudge() {},
+    requestLatestAnchor() {},
+    streamBasePath: ref('/api/workspaces/sessions/s1/stream'),
+    syncComposerTextareaHeight() {},
+    terminalStore: { async fetchAgentStatuses() {} },
+  })
+
+  // Both turns are completed, yet Stop remains armed and targets the original quarantined turn!
+  assert.equal(authoritativeTurns.value.every(t => t.completed), true)
+  assert.equal(controller.stopArmed.value, true)
+  assert.equal(controller.canStop.value, true)
+  assert.equal(controller.stopTargetTurnId.value, 'turn-quarantined')
+
+  await controller.cancelActiveTurn()
+
+  assert.deepEqual(cancelPayloads, [{ expected_turn_id: 'turn-quarantined' }])
+  assert.equal(controller.stopArmed.value, false)
+})

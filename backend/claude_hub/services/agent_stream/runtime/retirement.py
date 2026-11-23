@@ -60,10 +60,13 @@ class RetirementMixin(SessionState):
                     await self._cancel_active_turn_locked(transport)
                     return True
                 orphan = await self._store.latest_unfinished_turn()
-                if expected_turn_id is not None and (
-                    orphan is None or orphan.turn_id != expected_turn_id
-                ):
-                    return False
+                quarantined_turn_id = getattr(transport, "_quarantined_turn_id", None)
+                if expected_turn_id is not None:
+                    if orphan is not None:
+                        if orphan.turn_id != expected_turn_id:
+                            return False
+                    elif quarantined_turn_id != expected_turn_id:
+                        return False
                 if orphan is not None:
                     await self._terminalize_orphaned_turn_locked(orphan)
                 await self._cancel_active_turn_locked(transport)
@@ -291,6 +294,8 @@ class RetirementMixin(SessionState):
         if await_teardown:
             try:
                 await transport.cancel_active_turn()
+                if turn_id is None and not getattr(transport, "_delivery_uncertain", False):
+                    self._native_terminal_status = None
             except Exception as exc:
                 logger.exception(
                     "native provider cancel after terminalizing turn failed for session %s",
@@ -335,8 +340,13 @@ class RetirementMixin(SessionState):
     async def _run_turn_teardown(self, transport: ProviderSession) -> None:
         try:
             async with self._send_lock:
+                teardown_turn_id = self._teardown_turn_id
                 try:
                     await transport.cancel_active_turn()
+                    if teardown_turn_id is None and not getattr(
+                        transport, "_delivery_uncertain", False
+                    ):
+                        self._native_terminal_status = None
                 except Exception:
                     logger.exception(
                         "native provider cancel teardown failed for session %s",

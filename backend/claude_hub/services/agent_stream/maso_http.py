@@ -308,6 +308,7 @@ class MasoHttpSession(ProviderSession):
         ).path.with_suffix(".maso-delivery.json")
         self._message_id: Optional[str] = None
         self._delivery_uncertain = False
+        self._post_acknowledged = False
         self._staged_images: List[bytes] = []
         self._guidance_in_this_send = False
         self._pending_rotation: Optional[Tuple[str, Optional[Dict[str, Any]]]] = None
@@ -321,6 +322,13 @@ class MasoHttpSession(ProviderSession):
                     raise ValueError("delivery identity mismatch")
                 self._message_id = str(uuid.UUID(delivery["message_id"]))
                 self._delivery_uncertain = delivery.get("uncertain") is True
+                self._post_acknowledged = (
+                    delivery.get("post_acknowledged") is True or not self._delivery_uncertain
+                )
+                turn_id = delivery.get("turn_id")
+                self._quarantined_turn_id = (
+                    turn_id if isinstance(turn_id, str) and turn_id else None
+                )
                 if not self._conversation_id_verified:
                     self._persist_conversation_id(delivery["session_id"])
                 self._needs_abort = delivery.get("abort_required") is True
@@ -398,32 +406,48 @@ class MasoHttpSession(ProviderSession):
         except httpx.HTTPError as exc:
             raise RuntimeError(f"MASO DELETE request failed ({type(exc).__name__})") from None
 
+    @staticmethod
+    def _status_is_idle(status: Any) -> bool:
+        return (
+            isinstance(status, dict)
+            and isinstance(status.get("agent_id"), str)
+            and status.get("is_running") is False
+            and status.get("status") == "idle"
+            and not _tree_is_active(status)
+        )
+
     async def _reconcile_uncertain_delivery(self) -> bool:
         if (
             self._needs_abort
+            or not self._post_acknowledged
             or not self._conversation_id
             or not self._conversation_id_verified
             or not self._message_id
         ):
             return False
+        serial = self._activity_serial
         try:
-            status = await self._request("GET", self._path("status"))
+            first_status = await self._request("GET", self._path("status"))
+        except RuntimeError:
+            return False
+        if not self._status_is_idle(first_status):
+            return False
+        if not await self._pending_message_is_absent(self._message_id):
+            return False
+        try:
+            second_status = await self._request("GET", self._path("status"))
         except RuntimeError:
             return False
         if (
-            not isinstance(status, dict)
-            or not isinstance(status.get("agent_id"), str)
-            or status.get("is_running") is not False
-            or status.get("status") != "idle"
-            or _tree_is_active(status)
+            not self._status_is_idle(second_status)
+            or second_status.get("agent_id") != first_status.get("agent_id")
+            or self._activity_serial != serial
         ):
-            return False
-        if not await self._pending_message_is_absent(self._message_id):
             return False
         await self._close_stream()
         self._stream_failed_generation = None
         self._last_error = None
-        self._apply_session_status(status)
+        self._apply_session_status(second_status)
         self._clear_delivery()
         return True
 
@@ -606,7 +630,11 @@ class MasoHttpSession(ProviderSession):
     async def _abort_and_wait(self) -> Dict[str, Any]:
         self._needs_abort = True
         if self._message_id:
-            self._save_delivery(self._message_id, uncertain=self._delivery_uncertain)
+            self._save_delivery(
+                self._message_id,
+                uncertain=self._delivery_uncertain,
+                post_acknowledged=self._post_acknowledged,
+            )
         # MASO abort leaves broker messages queued and can re-wake them. Remove
         # this Hub-owned message before aborting; UUID correlation is not POST
         # idempotency. Retain the delivery sidecar until both steps succeed.
@@ -620,6 +648,29 @@ class MasoHttpSession(ProviderSession):
         # next status request resumes this same saved session, with a fresh
         # plugin. A failed exit keeps recovery blocked before any new POST.
         await self._request("POST", self._path("exit"))
+        if self._delivery_uncertain and not self._post_acknowledged:
+            # MASO has no cancellation tombstone for an unacknowledged POST
+            # that may still be paused before broker enqueue. Deleting pending,
+            # aborting, and exiting the same session cannot prevent that delayed
+            # handler from enqueueing onto the same session afterwards; allocate
+            # and adopt a fresh MASO session so any late enqueue stays on the
+            # retired session ID.
+            pending = self._pending_rotation
+            if pending is not None:
+                await self.discard_rotated_conversation(pending[0])
+            conversation_id, status = await self._create_session(rotation=True)
+            try:
+                self._adopt_rotated_conversation_id(conversation_id)
+            except BaseException:
+                await self._discard_rotation(conversation_id)
+                raise
+            self._clear_delivery()
+            self._apply_session_status(status)
+            self._needs_abort = False
+            self._pending_rotation = None
+            self._stream_failed_generation = None
+            self._last_error = None
+            return status
         status = await self._request("GET", self._path("status"))
         # A concurrent exit can return 200 while an earlier close is still
         # draining. Successful resume cannot register this same agent ID until
@@ -640,28 +691,41 @@ class MasoHttpSession(ProviderSession):
         self._last_error = None
         return status
 
-    def _save_delivery(self, message_id: str, *, uncertain: bool = False) -> None:
+    def _save_delivery(
+        self,
+        message_id: str,
+        *,
+        uncertain: bool = False,
+        post_acknowledged: Optional[bool] = None,
+        turn_id: Optional[str] = None,
+    ) -> None:
+        acknowledged = (not uncertain) if post_acknowledged is None else post_acknowledged
+        resolved_turn_id = self._quarantined_turn_id if turn_id is None else turn_id
+        payload: Dict[str, Any] = {
+            "base_url": self._base,
+            "session_id": self._conversation_id,
+            "message_id": message_id,
+            "uncertain": uncertain,
+            "post_acknowledged": acknowledged,
+            "abort_required": self._needs_abort,
+        }
+        if resolved_turn_id:
+            payload["turn_id"] = resolved_turn_id
         self._delivery_path.parent.mkdir(parents=True, exist_ok=True)
         temporary = self._delivery_path.with_suffix(".tmp")
-        temporary.write_text(
-            json.dumps(
-                {
-                    "base_url": self._base,
-                    "session_id": self._conversation_id,
-                    "message_id": message_id,
-                    "uncertain": uncertain,
-                    "abort_required": self._needs_abort,
-                }
-            )
-        )
+        temporary.write_text(json.dumps(payload))
         temporary.replace(self._delivery_path)
         self._message_id = message_id
         self._delivery_uncertain = uncertain
+        self._post_acknowledged = acknowledged
+        self._quarantined_turn_id = resolved_turn_id
 
     def _clear_delivery(self) -> None:
         self._delivery_path.unlink(missing_ok=True)
         self._message_id = None
         self._delivery_uncertain = False
+        self._post_acknowledged = False
+        self._quarantined_turn_id = None
 
     def acknowledge_turn_complete(self) -> None:
         # A completed root run consumed its message. A transport error may
@@ -782,7 +846,7 @@ class MasoHttpSession(ProviderSession):
             message_id = str(uuid.uuid4())
             # Until the response arrives, a crash cannot distinguish rejection
             # from a request still enqueueing on the service. Persist that fact.
-            self._save_delivery(message_id, uncertain=True)
+            self._save_delivery(message_id, uncertain=True, post_acknowledged=False)
             self._awaiting_message_id = message_id
             self._accept_events = True
             post_started = True
@@ -795,11 +859,14 @@ class MasoHttpSession(ProviderSession):
                     "send_timing": "next_turn",
                 },
             )
+            self._save_delivery(
+                message_id,
+                uncertain=self._stream_failed_generation == generation,
+                post_acknowledged=True,
+            )
             if self._stream_failed_generation == generation:
                 raise RuntimeError("MASO stream failed before message acceptance was confirmed")
-            if self.turn_in_flight:
-                self._save_delivery(message_id)
-            else:
+            if not self.turn_in_flight:
                 self._clear_delivery()
         except (Exception, asyncio.CancelledError):
             await self._close_stream()
@@ -963,7 +1030,11 @@ class MasoHttpSession(ProviderSession):
             self._stream_ready.set_exception(RuntimeError("MASO event stream could not be opened"))
         elif self._accept_events and generation == self._stdout_generation:
             if self._message_id:
-                self._save_delivery(self._message_id, uncertain=True)
+                self._save_delivery(
+                    self._message_id,
+                    uncertain=True,
+                    post_acknowledged=self._post_acknowledged,
+                )
             self._queue_event(generation, "hub_transport_error", {"error": message})
 
     def accepts_notification(self, record: Dict[str, Any]) -> bool:

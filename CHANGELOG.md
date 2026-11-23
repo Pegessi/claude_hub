@@ -9,7 +9,8 @@
 
 ### fix(maso): reconcile idle uncertain delivery and close locally rejected turns
 
-- Allow `MasoHttpSession` to clear an uncertain-delivery quarantine sidecar before a new send only when MASO confirms the session tree is idle (`is_running=false`, `status=idle`, no active children/condensation) and `GET /api/sessions/{id}/messages/pending/{message_id}` returns `404`, and let explicit Stop (`cancel_active_turn`) run `DELETE pending` + `abort` + `exit` + idle confirmation when `turn_in_flight=False` and `_delivery_uncertain=True`.
+- Allow `MasoHttpSession` to auto-reconcile an acknowledged uncertain-delivery quarantine sidecar (`post_acknowledged=true`) before a new send only when MASO confirms the session tree is idle both before and after `GET /api/sessions/{id}/messages/pending/{message_id}` returns `404` with no intervening activity; keep unacknowledged POSTs (`post_acknowledged=false`) fail-closed against auto-reconciliation, and let explicit Stop (`cancel_active_turn`, including cold targeted Stop via persisted `turn_id` and user-accessible composer Stop) clear quarantine by deleting pending messages, aborting/exiting the session, and rotating to a fresh MASO session when POST acknowledgment was uncertain.
+- Surface persisted MASO delivery quarantine as `attention` (`Delivery uncertain — stop or inspect session`) across direct-tab and managed-chat runtime snapshots, including cold restarts after orphan turn terminalization.
 - Distinguish in-flight submission uncertainty from pre-delivery local rejections in `runtime/input.py` so turns rejected before reaching the provider (including retries and scheduled turns under an existing quarantine) immediately emit `error` and `turn_completed(status="failed", delivery_rejected=True)` without leaving open ghost turns.
 
 ### fix(dot): prefer strong scouting verification models

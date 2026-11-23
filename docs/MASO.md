@@ -162,11 +162,17 @@ awaits exit/resume finalizers before allowing a fresh subscription.
 MASO's bounded event IDs can reset, so an interrupted connection or failed status
 monitor fails the display turn rather than claiming lossless replay. It does not
 automatically abort remote work. A possibly accepted POST or interrupted delivery
-is quarantined and never automatically resent; later sends remain refused while
-the remote session is active, the pending message UUID is still queued, or
-service status cannot be verified, and unlock once MASO confirms the session
-tree is idle and the pending UUID returns `404` or after an explicit Stop
-completes pending removal, abort, exit and idle confirmation. Reopening the UI
+is quarantined in `.maso-delivery.json` (recording `uncertain`, `post_acknowledged`,
+and `turn_id`) and never automatically resent. While quarantined, runtime status
+snapshots report `attention` rather than `idle`/`Ready`. An acknowledged POST whose
+SSE stream disconnected can auto-reconcile on the next send only after MASO confirms
+the session tree is idle both before and after `GET /messages/pending/{message_id}`
+returns `404` with no intervening activity. An unacknowledged POST (`post_acknowledged=false`,
+such as a request timeout that may still be paused before broker enqueue) never
+auto-reconciles from `idle + pending 404`; explicit Stop (`cancel_active_turn`,
+including cold targeted Stop matching the persisted `turn_id`) deletes any pending
+message, aborts and exits the old session, and rotates to a fresh MASO session so a
+delayed enqueue stays fenced on the retired session ID. Reopening the UI
 after a backend crash is not a lossless backfill of provider output produced
 while disconnected.
 

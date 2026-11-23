@@ -491,7 +491,8 @@ class InputMixin(SessionState):
                         await self.attachment_store._delete_by_id(att_id)
                     except Exception:
                         logger.exception(
-                            "failed to clean up preview %s after publish failure", att_id
+                            "failed to clean up preview %s after publish failure",
+                            att_id,
                         )
                 self._active_turn_id = None
                 self._active_turn_metadata = None
@@ -518,6 +519,8 @@ class InputMixin(SessionState):
 
             def mark_before_delivery() -> None:
                 nonlocal before_delivery_called
+                if hasattr(transport, "_quarantined_turn_id"):
+                    transport._quarantined_turn_id = client_turn_id
                 if before_delivery is not None and not before_delivery_called:
                     before_delivery_called = True
                     before_delivery()
@@ -535,9 +538,7 @@ class InputMixin(SessionState):
                     )
                 if not uses_provider_prepare:
                     mark_before_delivery()
-                if delivery_guard is None and not (
-                    uses_provider_prepare and before_delivery is not None
-                ):
+                if delivery_guard is None and not uses_provider_prepare:
                     await transport.send_message(text, images)
                 else:
 
@@ -600,7 +601,8 @@ class InputMixin(SessionState):
                             await self.attachment_store._delete_by_id(att_id)
                         except Exception:
                             logger.exception(
-                                "failed to clean up preview %s after rejected delivery", att_id
+                                "failed to clean up preview %s after rejected delivery",
+                                att_id,
                             )
                 if delivery_uncertain or outcome_uncertain:
                     # The provider exposed a main turn before the request

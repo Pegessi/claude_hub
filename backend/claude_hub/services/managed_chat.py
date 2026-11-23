@@ -25,7 +25,11 @@ from ..models import (
     WorkspaceAttachment,
     WorkspaceAttachmentCreate,
 )
-from .agent_stream.activity_labels import IDLE_DETAIL, WORKING_ACTIVITY
+from .agent_stream.activity_labels import (
+    IDLE_DETAIL,
+    UNCERTAIN_DELIVERY_DETAIL,
+    WORKING_ACTIVITY,
+)
 from .agent_stream.attachments import (
     AgentStreamAttachmentStore,
     preview_within_cache_bounds,
@@ -365,6 +369,27 @@ def _scan_durable_turn_state(
         return "unknown"
 
 
+def _maso_delivery_uncertain_for_ids(workspace_id: str, session_id: str) -> bool:
+    sidecar = AgentStreamStore(workspace_id, session_id).path.with_suffix(".maso-delivery.json")
+    try:
+        raw = sidecar.read_text()
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+    try:
+        payload = json.loads(raw)
+    except ValueError:
+        return True
+    if not isinstance(payload, dict):
+        return True
+    return payload.get("uncertain") is True or payload.get("abort_required") is True
+
+
+def _maso_delivery_uncertain(session: ManagedSession) -> bool:
+    return _maso_delivery_uncertain_for_ids(session.workspace_id, session.id)
+
+
 def _durable_turn_state_for_ids(
     workspace_id: str, session_id: str
 ) -> Literal["empty", "terminal", "unfinished", "unknown"]:
@@ -409,6 +434,18 @@ def _runtime_snapshot(session: ManagedSession) -> Optional[NativeRuntimeSnapshot
             WORKING_ACTIVITY,
             pending_question=pending_question,
             **extras,
+        )
+    if getattr(transport, "exit_error", None) is not None:
+        return NativeRuntimeSnapshot(
+            AgentRuntimeStatus.ATTENTION,
+            str(transport.exit_error),
+            pending_question=pending_question,
+        )
+    if getattr(transport, "_delivery_uncertain", False):
+        return NativeRuntimeSnapshot(
+            AgentRuntimeStatus.ATTENTION,
+            UNCERTAIN_DELIVERY_DETAIL,
+            pending_question=pending_question,
         )
     return NativeRuntimeSnapshot(
         AgentRuntimeStatus.IDLE,
@@ -456,7 +493,7 @@ def runtime_status(session: ManagedSession) -> AgentRuntimeStatus:
         }
     except ManagedChatDeliveryUncertain:
         return AgentRuntimeStatus.ATTENTION
-    if "uncertain" in states:
+    if "uncertain" in states or _maso_delivery_uncertain(session):
         return AgentRuntimeStatus.ATTENTION
     if "sending" in states:
         return AgentRuntimeStatus.WORKING
@@ -566,16 +603,6 @@ async def cancel(session: ManagedSession, *, expected_turn_id: Optional[str] = N
 
     _require_chat(session)
     return await _manager().cancel_turn(session, expected_turn_id=expected_turn_id)
-
-
-def _maso_delivery_uncertain(session: ManagedSession) -> bool:
-    path = _maso_delivery_path(session)
-    if not path.exists():
-        return False
-    try:
-        return json.loads(path.read_text(encoding="utf-8")).get("uncertain") is True
-    except (OSError, json.JSONDecodeError, AttributeError):
-        return True
 
 
 def _live_session_for_reset(expected: ManagedSession) -> ManagedSession:

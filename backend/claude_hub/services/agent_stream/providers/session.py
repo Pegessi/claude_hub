@@ -7,7 +7,17 @@ import os
 import shutil
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
-from typing import Any, Awaitable, Callable, Dict, Iterator, List, Literal, Optional, Tuple
+from typing import (
+    Any,
+    Awaitable,
+    Callable,
+    Dict,
+    Iterator,
+    List,
+    Literal,
+    Optional,
+    Tuple,
+)
 
 from ....models import (
     AgentType,
@@ -18,7 +28,12 @@ from ....models import (
     StreamModeOption,
 )
 from ..provider_network import ProviderNetworkError
-from .contracts import ProviderGoal, ProviderGoalOrigin, ProviderGoalSnapshot, ProviderRuntime
+from .contracts import (
+    ProviderGoal,
+    ProviderGoalOrigin,
+    ProviderGoalSnapshot,
+    ProviderRuntime,
+)
 from .guidance import SUBAGENT_HUB_RUNTIME_GUIDANCE
 from .spec import ApprovalChannel, ImageTransport, ProviderSpec, Surface, get_spec
 
@@ -67,7 +82,9 @@ class SessionCore(ABC):
         return Surface.DIRECT_CHAT in self._spec.goals.surfaces
 
     @property
-    def goal_execution_owner(self) -> Optional[Literal["provider_native", "hub_managed"]]:
+    def goal_execution_owner(
+        self,
+    ) -> Optional[Literal["provider_native", "hub_managed"]]:
         return self._spec.goals.default_owner
 
     @property
@@ -149,6 +166,7 @@ class SessionCore(ABC):
         # live turn; generic send failure cleanup must not release its guard.
         self._delivery_uncertain = False
         self._submission_delivery_uncertain = False
+        self._quarantined_turn_id: Optional[str] = None
         # Completion can settle execution while the request response reports a
         # contradictory rejection. Runtime input surfaces that response without
         # writing a second terminal edge.
