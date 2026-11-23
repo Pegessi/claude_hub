@@ -463,6 +463,7 @@ def filter_unanswered(
     own_messages = [message for message in messages if message.sender_id == user_open_id]
     seen = set(processed_ids)
     realtime_router = get_feishu_realtime_event_router()
+    realtime_router.note_candidate_batch(messages)
     rt_cfg = realtime_router.resolve_config()
     candidates, answered = [], []
     for message in sorted(messages, key=lambda item: item.created_at):

@@ -103,6 +103,8 @@ class FeishuAiPoller:
             str, tuple[Any, FeishuUserMessage, Any, Any, set[str], bool]
         ] = OrderedDict()
         self._realtime_queue_worker: asyncio.Task[None] | None = None
+        self._cached_user_client: Any = None
+        self._cached_client_key: tuple[str, str, str] | None = None
         self._worker_tasks: set[asyncio.Task[None]] = set()
         self._in_flight_ids: set[str] = set()
         self._search_msg_cache: OrderedDict[str, FeishuUserMessage | None] = OrderedDict()
@@ -266,6 +268,15 @@ class FeishuAiPoller:
                     exc_info=True,
                 )
 
+    def _get_or_build_user_client(self, cfg: FeishuAiCommandConfig) -> Any:
+        if getattr(self._service, "_user_client_factory", None) is not None:
+            return self._service.build_user_client(cfg)
+        key = (cfg.owner_open_id or "", cfg.app_id or "", cfg.send_mode or "auto")
+        if self._cached_user_client is None or self._cached_client_key != key:
+            self._cached_user_client = self._service.build_user_client(cfg)
+            self._cached_client_key = key
+        return self._cached_user_client
+
     async def _handle_frontier_pushed_web_message(self, pushed: Any) -> bool:
         return await self.handle_pushed_web_message(pushed, background_realtime=True)
 
@@ -280,7 +291,7 @@ class FeishuAiPoller:
         rt_cfg = self._realtime_router.resolve_config()
         if (not cfg.enabled and not rt_cfg.enabled) or cfg.send_mode == "openapi":
             return False
-        user_client = self._service.build_user_client(cfg)
+        user_client = self._get_or_build_user_client(cfg)
         if (
             hasattr(user_client, "should_use_web_session")
             and not user_client.should_use_web_session()
@@ -352,7 +363,7 @@ class FeishuAiPoller:
                 self._frontier_task.cancel()
             self._frontier_connected = False
             return
-        user_client = self._service.build_user_client(cfg)
+        user_client = self._get_or_build_user_client(cfg)
         if (
             hasattr(user_client, "should_use_web_session")
             and not user_client.should_use_web_session()
@@ -431,6 +442,8 @@ class FeishuAiPoller:
             self._in_flight_ids.clear()
         self._realtime_event_queue.clear()
         self._realtime_queue_worker = None
+        self._cached_user_client = None
+        self._cached_client_key = None
 
     async def stop(self) -> None:
         await self.quiesce()

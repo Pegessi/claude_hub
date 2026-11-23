@@ -1656,3 +1656,278 @@ async def test_c3_r3_probe_d_scoped_watched_chat_search_avoids_501_all_group_sta
     assert res.candidates == 2
     assert res.notified == 2
     assert not any("--chat-type" in argv and "group" in argv for argv, _, _ in runner.calls)
+
+
+@pytest.mark.asyncio
+async def test_c4_r1_ordinary_messages_do_not_stall_fifo_queue_or_rebuild_client(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """C4-R1 regression: ordinary unmentioned messages must short-circuit before slow chat metadata lookup, and production poller reuses FeishuUserClient."""
+    import asyncio
+    import time
+
+    from claude_hub.services.feishu_web_session.client import FeishuWebClient
+
+    async def slow_chats(self: Any, chat_ids: list[str]) -> dict[str, Any]:
+        await asyncio.sleep(3.0)
+        return {}
+
+    monkeypatch.setattr(FeishuWebClient, "chats", slow_chats)
+
+    emitted: list[ExternalEvent] = []
+    done = asyncio.Event()
+
+    async def sink(ev: ExternalEvent) -> bool:
+        emitted.append(ev)
+        done.set()
+        return True
+
+    poller, svc, uc = _setup_poller(
+        tmp_path,
+        realtime_config=FeishuRealtimeEventConfig(
+            enabled=True,
+            watch_chat_ids=frozenset({PRIORITY_CHAT_OPEN_ID}),
+            url_patterns=(r"https://compute\.example\.com/job/\d+",),
+        ),
+        event_sink=sink,
+    )
+    # Test production path where _user_client_factory is None
+    svc._user_client_factory = None
+    build_calls = 0
+
+    def counting_build(_cfg: Any) -> Any:
+        nonlocal build_calls
+        build_calls += 1
+        return uc
+
+    monkeypatch.setattr(svc, "build_user_client", counting_build)
+
+    ordinary_msgs = [
+        _build_pushed_via_wire(
+            msg_id=f"740000000000000910{i}",
+            from_id=COLLEAGUE_WEB_UID,
+            chat_id=ORDINARY_CHAT_WEB_ID,
+            nodes=[T(f"ordinary discussion message {i}")],
+            create_time_s=1_760_009_100 + i,
+            at_me=False,
+        )
+        for i in range(5)
+    ]
+    urgent_at_me = _build_pushed_via_wire(
+        msg_id="7400000000000009199",
+        from_id=COLLEAGUE_WEB_UID,
+        chat_id=ORDINARY_CHAT_WEB_ID,
+        nodes=[Node(text="@Owner", at=OWNER_WEB_UID), T(" urgent production alert")],
+        create_time_s=1_760_009_110,
+        at_me=True,
+    )
+    # Pre-warm chat metadata and verify that the 5 preceding ordinary messages do not call slow_chats
+    t0 = time.perf_counter()
+    for m in ordinary_msgs:
+        await poller._handle_frontier_pushed_web_message(m)
+    # Drain the 5 ordinary messages; because none of them are @me or contain matched URLs, slow_chats(3.0s) must NOT be called!
+    assert poller._realtime_queue_worker is not None
+    await asyncio.wait_for(poller._realtime_queue_worker, timeout=0.5)
+    elapsed_ordinary = time.perf_counter() - t0
+    assert elapsed_ordinary < 0.5
+    assert build_calls == 1
+
+    # Subsequent urgent @me reuses the same cached FeishuUserClient (build_calls stays 1)
+    wt = poller._cached_user_client._get_web_transport()
+    from claude_hub.services.feishu_web_session.rich import WebChat
+
+    wt._remember_chat(
+        WebChat(id=ORDINARY_CHAT_WEB_ID, open_chat_id="oc_ord_chat", name="研发讨论群")
+    )
+    monkeypatch.setattr(
+        FeishuWebClient,
+        "chats",
+        lambda self, cids: asyncio.sleep(0, result=dict(wt._chat_cache)),
+    )
+    await poller._handle_frontier_pushed_web_message(urgent_at_me)
+    await asyncio.wait_for(done.wait(), timeout=0.5)
+    assert len(emitted) == 1
+    assert build_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_c4_r2_same_second_same_text_collision_and_thread_mismatch_not_merged(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """C4-R2 regression: same-chat/same-second/same-text messages from Alice & Bob or different threads must not falsely deduplicate or clear fallback."""
+    from claude_hub.services.demand_patrol import feishu_triage as triage_mod
+    from claude_hub.services.demand_patrol.feishu_triage import _candidate, filter_unanswered
+    from claude_hub.services.feishu_web_session.rich import WebChat
+
+    call_n = 0
+
+    async def sink_first_ok_second_fail(_ev: ExternalEvent) -> bool:
+        nonlocal call_n
+        call_n += 1
+        return call_n == 1
+
+    poller, _svc, uc = _setup_poller(
+        tmp_path,
+        realtime_config=FeishuRealtimeEventConfig(enabled=True),
+        event_sink=sink_first_ok_second_fail,
+    )
+    wt = uc._get_web_transport()
+    assert wt is not None
+    wt._remember_chat(
+        WebChat(id=ORDINARY_CHAT_WEB_ID, open_chat_id="oc_group_1", name="研发排障群")
+    )
+    monkeypatch.setattr(
+        triage_mod, "get_feishu_realtime_event_router", lambda: poller.realtime_router
+    )
+
+    # 1. Alice (710...2) and Bob (710...9) send the exact same @Owner question in the same chat at the same second.
+    # Alice's Web event succeeds; Bob's Web event fails.
+    alice_pushed = _build_pushed_via_wire(
+        msg_id="7400000000000009201",
+        from_id=COLLEAGUE_WEB_UID,
+        chat_id=ORDINARY_CHAT_WEB_ID,
+        nodes=[Node(text="@Owner", at=OWNER_WEB_UID), T(" 线上服务挂了帮忙看下？")],
+        create_time_s=1_760_009_200,
+        at_me=True,
+    )
+    bob_pushed = _build_pushed_via_wire(
+        msg_id="7400000000000009202",
+        from_id="7100000000000000009",
+        chat_id=ORDINARY_CHAT_WEB_ID,
+        nodes=[Node(text="@Owner", at=OWNER_WEB_UID), T(" 线上服务挂了帮忙看下？")],
+        create_time_s=1_760_009_200,
+        at_me=True,
+    )
+    assert await poller.handle_pushed_web_message(alice_pushed) is True
+    assert await poller.handle_pushed_web_message(bob_pushed) is False
+    assert poller.realtime_router.pending_fallback_count == 1
+
+    # Patrol sees Bob's OpenAPI candidate: must NOT be suppressed by Alice's handled Web record!
+    bob_cand = _candidate(
+        {
+            "message_id": "om_bob_question_9202",
+            "chat_id": "oc_group_1",
+            "chat_name": "研发排障群",
+            "chat_type": "group",
+            "thread_id": "",
+            "create_time": "1760009200000",
+            "sender": {"id": "ou_bob", "name": "Bob"},
+            "content": f'<at user_id="{OWNER_OPEN_ID}">@Owner</at> 线上服务挂了帮忙看下？',
+            "mentions": [{"id": OWNER_OPEN_ID}],
+        }
+    )
+    cands, answered = filter_unanswered([bob_cand], OWNER_OPEN_ID, [], realtime_healthy=True)
+    assert [c.message_id for c in cands] == ["om_bob_question_9202"]
+    assert answered == []
+
+    # 2. Cross-namespace thread_id mismatch (numeric Web topic vs OpenAPI omt_...) must NOT match
+    router2 = FeishuRealtimeEventRouter()
+    router2._record_handled(
+        "7400000000000009210",
+        "7400000000000009210",
+        {"oc_group_1"},
+        "研发排障群",
+        {"7399999999999999999"},
+        {"7100000000000000002"},
+        "@Owner 话题报错排查",
+        "",
+        1_760_009_210_000,
+    )
+    assert (
+        router2.is_message_handled(
+            "om_different_topic_msg",
+            chat_id="oc_group_1",
+            chat_name="研发排障群",
+            thread_id="omt_other_topic",
+            sender_id="ou_alice",
+            text="@Owner 话题报错排查",
+            created_at_ms=1_760_009_210_000,
+        )
+        is False
+    )
+
+
+@pytest.mark.asyncio
+async def test_c4_r3_duplicate_durable_ingress_receipt_treated_as_handled_not_failed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """C4-R3 regression: when dedupe_key already exists in Dot ingress SQLite, realtime router records handled without creating failed_delivery fallback."""
+    from claude_hub.services.demand_patrol import feishu_triage as triage_mod
+    from claude_hub.services.demand_patrol.feishu_triage import _candidate, filter_unanswered
+    from claude_hub.services.dot.events_gateway import submit_external_event
+    from claude_hub.services.feishu_web_session.rich import WebChat
+
+    dot = DotService(DotStore(tmp_path / "dot"))
+    monkeypatch.setattr(dot, "is_set_up", lambda: True)
+    dot.wake_for_external_event = AsyncMock()  # type: ignore[method-assign]
+    monkeypatch.setattr("claude_hub.services.dot.get_dot_service", lambda: dot)
+
+    poller, _svc, uc = _setup_poller(
+        tmp_path,
+        realtime_config=FeishuRealtimeEventConfig(
+            enabled=True,
+            suppress_patrol_when_healthy=True,
+        ),
+        event_sink=None,
+    )
+    wt = uc._get_web_transport()
+    assert wt is not None
+    wt._remember_chat(
+        WebChat(id=ORDINARY_CHAT_WEB_ID, open_chat_id="oc_group_1", name="研发排障群")
+    )
+    wt.bind_message_alias("om_dup_9301", "7400000000000009301")
+    monkeypatch.setattr(
+        triage_mod, "get_feishu_realtime_event_router", lambda: poller.realtime_router
+    )
+
+    # Pre-insert durable receipt in Dot ingress (e.g. from external bridge or prior process run before restart)
+    pre_event = ExternalEvent(
+        source="feishu",
+        event_type="im.mention",
+        dedupe_key="om_dup_9301",
+        severity="urgent",
+        title="Feishu mention",
+        summary="研发排障群 · ou_alice · @Owner 线上报错请看下",
+        payload={
+            "chat_id": "oc_group_1",
+            "message_id": "om_dup_9301",
+            "text": "@Owner 线上报错请看下",
+        },
+    )
+    assert await submit_external_event(pre_event, dot) is True
+    assert dot.wake_for_external_event.await_count == 1
+
+    # Now WebSocket push arrives for the same message (aliased to om_dup_9301)
+    pushed = _build_pushed_via_wire(
+        msg_id="7400000000000009301",
+        from_id=COLLEAGUE_WEB_UID,
+        chat_id=ORDINARY_CHAT_WEB_ID,
+        nodes=[Node(text="@Owner", at=OWNER_WEB_UID), T(" 线上报错请看下")],
+        create_time_s=1_760_009_301,
+        at_me=True,
+    )
+    assert await poller.handle_pushed_web_message(pushed) is True
+    # No second wake, no failed_delivery fallback, and message is recorded as handled!
+    assert dot.wake_for_external_event.await_count == 1
+    assert poller.realtime_router.pending_fallback_count == 0
+    assert poller.realtime_router.needs_patrol_fallback is False
+    assert poller.realtime_router.is_message_handled("om_dup_9301") is True
+
+    cand = _candidate(
+        {
+            "message_id": "om_dup_9301",
+            "chat_id": "oc_group_1",
+            "chat_name": "研发排障群",
+            "chat_type": "group",
+            "create_time": "1760009301000",
+            "sender": {"id": "ou_alice", "name": "Alice"},
+            "content": f'<at user_id="{OWNER_OPEN_ID}">@Owner</at> 线上报错请看下',
+            "mentions": [{"id": OWNER_OPEN_ID}],
+        }
+    )
+    cands, answered = filter_unanswered([cand], OWNER_OPEN_ID, [], realtime_healthy=True)
+    assert cands == []
+    assert answered == ["om_dup_9301"]

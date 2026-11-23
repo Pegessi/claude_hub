@@ -189,6 +189,33 @@ async def record_suppressed_external_event(
     return await asyncio.to_thread(_record_suppressed_ingress, service.store, source, dedupe_key)
 
 
+def _has_ingress_receipt(store: DotStore, source: str, dedupe_key: str) -> bool:
+    if not source or not dedupe_key:
+        return False
+    path = store.home / "index.sqlite.events"
+    if not path.exists():
+        return False
+    key = "external:" + hashlib.sha256(f"{source}\0{dedupe_key}".encode()).hexdigest()
+    try:
+        with closing(sqlite3.connect(path)) as db:
+            return bool(db.execute("SELECT 1 FROM ingress WHERE key = ?", (key,)).fetchone())
+    except sqlite3.Error:
+        return False
+
+
+async def has_external_event_receipt(
+    source: str,
+    dedupe_key: str,
+    service: DotService | None = None,
+) -> bool:
+    """Return True if ``dedupe_key`` is already recorded in Dot's durable ingress ledger."""
+    if service is None:
+        from . import get_dot_service
+
+        service = get_dot_service()
+    return await asyncio.to_thread(_has_ingress_receipt, service.store, source, dedupe_key)
+
+
 def _should_suppress_incoming_feishu_event(event: ExternalEvent) -> bool:
     """Suppress courtesy/already-replied Feishu mention events submitted by external pollers."""
     if event.source != "feishu" or event.event_type != "im.mention":
