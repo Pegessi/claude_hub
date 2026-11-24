@@ -2679,9 +2679,11 @@ async def test_cold_p2p_bot_chat_suppresses_before_sender_lookup(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("mention_owner", [False, True])
+@pytest.mark.parametrize("prefix", ["", "> "])
 async def test_personal_ai_footer_suppresses_topic_reply(
     tmp_path: Path,
     mention_owner: bool,
+    prefix: str,
 ) -> None:
     sink = AsyncMock(return_value=True)
     poller, _, _ = _setup_poller(tmp_path, event_sink=sink)
@@ -2696,7 +2698,7 @@ async def test_personal_ai_footer_suppresses_topic_reply(
         )
     )
     nodes = [Node(text="@Owner", at=OWNER_WEB_UID)] if mention_owner else []
-    nodes.append(T("Here is the summary.\n🤖 AI 代答，仅供参考"))
+    nodes.append(T(f"Here is the summary.\n{prefix}🤖 AI 代答，仅供参考\n"))
     pushed = _build_pushed_via_wire(
         msg_id="740000000000009921",
         from_id=COLLEAGUE_WEB_UID,
@@ -2713,7 +2715,7 @@ async def test_personal_ai_footer_suppresses_topic_reply(
         message=replace(
             pushed.message,
             content=_encode_rich_message(
-                [T("I confirmed the issue")],
+                [T("The message says 「🤖 AI 代答，仅供参考」 but I confirmed the issue.")],
                 is_post=False,
                 title="",
             )[1],
@@ -2740,6 +2742,8 @@ async def test_unknown_numeric_dm_and_explicit_app_sender_are_quiet(tmp_path: Pa
     )
     assert not await poller.handle_pushed_web_message(pushed)
     transport._web.chatters.assert_awaited_once_with([pushed.message.from_id])
+    assert poller.realtime_router.needs_patrol_fallback
+    generation = poller.realtime_router.fallback_generation
     transport._web.chatters.reset_mock()
     user_msg = transport.ingest_pushed_message(pushed)
     assert user_msg is not None
@@ -2748,3 +2752,45 @@ async def test_unknown_numeric_dm_and_explicit_app_sender_are_quiet(tmp_path: Pa
     )
     transport._web.chatters.assert_not_awaited()
     sink.assert_not_awaited()
+
+    assert poller.realtime_router.fallback_generation == generation
+
+
+@pytest.mark.asyncio
+async def test_frontier_sender_timeout_preserves_human_dm_until_replay(tmp_path: Path) -> None:
+    from claude_hub.services.feishu_web_session.rich import FeedPage
+
+    sink = AsyncMock(return_value=True)
+    poller, _, client = _setup_poller(tmp_path, event_sink=sink)
+    transport = client._get_web_transport()
+    assert transport is not None
+    poller._active_web_transport = transport
+    poller._frontier_connected = True
+    transport._web.feed_cards = AsyncMock(return_value=FeedPage())
+    transport._web.chatters = AsyncMock(
+        side_effect=[TimeoutError(), {}, {COLLEAGUE_WEB_UID: WebChatter(id=COLLEAGUE_WEB_UID)}],
+    )
+    pushed = _build_pushed_via_wire(
+        msg_id="740000000000009931",
+        from_id=COLLEAGUE_WEB_UID,
+        chat_id=P2P_CHAT_WEB_ID,
+        chat_type=CHAT_P2P,
+        nodes=[T("Please check this failure")],
+        position=1,
+    )
+    await poller._handle_frontier_pushed_web_message(pushed)
+    assert poller._realtime_queue_worker is not None
+    await poller._realtime_queue_worker
+    assert poller._replay_task is not None
+    await poller._replay_task
+    assert [p.message.id for p in poller._web_journal.pending()] == [pushed.message.id]
+    assert not poller.realtime_stream_healthy
+    sink.assert_not_awaited()
+
+    await poller._run_web_replay()
+    assert poller._web_journal.pending() == []
+    assert not poller.realtime_router.needs_patrol_fallback
+    sink.assert_awaited_once()
+    assert sink.await_args is not None
+    assert sink.await_args.args[0].dedupe_key == pushed.message.id
+    await poller.quiesce()

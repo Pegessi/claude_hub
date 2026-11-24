@@ -12,7 +12,8 @@ _AI_FOOTER_TEXT = DEFAULT_AI_COMMAND_FOOTER.removeprefix("> ")
 
 
 def has_ai_reply_footer(text: str) -> bool:
-    return _AI_FOOTER_TEXT in text
+    lines = text.rstrip().splitlines()
+    return bool(lines and lines[-1].strip().removeprefix(">").strip() == _AI_FOOTER_TEXT)
 
 
 def is_pool_bot_message(sender_keys: set[str], chat_keys: set[str], *, is_p2p: bool) -> bool:
@@ -58,9 +59,12 @@ async def _web_sender_entity(web_transport: object, sender_id: str) -> WebChatte
     return None
 
 
-async def is_automated_web_sender(web_transport: object, sender_id: str, *, is_p2p: bool) -> bool:
+async def is_automated_web_sender(
+    web_transport: object, sender_id: str, *, is_p2p: bool
+) -> bool | None:
+    """Return None when an unresolved numeric DM needs a replay retry."""
     entity = await _web_sender_entity(web_transport, sender_id)
     if entity is not None:
         return entity.type != CHATTER_USER
     # A numeric Web ID alone does not establish that a DM is from a person.
-    return is_p2p and sender_id.isdecimal()
+    return None if is_p2p and sender_id.isdecimal() else False

@@ -986,7 +986,13 @@ class FeishuRealtimeEventRouter:
         if await asyncio.to_thread(is_pool_bot_message, sender_keys, cks, is_p2p=is_p2p):
             return False
         sender_id = msg.from_id or user_msg.sender_open_id
-        if await is_automated_web_sender(wt, sender_id, is_p2p=is_p2p):
+        automated_sender = await is_automated_web_sender(wt, sender_id, is_p2p=is_p2p)
+        if automated_sender is None:
+            self._add_fallback_record(
+                user_msg.message_id, user_msg.message_id, "uncovered_message", *fb_base
+            )
+            return False
+        if automated_sender:
             return False
         self._sync_transport_chats(wt)
         # Web replay and push share the same numeric ID; changing the event key
