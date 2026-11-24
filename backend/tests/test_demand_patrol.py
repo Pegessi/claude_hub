@@ -306,6 +306,17 @@ async def test_rest_status_partial_config_run_and_auth(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from claude_hub.api import dot as dot_api
+    from claude_hub.services import feishu_ai_poller
+
+    monkeypatch.setenv("CLAUDE_HUB_HOME", str(store.path.parent))
+    monkeypatch.setattr(feishu_ai_poller, "_DEFAULT_AI_POLLER", None)
+    monkeypatch.delenv("enabled", raising=False)
+    monkeypatch.setenv("CLAUDE_HUB_FEISHU_REALTIME_EVENTS_ENABLED", "on")
+    realtime_path = store.path.parent / "feishu_realtime_events.json"
+    realtime_path.parent.mkdir(parents=True, exist_ok=True)
+    realtime_path.write_text(
+        json.dumps({"watch_chat_ids": ["test-chat"], "url_patterns": ["example"]})
+    )
 
     dot, runner = FakeDot(), EmptyRunner()
     svc = service(store, dot, runner)
@@ -320,6 +331,8 @@ async def test_rest_status_partial_config_run_and_auth(
     ) as client:
         denied = await client.get("/api/patrol/status")
         assert denied.status_code in {401, 403}
+        denied_realtime = await client.get("/api/dot/patrol/realtime")
+        assert denied_realtime.status_code in {401, 403}
         denied_dot = await client.get("/api/dot/patrol")
         assert denied_dot.status_code in {401, 403}
         app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(id="test")
@@ -330,6 +343,36 @@ async def test_rest_status_partial_config_run_and_auth(
         dot_status = await client.get("/api/dot/patrol")
         assert dot_status.status_code == 200
         assert dot_status.json()["config"]["enabled"] is False
+        assert dot_status.json()["realtime"] == {
+            "effective_enabled": True,
+            "env_override": True,
+            "has_web_session": False,
+            "frontier_connected": False,
+            "realtime_stream_healthy": False,
+            "emitted": 0,
+            "suppressed": 0,
+        }
+        disabled = await client.patch("/api/dot/patrol", json={"realtime_enabled": False})
+        assert disabled.status_code == 200
+        assert disabled.json()["enabled"] is False
+        assert disabled.json()["realtime"]["effective_enabled"] is True
+        assert json.loads(realtime_path.read_text()) == {
+            "enabled": False,
+            "watch_chat_ids": ["test-chat"],
+            "url_patterns": ["example"],
+        }
+        monkeypatch.delenv("CLAUDE_HUB_FEISHU_REALTIME_EVENTS_ENABLED")
+        current = (await client.get("/api/dot/patrol/realtime")).json()
+        assert current["effective_enabled"] is False and current["env_override"] is None
+        realtime_path.write_text("{")
+        malformed = await client.patch("/api/dot/patrol", json={"realtime_enabled": True})
+        assert malformed.status_code == 500
+        assert realtime_path.read_text() == "{"
+        bad_realtime = await client.patch(
+            "/api/dot/patrol", json={"realtime_enabled": "false", "enabled": True}
+        )
+        assert bad_realtime.status_code == 422
+        assert (await client.get("/api/dot/patrol")).json()["config"]["enabled"] is False
         dot_enabled = await client.patch(
             "/api/dot/patrol",
             json={"enabled": True, "feishu_enabled": False},
@@ -402,6 +445,18 @@ async def test_rest_status_partial_config_run_and_auth(
         ),
         (["dot", "patrol"], "GET", "/api/dot/patrol", None),
         (
+            ["dot", "patrol", "--realtime"],
+            "PATCH",
+            "/api/dot/patrol",
+            {"realtime_enabled": True},
+        ),
+        (
+            ["dot", "patrol", "--no-realtime"],
+            "PATCH",
+            "/api/dot/patrol",
+            {"realtime_enabled": False},
+        ),
+        (
             ["dot", "patrol", "--enable", "--no-daily"],
             "PATCH",
             "/api/dot/patrol",
@@ -440,6 +495,37 @@ def test_cli_commands_use_real_hub_client(
     assert (json.loads(request.content) if request.content else None) == payload
     if path.endswith("/run"):
         assert request.extensions["timeout"]["read"] > 1800
+
+
+def test_dot_patrol_cli_reports_effective_realtime_status(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handle(request: httpx.Request) -> httpx.Response:
+        assert request.method == "PATCH"
+        assert json.loads(request.content) == {"realtime_enabled": True}
+        return httpx.Response(
+            200,
+            json={
+                "enabled": False,
+                "realtime": {
+                    "effective_enabled": False,
+                    "env_override": False,
+                    "frontier_connected": True,
+                    "realtime_stream_healthy": False,
+                    "has_web_session": True,
+                },
+            },
+        )
+
+    monkeypatch.setattr(
+        cli_main,
+        "get_client",
+        lambda ctx: HubClient("http://test", transport=httpx.MockTransport(handle)),
+    )
+    result = CliRunner().invoke(cli_main.cli, ["dot", "patrol", "--realtime"])
+    assert result.exit_code == 0, result.output
+    assert (
+        "realtime=off; connected=yes; replay_ready=no; web_session=yes; env_override=off"
+        in result.output
+    )
 
 
 async def test_cli_json_transport_timeout_and_output_bound(

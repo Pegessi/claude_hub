@@ -559,7 +559,10 @@ async def test_self_reply_and_courtesy_closing_suppression(tmp_path: Path) -> No
 
 
 @pytest.mark.asyncio
-async def test_ai_command_unaffected_and_records_owner_activity(tmp_path: Path) -> None:
+@pytest.mark.parametrize("realtime_enabled", [True, False])
+async def test_ai_command_unaffected_and_records_owner_activity(
+    tmp_path: Path, realtime_enabled: bool
+) -> None:
     emitted: list[ExternalEvent] = []
     dispatched_prompts: list[str] = []
 
@@ -570,7 +573,7 @@ async def test_ai_command_unaffected_and_records_owner_activity(tmp_path: Path) 
     poller, service, _uc = _setup_poller(
         tmp_path,
         realtime_config=FeishuRealtimeEventConfig(
-            enabled=True,
+            enabled=realtime_enabled,
             watch_chat_ids=frozenset({ORDINARY_CHAT_WEB_ID}),
             url_patterns=(r"https?://compute\.example\.com/job/\d+",),
         ),
@@ -593,6 +596,7 @@ async def test_ai_command_unaffected_and_records_owner_activity(tmp_path: Path) 
     await poller.wait_for_inflight(timeout=3.0)
     assert len(dispatched_prompts) == 1
     assert "总结当前话题" in dispatched_prompts[0]
+    assert poller.status_dict()["commands_succeeded"] == 1
     await poller.quiesce()
 
 
@@ -2488,3 +2492,79 @@ async def test_live_push_during_first_snapshot_is_not_lost(tmp_path: Path) -> No
     await poller._run_web_replay()
     assert poller._replay_ready
     assert [event.dedupe_key for event in delivered] == [pushed.message.id]
+
+
+@pytest.mark.asyncio
+async def test_runtime_switch_suppresses_realtime_without_releasing_cli_patrol(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from claude_hub.services import feishu_ai_poller
+    from claude_hub.services.feishu_realtime_settings import write_realtime_enabled
+
+    monkeypatch.setenv("CLAUDE_HUB_HOME", str(tmp_path))
+    monkeypatch.delenv("CLAUDE_HUB_FEISHU_REALTIME_EVENTS_ENABLED", raising=False)
+    monkeypatch.delenv("enabled", raising=False)
+    settings_path = tmp_path / "feishu_realtime_events.json"
+    settings_path.write_text(
+        json.dumps(
+            {
+                "watch_chat_ids": [PRIORITY_CHAT_WEB_ID],
+                "url_patterns": [r"https://compute\.example\.com/job/\d+"],
+            }
+        )
+    )
+    sink = AsyncMock(return_value=True)
+    poller, _, _ = _setup_poller(tmp_path, event_sink=sink)
+    monkeypatch.setattr(feishu_ai_poller, "_DEFAULT_AI_POLLER", poller)
+    state = PatrolState(
+        config=PatrolConfig(
+            enabled=True,
+            feishu_enabled=True,
+            feishu_window_start="00:00",
+            feishu_window_end="23:59",
+        )
+    )
+    now = datetime(2026, 1, 1, 4, tzinfo=timezone.utc)
+
+    write_realtime_enabled(False)
+    pushes = []
+    for idx, (chat_id, chat_type, nodes) in enumerate(
+        [
+            (P2P_CHAT_WEB_ID, CHAT_P2P, [T("Can you look into this?")]),
+            (
+                ORDINARY_CHAT_WEB_ID,
+                CHAT_GROUP,
+                [Node(text="@Owner", at=OWNER_WEB_UID), T(" Need help")],
+            ),
+            (
+                PRIORITY_CHAT_WEB_ID,
+                CHAT_GROUP,
+                [T("Please investigate https://compute.example.com/job/123")],
+            ),
+        ]
+    ):
+        pushed = _build_pushed_via_wire(
+            msg_id=f"74000000000000009{idx:02d}",
+            from_id=COLLEAGUE_WEB_UID,
+            chat_id=chat_id,
+            chat_type=chat_type,
+            nodes=nodes,
+        )
+        pushes.append(pushed)
+        assert not await poller.handle_pushed_web_message(pushed, background_realtime=True)
+        assert not await poller.handle_pushed_web_message(pushed)
+    sink.assert_not_awaited()
+    assert not poller.realtime_status()["effective_enabled"]
+    assert poller.web_replay_configured()
+    assert not feishu_due(state, now)
+
+    write_realtime_enabled(True)
+    for pushed in pushes:
+        assert await poller.handle_pushed_web_message(pushed)
+    assert [call.args[0].event_type for call in sink.await_args_list] == [
+        "im.p2p",
+        "im.mention",
+        "im.watch_chat_url",
+    ]
+    assert poller.realtime_status()["emitted"] == 3
+    await poller.quiesce()

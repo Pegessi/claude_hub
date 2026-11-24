@@ -7,6 +7,11 @@
 
 ## Released
 
+### feat(feishu): expose WebSocket event controls and health
+
+- Toggle personal-account Feishu events in Dot, Feishu settings, or the CLI and see connection and replay health.
+- Apply runtime changes immediately while keeping personal `/ai` and the Web session's CLI patrol suppression independent.
+
 ### feat(feishu): route Dot events through Web position replay
 
 - Evaluate personal-account WebSocket messages and recover missed messages by Web-native positions; keep CLI patrol separate when a Web session is configured.

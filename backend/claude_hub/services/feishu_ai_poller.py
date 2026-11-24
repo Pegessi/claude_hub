@@ -31,6 +31,7 @@ from claude_hub.services.feishu_realtime_events import (
     FeishuRealtimeEventRouter,
     get_feishu_realtime_event_router,
 )
+from claude_hub.services.feishu_realtime_settings import realtime_env_override
 from claude_hub.services.feishu_user_client import (
     FeishuMessageSearchPage,
     FeishuUserClient,
@@ -199,8 +200,6 @@ class FeishuAiPoller:
 
     def web_replay_configured(self) -> bool:
         """Keep CLI patrol disabled while an authorized Web session is configured."""
-        if not self._realtime_router.resolve_config().enabled:
-            return False
         store = self._service._web_session_store
         return store.load(auto_import_larkx=False) is not None or store.path.exists()
 
@@ -334,6 +333,18 @@ class FeishuAiPoller:
             except Exception:
                 pass
         return ids
+
+    def realtime_status(self) -> dict[str, Any]:
+        store = self._service._web_session_store
+        return {
+            "effective_enabled": self._realtime_router.resolve_config().enabled,
+            "env_override": realtime_env_override(),
+            "has_web_session": store.load(auto_import_larkx=False) is not None,
+            "frontier_connected": self.frontier_running and self._frontier_connected,
+            "realtime_stream_healthy": self.realtime_stream_healthy,
+            "emitted": self._realtime_router.emitted_count,
+            "suppressed": self._realtime_router.suppressed_count,
+        }
 
     def status_dict(self) -> dict[str, Any]:
         watermarks = self._service.get_watermarks()
@@ -509,9 +520,6 @@ class FeishuAiPoller:
         if expected_session is not None:
             with _session_guard(*expected_session):
                 pass
-        rt_cfg = self._realtime_router.resolve_config()
-        if not cfg.enabled and not rt_cfg.enabled:
-            return False
         user_client = self._get_or_build_user_client(replace(cfg, send_mode="web_session"))
         wt = (
             user_client._get_web_transport() if hasattr(user_client, "_get_web_transport") else None
@@ -576,6 +584,9 @@ class FeishuAiPoller:
                 user_msg,
                 web_transport=wt,
             )
+            return False
+
+        if not self._realtime_router.resolve_config().enabled:
             return False
 
         if background_realtime:

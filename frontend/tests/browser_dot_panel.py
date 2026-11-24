@@ -127,6 +127,15 @@ async def main(browser_run: BrowserRun) -> None:
         "pending_top_n": 5,
         "max_triage_per_run": 3,
     }
+    realtime = {
+        "effective_enabled": True,
+        "env_override": None,
+        "has_web_session": True,
+        "frontier_connected": True,
+        "realtime_stream_healthy": True,
+        "emitted": 2,
+        "suppressed": 1,
+    }
     writes: list[list] = []
     report = {
         "result": "FAIL",
@@ -312,6 +321,12 @@ async def main(browser_run: BrowserRun) -> None:
                     body = {"acked": 1}
                 elif path == "/api/dot/patrol" and method == "GET":
                     body = {"config": patrol_config, "running": False}
+                elif path == "/api/dot/patrol/realtime" and method == "GET":
+                    body = realtime
+                elif path == "/api/dot/patrol" and method == "PATCH" and "realtime_enabled" in data:
+                    realtime["effective_enabled"] = data["realtime_enabled"]
+                    realtime["realtime_stream_healthy"] = data["realtime_enabled"]
+                    body = {**patrol_config, "realtime": realtime}
                 elif path == "/api/dot/patrol" and method == "PATCH":
                     patrol_config.update(
                         {key: value for key, value in data.items() if value is not None}
@@ -466,6 +481,13 @@ async def main(browser_run: BrowserRun) -> None:
             patrol_master = patrol_editor.get_by_label("Enable proactive radar")
             await expect(patrol_master).not_to_be_checked()
             await expect(patrol_editor.get_by_label("Work-hours Feishu triage")).to_have_count(0)
+            realtime_switch = patrol_editor.get_by_label("Feishu realtime events (WebSocket)")
+            await expect(realtime_switch).to_be_checked()
+            await expect(patrol_editor.get_by_role("status")).to_have_text("Replay ready")
+            await realtime_switch.click()
+            await expect(realtime_switch).not_to_be_checked()
+            await expect(patrol_editor.get_by_role("status")).to_have_text("Off")
+            await expect(patrol_master).not_to_be_checked()
             await patrol_master.check()
             await expect(patrol_master).to_be_checked()
             await expect(patrol_editor.get_by_label("Work-hours Feishu triage")).to_be_checked()
@@ -473,6 +495,7 @@ async def main(browser_run: BrowserRun) -> None:
             await patrol_editor.get_by_label("Work-hours Feishu triage").uncheck()
             await expect(patrol_editor.get_by_label("Work-hours Feishu triage")).not_to_be_checked()
             assert wrote("PATCH", "/api/dot/patrol") == [
+                {"realtime_enabled": False},
                 {"enabled": True},
                 {"feishu_enabled": False},
             ]
@@ -624,6 +647,7 @@ async def main(browser_run: BrowserRun) -> None:
             await panel.get_by_role("tab", name="Work").click()
             patrol_bar = page.get_by_test_id("dot-patrol-bar")
             await expect(patrol_bar).to_contain_text("radar on")
+            await expect(patrol_bar.get_by_role("status")).to_have_text("Off")
             await patrol_bar.get_by_role("button", name="Disable", exact=True).click()
             await expect(patrol_bar).to_contain_text("radar off")
             assert wrote("PATCH", "/api/dot/patrol")[-1] == {"enabled": False}

@@ -20,6 +20,8 @@ from ..services.dot import Card, DotService, get_dot_service
 from ..services.dot.events_gateway import receive_external_event
 from ..services.dot.service import DelegateNotStarted, LessonNotFound
 from ..services.dot.store import LESSON_RULE_LIMIT
+from ..services.feishu_ai_poller import get_feishu_ai_poller
+from ..services.feishu_realtime_settings import write_realtime_enabled
 from ..services.ttyd_manager import TabLimitExceededError
 from ..services.workspace_manager._task_execution import TaskExecutionConflict
 
@@ -377,7 +379,16 @@ async def dot_patrol_status(
 ) -> dict[str, Any]:
     from .patrol import demand_patrol_service
 
-    return await demand_patrol_service.status()
+    status = await demand_patrol_service.status()
+    status["realtime"] = await dot_patrol_realtime_status(current_user)
+    return status
+
+
+@router.get("/patrol/realtime")
+async def dot_patrol_realtime_status(
+    current_user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    return await asyncio.to_thread(get_feishu_ai_poller().realtime_status)
 
 
 @router.patch("/patrol")
@@ -389,11 +400,24 @@ async def dot_patrol_update(
 
     from .patrol import demand_patrol_service
 
+    realtime_requested = "realtime_enabled" in changes
+    realtime_enabled = changes.pop("realtime_enabled", None)
+    if realtime_requested and not isinstance(realtime_enabled, bool):
+        raise HTTPException(422, "realtime_enabled must be a boolean")
     try:
-        config = await demand_patrol_service.configure(changes)
+        if changes or not realtime_requested:
+            result = (await demand_patrol_service.configure(changes)).model_dump(mode="json")
+        else:
+            result = (await demand_patrol_service.status())["config"]
     except ValidationError as exc:
         raise HTTPException(422, exc.errors(include_context=False, include_input=False)) from exc
-    return config.model_dump(mode="json")
+    if isinstance(realtime_enabled, bool):
+        try:
+            await asyncio.to_thread(write_realtime_enabled, realtime_enabled)
+        except (OSError, ValueError) as exc:
+            raise HTTPException(500, "Could not save Feishu realtime settings") from exc
+        result["realtime"] = await dot_patrol_realtime_status(current_user)
+    return result
 
 
 # ── memory ──────────────────────────────────────────────────────────────

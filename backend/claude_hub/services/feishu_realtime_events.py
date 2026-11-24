@@ -1044,6 +1044,8 @@ class FeishuRealtimeEventRouter:
         )
         ev_kw.update(title=ev_ttl, summary=" · ".join(parts)[:1000], url=parsed_url, payload=pl)
         event = ExternalEvent(**ev_kw)
+        if not self.resolve_config().enabled:
+            return False
         delivery_err: str | None = None
         try:
             if not await self._deliver_event(event, cfg):
