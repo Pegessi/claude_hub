@@ -28,7 +28,7 @@ from claude_hub.services.terminal_runtime.defaults import DEFAULT_CLAUDE_LAUNCH_
 _STATE_VERSION = 1
 DEFAULT_AI_COMMAND_PREFIX = "/ai"
 DEFAULT_AI_COMMAND_ACK_EMOJI = "OnIt"
-DEFAULT_AI_COMMAND_DONE_EMOJI = "DONE"
+DEFAULT_AI_COMMAND_DONE_EMOJI = ""
 DEFAULT_AI_COMMAND_FOOTER = "> 🤖 AI 代答，仅供参考"
 DEFAULT_AI_COMMAND_PROVIDER = AgentType.CODEX
 DEFAULT_AI_COMMAND_MODEL = "gpt-5.4"
@@ -413,6 +413,7 @@ class FeishuAiCommandConfig:
     done_emoji: str = DEFAULT_AI_COMMAND_DONE_EMOJI
     footer: str = DEFAULT_AI_COMMAND_FOOTER
     reply_in_thread: bool = True
+    send_interim_reply: bool = False
     send_mode: str = DEFAULT_AI_COMMAND_SEND_MODE
     web_bot_chat_ids: dict[str, str] = field(default_factory=dict)
 
@@ -497,6 +498,7 @@ class FeishuAiCommandConfig:
             "done_emoji": s("done_emoji", DEFAULT_AI_COMMAND_DONE_EMOJI),
             "footer": s("footer", DEFAULT_AI_COMMAND_FOOTER),
             "reply_in_thread": bool(data.get("reply_in_thread", True)),
+            "send_interim_reply": bool(data.get("send_interim_reply", False)),
             "send_mode": raw_send_mode,
             "web_bot_chat_ids": dict(mappings),
         }

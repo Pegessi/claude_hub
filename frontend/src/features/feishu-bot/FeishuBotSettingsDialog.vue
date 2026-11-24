@@ -180,7 +180,7 @@
                 class="source-chip"
               >{{ aiTokenChipLabel }}</span>
             </div>
-            <p>Detect your own <code>{{ aiEdit.prefix || '/ai' }} &lt;instruction&gt;</code> messages, react <code>{{ aiEdit.ack_emoji }}</code> &rarr; <code>{{ aiEdit.done_emoji }}</code>, and reply as your personal Feishu account (or configured bot fallback when <code>im:message.send_as_user</code> is not granted).</p>
+            <p>Detect your own <code>{{ aiEdit.prefix || '/ai' }} &lt;instruction&gt;</code> messages, show a busy reaction while processing, and reply as your personal Feishu account (or configured bot fallback when <code>im:message.send_as_user</code> is not granted).</p>
           </div>
         </div>
 
@@ -411,7 +411,17 @@
                 v-model="aiEdit.done_emoji"
                 class="ch-input"
                 :disabled="busy || !aiCommandLoaded"
-                placeholder="DONE"
+                placeholder="None"
+                data-testid="feishu-ai-done-emoji-input"
+              >
+            </label>
+            <label class="field">
+              <span class="field-label">Send progress reply</span>
+              <input
+                v-model="aiEdit.send_interim_reply"
+                type="checkbox"
+                :disabled="busy || !aiCommandLoaded"
+                data-testid="feishu-ai-send-interim-input"
               >
             </label>
             <label class="field">
@@ -872,9 +882,10 @@ const aiEdit = reactive<FeishuAiCommandConfig>({
   max_active_chats: 10,
   max_context_messages: 20,
   ack_emoji: 'OnIt',
-  done_emoji: 'DONE',
+  done_emoji: '',
   footer: '> 🤖 AI 代答，仅供参考',
   reply_in_thread: true,
+  send_interim_reply: false,
 })
 const aiProviderOptions = computed<FeishuAiCommandProvider[]>(() => (
   aiCapabilities.value?.providers?.length
@@ -1165,6 +1176,7 @@ function applyAiCommandStatus(
       'done_emoji',
       'footer',
       'reply_in_thread',
+      'send_interim_reply',
     ]
     for (const key of scalarKeys) {
       const currentVal = aiEdit[key]
@@ -1329,9 +1341,10 @@ async function saveAiCommand() {
       watch_chats: watchChats,
       poll_interval_seconds: Number(aiEdit.poll_interval_seconds) || 15,
       ack_emoji: aiEdit.ack_emoji.trim() || 'OnIt',
-      done_emoji: aiEdit.done_emoji.trim() || 'DONE',
+      done_emoji: aiEdit.done_emoji.trim(),
       footer: aiEdit.footer.trim() || '> 🤖 AI 代答，仅供参考',
       reply_in_thread: aiEdit.reply_in_thread,
+      send_interim_reply: aiEdit.send_interim_reply,
     })
     if (closed || current !== viewEpoch) return false
     applyAiCommandStatus(next, { preserveDraft: false })

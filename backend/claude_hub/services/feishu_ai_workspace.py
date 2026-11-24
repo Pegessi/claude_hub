@@ -42,13 +42,32 @@ def execution_message(
     return replace(message, thread_id=thread_id)
 
 
-async def acquire_execution_lock(service: Any, message: FeishuUserMessage) -> asyncio.Lock:
-    """Wait for a provisional main reply to reveal its mapping before thread lookup."""
-    main_key = f"{message.chat_id}:main"
+def pending_channel_key(message: FeishuUserMessage, parsed: ParsedAiCommand) -> str:
+    return f"{channel_key(message, parsed)}:pending:{message.message_id}"
+
+
+def thread_publication_lock(service: Any, message: FeishuUserMessage) -> asyncio.Lock:
     with service._lock:
-        main_lock = service._channel_locks.get(main_key)
-    if message.thread_id and main_lock is not None:
-        async with main_lock:
+        lock: asyncio.Lock = service._channel_locks.setdefault(
+            f"{message.chat_id}:publish-thread", asyncio.Lock()
+        )
+    return lock
+
+
+async def acquire_thread_publication_lock(
+    service: Any, message: FeishuUserMessage, reply_in_thread: bool
+) -> asyncio.Lock | None:
+    if not reply_in_thread or message.thread_id:
+        return None
+    lock = thread_publication_lock(service, message)
+    await lock.acquire()
+    return lock
+
+
+async def acquire_execution_lock(service: Any, message: FeishuUserMessage) -> asyncio.Lock:
+    """Wait for any final reply currently publishing a new thread before lookup."""
+    if message.thread_id:
+        async with thread_publication_lock(service, message):
             pass
     key = f"{message.chat_id}:{message.thread_id or 'main'}"
     with service._lock:
@@ -62,41 +81,27 @@ def bind_reply_thread(
     message: FeishuUserMessage,
     parsed: ParsedAiCommand,
     tab_id: str | None,
-    interim_receipt: Any,
-    final_receipt: Any,
+    reply_thread_id: str | None,
     reply_in_thread: bool,
 ) -> str | None:
-    """Move provisional main mapping when only the final reply reveals its thread.
-
-    Never leave a main alias behind: a later main command may create an
-    unrelated thread. Do not overwrite a thread already owned by another tab.
-    """
-    interim = execution_message(message, interim_receipt.thread_id, reply_in_thread=reply_in_thread)
-    effective = execution_message(interim, final_receipt.thread_id, reply_in_thread=reply_in_thread)
-    old_key, new_key = channel_key(interim, parsed), channel_key(effective, parsed)
-    pending_key = f"{old_key}:pending:{message.message_id}"
+    """Promote a provisional session after Feishu returns its thread ID."""
+    effective = execution_message(message, reply_thread_id, reply_in_thread=reply_in_thread)
+    if not effective.thread_id or message.thread_id or not tab_id:
+        return effective.thread_id
+    old_key, new_key = pending_channel_key(message, parsed), channel_key(effective, parsed)
     with service._lock:
         state = service._load_state()
         channels = dict(state.get("channel_tabs") or {})
         record = normalize_channel_record(channels.get(old_key))
         if record.get("tab_id") != tab_id:
-            old_key = pending_key
+            # Older interrupted runs may still have a shared main mapping.
+            old_key = channel_key(message, parsed)
             record = normalize_channel_record(channels.get(old_key))
         existing = normalize_channel_record(channels.get(new_key))
-        if (
-            tab_id
-            and record.get("tab_id") == tab_id
-            and (not existing or existing.get("tab_id") == tab_id)
-        ):
-            channels[new_key] = channels[old_key]
-            if old_key != new_key:
-                del channels[old_key]
+        if record.get("tab_id") == tab_id and (not existing or existing.get("tab_id") == tab_id):
+            channels[new_key] = channels.pop(old_key)
             state["channel_tabs"] = channels
             service._save_state(state)
-            if effective.thread_id and not interim.thread_id:
-                old_lock = service._channel_locks.get(f"{message.chat_id}:main")
-                if old_lock is not None:
-                    service._channel_locks[f"{message.chat_id}:{effective.thread_id}"] = old_lock
     return effective.thread_id
 
 
@@ -116,7 +121,7 @@ def preserve_interrupted_channel(
         state = service._load_state()
         channels = dict(state.get("channel_tabs") or {})
         if normalize_channel_record(channels.get(key)).get("tab_id") == tab_id:
-            channels[f"{key}:pending:{message.message_id}"] = channels.pop(key)
+            channels[pending_channel_key(message, parsed)] = channels.pop(key)
             state["channel_tabs"] = channels
             service._save_state(state)
 
@@ -247,7 +252,9 @@ def is_maso_endpoint_error(exc: ValueError) -> bool:
     return str(exc) == "Create a new MASO Chat to change MASO_BASE_URL"
 
 
-async def ensure_execution_tab(service: Any, message: Any, parsed: Any, cfg: Any) -> str:
+async def ensure_execution_tab(
+    service: Any, message: Any, parsed: Any, cfg: Any, *, provisional: bool = False
+) -> str:
     """Resolve (reusing or creating) the Chat tab that owns one /ai command.
 
     Channels already mapped to a live, non-archived tab reuse it (hot-switching
@@ -258,7 +265,11 @@ async def ensure_execution_tab(service: Any, message: Any, parsed: Any, cfg: Any
     """
     from claude_hub.services.feishu_ai_command_models import resolve_ai_command_agent_env
 
-    channel_key = service._channel_key(message, parsed)
+    channel_key = (
+        pending_channel_key(message, parsed)
+        if provisional
+        else service._channel_key(message, parsed)
+    )
     with service._lock:
         existing_record = dict(service._load_state().get("channel_tabs") or {}).get(channel_key)
     existing = service._normalize_channel_record(existing_record)

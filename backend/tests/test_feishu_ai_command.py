@@ -530,6 +530,8 @@ async def test_ai_command_pipeline_poller_and_ws_hook(tmp_path: Path) -> None:
         visible_text: str,
         metadata: Any,
     ) -> str:
+        if visible_text == "test execution failure":
+            raise RuntimeError("agent failed")
         dispatched_turns.append((tab_id, prompt, visible_text, dict(metadata)))
         return "v6（2a0bab453f）逐文件审查通过，未发现阻塞问题。"
 
@@ -580,28 +582,21 @@ async def test_ai_command_pipeline_poller_and_ws_hook(tmp_path: Path) -> None:
         assert meta["commit_refs"] == ["2a0bab453f"]
         assert "example/project!4045" in prompt_sent
 
-        # Verify reaction lifecycle: OnIt added -> interim post -> final post -> OnIt deleted -> DONE added
-        reaction_Adds = [
-            b["reaction_type"]["emoji_type"]
-            for m, p, b in api_events
-            if m == "POST" and p.endswith("/reactions")
+        lifecycle = [
+            (method, path.rsplit("/", 1)[-1], body)
+            for method, path, body in api_events
+            if "/reactions" in path or path.endswith("/reply")
         ]
-        reaction_deletes = [
-            p for m, p, _ in api_events if m == "DELETE" and "/reactions/rx_OnIt" in p
+        assert [(method, suffix) for method, suffix, _ in lifecycle] == [
+            ("POST", "reactions"),
+            ("POST", "reply"),
+            ("DELETE", "rx_OnIt"),
         ]
-        replies = [b for m, p, b in api_events if m == "POST" and p.endswith("/reply")]
-        assert reaction_Adds == ["OnIt", "DONE"]
-        assert len(reaction_deletes) == 1
-        assert len(replies) == 2
-        assert replies[0]["msg_type"] == "post"
-        assert (
-            "正在派 Subagent 对 example/project!4045（最新 commit 2a0bab453f）"
-            in replies[0]["content"]
-        )
-        assert DEFAULT_AI_COMMAND_FOOTER in replies[0]["content"]
-        assert replies[1]["msg_type"] == "post"
-        assert "逐文件审查通过" in replies[1]["content"]
-        assert DEFAULT_AI_COMMAND_FOOTER in replies[1]["content"]
+        assert lifecycle[0][2]["reaction_type"]["emoji_type"] == "OnIt"
+        reply = lifecycle[1][2]
+        assert reply["msg_type"] == "post"
+        assert "逐文件审查通过" in reply["content"]
+        assert DEFAULT_AI_COMMAND_FOOTER in reply["content"]
 
         # Duplicate replay of the same message_id is rejected by FeishuMessageDedupStore
         dup = await service.handle_message(
@@ -673,6 +668,32 @@ async def test_ai_command_pipeline_poller_and_ws_hook(tmp_path: Path) -> None:
         assert len(switched_envs) == 1
         assert switched_envs[0][1]["CODEX_MODEL"] == "o3"
         assert switched_envs[0][1]["CODEX_REASONING_EFFORT"] == "medium"
+
+        api_events.clear()
+        failure = await service.handle_message(
+            FeishuUserMessage(
+                message_id="om_ws_ai_failed",
+                chat_id="oc_group_1",
+                sender_open_id="ou_owner",
+                sender_type="user",
+                msg_type="text",
+                text="/ai test execution failure",
+                create_time_ms=1700000110000,
+                thread_id="omt_thread_1",
+            )
+        )
+        assert failure.status == "failed"
+        failure_lifecycle = [
+            (method, path.rsplit("/", 1)[-1], body)
+            for method, path, body in api_events
+            if "/reactions" in path or path.endswith("/reply")
+        ]
+        assert [(method, suffix) for method, suffix, _ in failure_lifecycle] == [
+            ("POST", "reactions"),
+            ("POST", "reply"),
+            ("DELETE", "rx_OnIt"),
+        ]
+        assert "agent failed" in failure_lifecycle[1][2]["content"]
 
         # Empty owner_open_id fails closed
         empty_token_store = FeishuUserTokenStore(
@@ -3076,6 +3097,7 @@ async def test_bot_fallback_reply_send_and_auto_invite_without_send_as_user(
         assert res_missing.final_message_id is None
         simulate_missing_id = False
 
+        svc.update_config({"send_interim_reply": True})
         # R2: Also verify final reply missing receipt (when interim reply succeeds but final reply returns empty data={})
         reply_attempt = 0
         orig_handler = handler
@@ -3653,8 +3675,8 @@ async def test_live_feishu_p2p_discovery_search_cross_app_ws_owner_and_230002_fa
         assert set(detected) == {"om_p2p_hello", "om_search_outside_top"}
         assert chats_calls and chats_calls[0].get("types") == "p2p,group"
         assert search_bodies and search_bodies[0].get("from_ids") == ["ou_owner_example_1"]
-        # Both non-bound chats fell back cleanly to owner DM (interim + final = 2 DMs per command = 4 total)
-        assert len(dm_sends) == 4
+        # Both non-bound chats delivered their final reply to the owner DM.
+        assert len(dm_sends) == 2
         assert all(auth == "Bearer t-example_1" for auth, _, _ in dm_sends)
         assert all(body["receive_id"] == "ou_owner_example_1" for _, _, body in dm_sends)
         assert member_add_calls == []
@@ -3673,7 +3695,7 @@ async def test_live_feishu_p2p_discovery_search_cross_app_ws_owner_and_230002_fa
             message_created_at_ms=now_ms - 5_000,
         )
         assert await service.handle_ws_event(ws_owner_event) is True
-        assert len(bound_replies) == 2
+        assert len(bound_replies) == 1
         assert all(auth == "Bearer t-example_3" for auth, _ in bound_replies)
 
         # 3. Spoofed cross-app WebSocket event (even if display_name matches elsewhere) is rejected!

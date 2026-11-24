@@ -39,7 +39,6 @@ from claude_hub.services.feishu_web_session import (
     CHAT_P2P,
     CMD_ACK,
     CMD_PUSH_MESSAGES,
-    REACT_DONE,
     REACT_ON_IT,
     REDACTED_SECRET,
     TYPE_FILE,
@@ -683,7 +682,7 @@ async def test_web_session_1v1_dm_and_group_ai_command_in_place_reply_and_uncert
             gateway_calls.append((cmd_id, req_dec))
             sent_messages.append(req_dec)
             # If testing uncertain delivery on the final answer (second PutMessageRequest for that run)
-            if fail_final_put_message_network and len(sent_messages) >= 2:
+            if fail_final_put_message_network:
                 raise httpx.ReadTimeout("Simulated post-submit timeout on PutMessageRequest")
             sent_id = f"740000000000000900{len(sent_messages)}"
             resp_bytes = encode(
@@ -768,23 +767,17 @@ async def test_web_session_1v1_dm_and_group_ai_command_in_place_reply_and_uncert
         assert len(dispatched_prompts) == 1
         assert "https://github.com/org/repo/pull/88" in dispatched_prompts[0]
 
-        # Verify reactions: OnIt added, then OnIt deleted and DONE added
-        assert ("7400000000000000202", REACT_ON_IT) in reactions_added
-        assert ("7400000000000000202", REACT_DONE) in reactions_added
+        assert reactions_added == [("7400000000000000202", REACT_ON_IT)]
         assert ("7400000000000000202", REACT_ON_IT) in reactions_deleted
 
-        # Verify 2 PutMessageRequest calls (interim + final) sent in-place to the 1v1 DM as user
-        assert len(sent_messages) == 2
-        for sent_req in sent_messages:
-            assert sent_req["chatId"] == dm_chat_id
-            assert sent_req["parentId"] == "7400000000000000202"
-            assert sent_req["rootId"] == "7400000000000000202"
-            # Both replies belong to the thread rooted at the original command.
-            assert bool(sent_req.get("isReplyInThread", False)) is True
-            inner_text = sent_req["content"]["richText"]["innerText"]
-            assert "🤖 AI 代答，仅供参考" in inner_text
-
-        final_inner = sent_messages[1]["content"]["richText"]["innerText"]
+        assert len(sent_messages) == 1
+        sent_req = sent_messages[0]
+        assert sent_req["chatId"] == dm_chat_id
+        assert sent_req["parentId"] == "7400000000000000202"
+        assert sent_req["rootId"] == "7400000000000000202"
+        assert bool(sent_req.get("isReplyInThread", False)) is True
+        final_inner = sent_req["content"]["richText"]["innerText"]
+        assert "🤖 AI 代答，仅供参考" in final_inner
         assert "PR #88 检查通过，可以合入。" in final_inner
 
         # Now test UncertainDelivery duplicate suppression on post-submit timeout
@@ -798,13 +791,13 @@ async def test_web_session_1v1_dm_and_group_ai_command_in_place_reply_and_uncert
         res_uncertain = await service.handle_message(msg_uncertain, source="poller")
         assert res_uncertain.status == "failed"
         assert "delivery may have occurred" in (res_uncertain.reason or "")
-        assert len(sent_messages) == 2  # interim + 1 final attempt (no duplicate retry!)
+        assert len(sent_messages) == 1  # A single final attempt after post-submit uncertainty.
 
         # Replay of the same message_id must be suppressed as a duplicate
         res_replay = await service.handle_message(msg_uncertain, source="poller")
         assert res_replay.handled is False
         assert res_replay.status == "duplicate"
-        assert len(sent_messages) == 2
+        assert len(sent_messages) == 1
     finally:
         await mock_http.aclose()
 
@@ -938,11 +931,27 @@ def test_cli_and_api_web_session_routes_and_send_mode(
 
         res_cfg = runner.invoke(
             cli,
-            ["feishu", "ai-command", "configure", "--send-mode", "web_session"],
+            [
+                "feishu",
+                "ai-command",
+                "configure",
+                "--send-mode",
+                "web_session",
+                "--send-interim-reply",
+                "--done-emoji",
+                "",
+            ],
         )
         assert res_cfg.exit_code == 0, res_cfg.output
         cfg_json = json.loads(res_cfg.output)
         assert cfg_json["config"]["send_mode"] == "web_session"
+        assert cfg_json["config"]["send_interim_reply"] is True
+        assert cfg_json["config"]["done_emoji"] == ""
+        res_off = runner.invoke(
+            cli, ["feishu", "ai-command", "configure", "--no-send-interim-reply"]
+        )
+        assert res_off.exit_code == 0, res_off.output
+        assert json.loads(res_off.output)["config"]["send_interim_reply"] is False
 
         res_logout = runner.invoke(cli, ["feishu", "ai-command", "web-logout"])
         assert res_logout.exit_code == 0, res_logout.output
@@ -1629,14 +1638,11 @@ async def test_group_chat_topic_thread_mixed_id_dedup_and_frontier_push(
         assert ws_handled is True
         assert len(dispatched_prompts) == 1
         # Verify PutMessageRequest used the resolved numeric web IDs, NEVER om_ or oc_!
-        assert len(sent_messages) == 2
+        assert len(sent_messages) == 1
         assert sent_messages[0]["chatId"] == group_chat_id
         assert sent_messages[0]["parentId"] == group_main_cmd_id
         assert sent_messages[0]["rootId"] == group_main_cmd_id
         assert bool(sent_messages[0].get("isReplyInThread")) is False
-        assert sent_messages[1]["parentId"] == group_main_cmd_id
-        assert sent_messages[1]["rootId"] == group_main_cmd_id
-        assert bool(sent_messages[1].get("isReplyInThread")) is False
 
         # 2. Now run poller.poll_once():
         # - `group_main_cmd_id` (7400000000000000305) must be skipped as a duplicate of `om_openapi_alias_305`!
@@ -1651,10 +1657,10 @@ async def test_group_chat_topic_thread_mixed_id_dedup_and_frontier_push(
 
         # Verify topic reply PutMessageRequest targeted parentId=topic_root_id, rootId=topic_root_id, isReplyInThread=False
         topic_put_reqs = [m for m in sent_messages if m["rootId"] == topic_root_id]
-        assert len(topic_put_reqs) == 2
-        assert topic_put_reqs[1]["chatId"] == group_chat_id
-        assert topic_put_reqs[1]["rootId"] == topic_root_id
-        assert bool(topic_put_reqs[1].get("isReplyInThread")) is False
+        assert len(topic_put_reqs) == 1
+        assert topic_put_reqs[0]["chatId"] == group_chat_id
+        assert topic_put_reqs[0]["rootId"] == topic_root_id
+        assert bool(topic_put_reqs[0].get("isReplyInThread")) is False
 
         # 3. Also test real-time Frontier WebSocket push intake via poller.handle_pushed_web_message
         push_cmd_bytes = encode("lark_entities_TextContent", {"text": "/ai 实时推送测试"})
@@ -2287,7 +2293,14 @@ async def test_auto_web_rejection_uses_only_configured_safe_bot_fallback(
                 tab_creator=create_tab,
                 turn_dispatcher=dispatch,
             )
-            service.update_config({"enabled": True, "owner_open_id": "ou_owner", "ack_emoji": ""})
+            service.update_config(
+                {
+                    "enabled": True,
+                    "owner_open_id": "ou_owner",
+                    "ack_emoji": "",
+                    "send_interim_reply": True,
+                }
+            )
             message = FeishuUserMessage(
                 "10001", "20000", "ou_owner", "user", "text", "/ai inspect", 1
             )
@@ -2348,7 +2361,12 @@ async def test_auto_web_rejection_uses_only_configured_safe_bot_fallback(
                     turn_dispatcher=dispatch,
                 )
                 service.update_config(
-                    {"enabled": True, "owner_open_id": "ou_owner", "ack_emoji": ""}
+                    {
+                        "enabled": True,
+                        "owner_open_id": "ou_owner",
+                        "ack_emoji": "",
+                        "send_interim_reply": True,
+                    }
                 )
                 message = FeishuUserMessage(
                     message_id="10001",

@@ -179,6 +179,7 @@ export interface FeishuAiCommandConfig {
   done_emoji: string
   footer: string
   reply_in_thread: boolean
+  send_interim_reply: boolean
 }
 
 export type FeishuAiCommandSendMode = 'user' | 'web_session' | 'bot_fallback' | 'none'
