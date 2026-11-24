@@ -316,3 +316,24 @@ async def test_plain_fallback_failure_is_reported_without_further_retry(
     else:
         assert type(failure).__name__ in caplog.text
         assert "private-failure" not in caplog.text
+
+
+async def test_card_push_caches_original_markdown_for_quote(monkeypatch):
+    from claude_hub.services.feishu_card_cache import card_text
+
+    h = DeliveryHarness()
+
+    def handler(request):
+        body = h.request(request)
+        if isinstance(body, httpx.Response):
+            return body
+        return httpx.Response(200, json={"code": 0, "data": {"message_id": "om-cache-push"}})
+
+    markdown = "# Original heading\n\n**complete body**"
+    async with httpx.AsyncClient(
+        base_url="https://example.test", transport=httpx.MockTransport(handler)
+    ) as http:
+        client = FeishuBotClient(h.effective.config, client=http)
+        h.install_push(monkeypatch, client)
+        assert await bot_api.push_to_tab("tab", markdown, title="Title")
+    assert card_text(h.effective.config.app_id, "om-cache-push") == f"Title\n\n{markdown}"

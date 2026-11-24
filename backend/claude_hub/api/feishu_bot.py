@@ -89,6 +89,7 @@ from claude_hub.services.feishu_bot_websocket import (
     FeishuBotWebSocketSupervisor,
     message_event_from_sdk,
 )
+from claude_hub.services.feishu_card_cache import remember_text
 from claude_hub.services.feishu_message_format import (
     build_feishu_card_payload,
     build_feishu_message_payload,
@@ -262,7 +263,9 @@ def _interrupt_dot_answer(tab_id: str, queue: _TabDispatchQueue, item: _TabDispa
         one.superseded = True
     turn_id = turn_id_for(active[0].bot_id, active[0].event.message_id)
     task = asyncio.create_task(
-        _stop_superseded_answer(tab_id, queue, active, turn_id, queue.active_text)
+        _stop_superseded_answer(
+            tab_id, queue, active, turn_id, queue.active_text, list(queue.active_sources)
+        )
     )
     for one in active:
         one.stop_task = task
@@ -274,6 +277,7 @@ async def _stop_superseded_answer(
     active: list[_TabDispatchItem],
     turn_id: str,
     text: str,
+    sources: list[dict[str, str | None]],
 ) -> bool:
     """Retain ``text`` for this channel only when the superseded turn stopped."""
     from claude_hub.api import agent_stream as stream_api
@@ -292,10 +296,12 @@ async def _stop_superseded_answer(
     except Exception:
         logger.exception("Feishu Bot could not stop the Dot answer on tab %s", tab_id)
     if stopped:
+        queue.interrupted_sources[active[0].channel_key] = sources
         queue.interrupted_text[active[0].channel_key] = text
         queue.interrupted_text.move_to_end(active[0].channel_key)
         while len(queue.interrupted_text) > _MAX_TAB_DISPATCH_CONTEXTS:
-            queue.interrupted_text.popitem(last=False)
+            evicted, _ = queue.interrupted_text.popitem(last=False)
+            queue.interrupted_sources.pop(evicted, None)
     else:
         # It ended first (or could not be stopped): its answer or failure goes out
         # as usual, and the newer message follows it.
@@ -684,10 +690,14 @@ async def push_to_tab(
                 ):
                     return False
                 try:
-                    await asyncio.wait_for(
+                    sent_id = await asyncio.wait_for(
                         client.send_message(binding.chat_id, payload.msg_type, payload.content),
                         timeout=_OUTBOUND_POST_TIMEOUT_SECONDS,
                     )
+                    if payload.msg_type == "interactive" and isinstance(sent_id, str) and title:
+                        remember_text(
+                            effective.config.app_id, sent_id, f"{title.strip()}\n\n{text}"
+                        )
                 except FeishuBotRemoteError as exc:
                     if payload.msg_type == "text":
                         raise

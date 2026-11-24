@@ -94,6 +94,7 @@ def format_feishu_provider_text_v3(
     chat_name: str | None = None,
     parent_id: str | None = None,
     root_id: str | None = None,
+    messages: list[dict[str, str | None]] | None = None,
 ) -> str:
     """Build immutable v3 text with the resolved room, topic and sender context.
 
@@ -103,7 +104,7 @@ def format_feishu_provider_text_v3(
     Unknown room names are omitted; a null thread ID means a root/private turn.
     """
 
-    fields: dict[str, str | None] = {
+    fields: dict[str, Any] = {
         "app_id": app_id,
         "chat_id": chat_id,
         "message_id": message_id,
@@ -117,6 +118,8 @@ def format_feishu_provider_text_v3(
         fields["parent_id"] = parent_id
     if root_id is not None:
         fields["root_id"] = root_id
+    if messages is not None:
+        fields["messages"] = messages
     source = json.dumps(fields, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
     return f"{_FEISHU_PROVIDER_INTRO_V3}{source}\n{_FEISHU_OUTPUT_GUIDANCE_V2}\n\n{text}"
 
@@ -146,11 +149,28 @@ def provider_text_for_stored_turn(
         chat_type = feishu.get("chat_type")
         thread_id = feishu.get("thread_id")
         chat_name = feishu.get("chat_name")
+        messages = feishu.get("messages")
         if (
             chat_type not in ("p2p", "group")
             or "thread_id" not in feishu
             or (thread_id is not None and not isinstance(thread_id, str))
             or (chat_name is not None and not isinstance(chat_name, str))
+            or (
+                messages is not None
+                and (
+                    not isinstance(messages, list)
+                    or any(
+                        not isinstance(item, dict)
+                        or not isinstance(item.get("message_id"), str)
+                        or not item["message_id"]
+                        or any(
+                            item.get(key) is not None and not isinstance(item.get(key), str)
+                            for key in ("parent_id", "root_id")
+                        )
+                        for item in messages
+                    )
+                )
+            )
             or any(
                 feishu.get(key) is not None and not isinstance(feishu.get(key), str)
                 for key in ("parent_id", "root_id")
@@ -168,6 +188,7 @@ def provider_text_for_stored_turn(
             chat_name=chat_name,
             parent_id=feishu.get("parent_id"),
             root_id=feishu.get("root_id"),
+            messages=messages,
         )
     formatter = (
         format_feishu_provider_text_v1

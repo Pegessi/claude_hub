@@ -18,6 +18,7 @@ from urllib.parse import quote
 
 import httpx
 
+from claude_hub.services.feishu_card_cache import remember_card
 from claude_hub.services.local_storage import document_exists, read_document, write_document
 from claude_hub.services.proxy_rules import create_async_client
 from claude_hub.services.runtime_isolation import resolve_runtime_home
@@ -506,13 +507,20 @@ class FeishuBotClient:
             raise FeishuDeliveryUncertainError(
                 "Feishu message send returned an unrecognizable success response; delivery may have occurred"
             )
+        data = payload.get("data")
+        sent = data.get("message_id") if isinstance(data, Mapping) else None
+        if msg_type == "interactive" and isinstance(sent, str) and sent.strip():
+            remember_card(self._config.app_id, sent, content)
         return payload
 
     async def send_message(
         self, chat_id: str, msg_type: str, content: Mapping[str, object]
-    ) -> None:
-        """Preserve existing one-way callers without requiring a returned identity."""
-        await self._send_message_payload(chat_id, msg_type, content)
+    ) -> str | None:
+        """Send a message and return its identity when Feishu provides one."""
+        payload = await self._send_message_payload(chat_id, msg_type, content)
+        data = payload.get("data")
+        sent = data.get("message_id") if isinstance(data, Mapping) else None
+        return sent if isinstance(sent, str) and sent.strip() else None
 
     async def send_message_with_identity(
         self,
@@ -557,6 +565,7 @@ class FeishuBotClient:
         payload = response.json()
         if not isinstance(payload, dict) or payload.get("code") != 0:
             raise FeishuBotError("Feishu rejected the Bot card update")
+        remember_card(self._config.app_id, message_id, card)
 
     async def send_text(self, chat_id: str, text: str) -> None:
         bounded = text.strip() or "Claude Hub completed without a text response."
@@ -710,6 +719,8 @@ class FeishuBotClient:
             return FeishuReplyReceipt()
         sent = data.get("message_id")
         thread = data.get("thread_id")
+        if msg_type == "interactive" and isinstance(sent, str) and sent.strip():
+            remember_card(self._config.app_id, sent, content)
         return FeishuReplyReceipt(
             message_id=sent if isinstance(sent, str) and sent.strip() else None,
             thread_id=thread if isinstance(thread, str) and thread.strip() else None,

@@ -52,6 +52,7 @@ from claude_hub.services.feishu_bot_pool import (
     PairingClaim,
     turn_id_for,
 )
+from claude_hub.services.feishu_card_cache import card_text
 from claude_hub.services.feishu_message_format import build_feishu_message_payload
 
 logger = logging.getLogger(__name__)
@@ -181,13 +182,20 @@ class FeishuMessageDispatcher:
     ) -> FeishuMessageEvent:
         prefix = ""
         if event.parent_id:
-            try:
-                parents = await client.fetch_merged_forward_messages(event.parent_id)
-                parent = next(item for item in parents if item.get("message_id") == event.parent_id)
-                content, _ = _forward_content(_forward_body(parent))
-                quote_text = content[:12000] or "[内容不可读]"
-            except (FeishuBotError, httpx.HTTPError, StopIteration):
-                quote_text = "[引用消息不可读]"
+            quote_text = card_text(event.app_id, event.parent_id)
+            if quote_text is None:
+                try:
+                    parents = await client.fetch_merged_forward_messages(event.parent_id)
+                    parent = next(
+                        item for item in parents if item.get("message_id") == event.parent_id
+                    )
+                    content, _ = _forward_content(_forward_body(parent))
+                    content = content.replace(
+                        "请升级至最新版本客户端，以查看内容", "[卡片正文不可读]"
+                    ).strip()
+                    quote_text = content[:12000] or "[内容不可读]"
+                except (FeishuBotError, httpx.HTTPError, StopIteration):
+                    quote_text = "[引用消息不可读]"
             quote_text = quote_text.replace("<", "&lt;").replace(">", "&gt;")
             parent_id = quote(event.parent_id[:256], safe="")
             prefix = (
@@ -463,7 +471,7 @@ class FeishuMessageDispatcher:
                 item.native_handoff_done.set()
         # The native handoff inside the guard succeeded, so this channel's
         # stopped-answer carryover has now been delivered with the new turn.
-        queue.interrupted_text.pop(leader.channel_key, None)
+        queue.clear_interrupted(leader.channel_key)
         context = self._dispatch_context_key(leader)
         queue.dispatched_contexts[context] = None
         queue.dispatched_contexts.move_to_end(context)
@@ -712,7 +720,7 @@ class FeishuMessageDispatcher:
             except BaseException:
                 # Shutdown or a stop that hangs: give up on it, never on the batch.
                 stop.cancel()
-        queue.interrupted_text.pop(batch[0].channel_key, None)
+        queue.clear_interrupted(batch[0].channel_key)
 
     def _interrupted_text(self, earlier: str, items: list[_TabDispatchItem]) -> str:
         messages = "\n\n".join(
@@ -814,6 +822,7 @@ class FeishuMessageDispatcher:
         batch: list[_TabDispatchItem] = []
         status = "failed"
         earlier = queue.interrupted_text.get(leader.channel_key, "")
+        earlier_sources = list(queue.interrupted_sources.get(leader.channel_key, []))
         try:
             try:
                 candidates, followup = await self._collect_tab_dispatch_batch(queue, leader)
@@ -836,6 +845,7 @@ class FeishuMessageDispatcher:
                 # or cancelled before the handoff must leave the stopped words in
                 # place, so the next message of this channel still answers them.
                 earlier = queue.interrupted_text.get(leader.channel_key, "")
+                earlier_sources = list(queue.interrupted_sources.get(leader.channel_key, []))
                 if earlier:
                     # Other channels ahead of us in the FIFO must neither inherit
                     # nor discard the words from this channel's stopped answer.
@@ -878,6 +888,17 @@ class FeishuMessageDispatcher:
                 for item in batch:
                     item.native_bridge_started = True
                 turn_metadata = self._turn_metadata(leader.effective, leader.event, leader.binding)
+                sources = earlier_sources + [
+                    {
+                        "message_id": item.event.message_id,
+                        "parent_id": item.event.parent_id,
+                        "root_id": item.event.root_id,
+                    }
+                    for item in batch
+                ]
+                queue.active_sources = sources
+                if len(sources) > 1:
+                    turn_metadata["feishu"]["messages"] = sources
                 assistant_text = await self.bindings.dispatch_tab_chat_and_wait(
                     tab_id,
                     format_feishu_provider_text_v3(
@@ -891,6 +912,7 @@ class FeishuMessageDispatcher:
                         thread_id=leader.event.thread_id,
                         parent_id=leader.event.parent_id,
                         root_id=leader.event.root_id,
+                        messages=turn_metadata["feishu"].get("messages"),
                     ),
                     turn_id_for(leader.bot_id, leader.event.message_id),
                     visible_text=visible_text,
@@ -903,11 +925,11 @@ class FeishuMessageDispatcher:
                     attachments=attachments,
                     admission_guard=lambda: self._admit_batch_dispatch(queue, batch),
                 )
-                queue.interrupted_text.pop(leader.channel_key, None)
+                queue.clear_interrupted(leader.channel_key)
                 if await self._stopped_for_newer(batch) is not None:
                     # It ended before the stop took: this answer is sent, so the
                     # newer message follows it as usual.
-                    queue.interrupted_text.pop(leader.channel_key, None)
+                    queue.clear_interrupted(leader.channel_key)
                 status = (
                     "completed"
                     if await self.bindings.reply_if_current(
@@ -925,6 +947,7 @@ class FeishuMessageDispatcher:
             except ExternalDispatchRetired:
                 if earlier and leader.channel_key not in queue.interrupted_text:
                     queue.interrupted_text[leader.channel_key] = earlier
+                    queue.interrupted_sources[leader.channel_key] = earlier_sources
                     queue.interrupted_text.move_to_end(leader.channel_key)
                 status = "retired"
             except FeishuMessageTimeRejected as exc:
@@ -949,7 +972,7 @@ class FeishuMessageDispatcher:
                     ):
                         status = "pre_dispatch_rejected"
             except ExternalQuestionPending:
-                queue.interrupted_text.pop(leader.channel_key, None)
+                queue.clear_interrupted(leader.channel_key)
                 status = "completed"  # the durable question, not this waiter, owns continuation
             except ExternalInteractionRequired:
                 target = batch[-1] if batch else leader

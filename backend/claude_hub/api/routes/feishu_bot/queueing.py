@@ -79,7 +79,15 @@ class TabDispatchQueue:
     # A stopped batch's text belongs to its channel, not whichever channel is
     # next in the FIFO. Multiple channels can have a stopped answer to resume.
     active_text: str = ""
+    active_sources: list[dict[str, str | None]] = field(default_factory=list)
+    interrupted_sources: dict[DispatchChannelKey, list[dict[str, str | None]]] = field(
+        default_factory=dict
+    )
     interrupted_text: OrderedDict[DispatchChannelKey, str] = field(default_factory=OrderedDict)
+
+    def clear_interrupted(self, channel: DispatchChannelKey) -> None:
+        self.interrupted_text.pop(channel, None)
+        self.interrupted_sources.pop(channel, None)
 
     @property
     def waiters(self) -> list[asyncio.Future[None]]:

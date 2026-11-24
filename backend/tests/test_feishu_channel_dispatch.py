@@ -1106,3 +1106,89 @@ async def test_quote_incident_survives_real_interrupt_dispatch(dispatch):
     merged = dispatch.submitted[1]["visible"]
     assert "[上一条]" in merged and "[新消息 1]" in merged
     assert parent in merged and "Card body" in merged and next_id in merged
+
+
+async def test_interrupted_batch_preserves_each_quote_and_source(dispatch):
+    def parent_record(parent):
+        return [
+            {
+                "message_id": parent,
+                "msg_type": "text",
+                "body": {"content": json.dumps({"text": "quoted " + parent})},
+            }
+        ]
+
+    dispatch.client.fetch_merged_forward_messages.side_effect = parent_record
+    dispatch.blocked.add("earlier")
+    first = dispatch.reserve("earlier", event_chat_type="p2p", thread=None)
+    first.event = replace(first.event, parent_id="parent-earlier", root_id="root-earlier")
+    queue = bot_api._tab_dispatch_queues["tab"]
+    running = asyncio.create_task(dispatch.run(first, queue))
+    await dispatch.wait_started("earlier")
+    second = dispatch.reserve("new-one", event_chat_type="p2p", thread=None)
+    second.event = replace(second.event, parent_id="parent-one", root_id="root-one")
+    third = dispatch.reserve("new-two", event_chat_type="p2p", thread=None)
+    third.event = replace(third.event, parent_id="parent-two", root_id="root-two")
+    assert await running == "superseded"
+    assert await dispatch.run(second, queue) == "completed"
+    submitted = dispatch.submitted[1]
+    assert all(
+        x in submitted["visible"]
+        for x in (
+            "[上一条]",
+            "[新消息 1]",
+            "[新消息 2]",
+            "quoted parent-earlier",
+            "quoted parent-one",
+            "quoted parent-two",
+        )
+    )
+    expected = [
+        {"message_id": "earlier", "parent_id": "parent-earlier", "root_id": "root-earlier"},
+        {"message_id": "new-one", "parent_id": "parent-one", "root_id": "root-one"},
+        {"message_id": "new-two", "parent_id": "parent-two", "root_id": "root-two"},
+    ]
+    assert submitted["metadata"]["feishu"]["messages"] == expected
+    source = json.loads(submitted["text"].splitlines()[0].split(": ", 1)[1])
+    assert source["messages"] == expected
+    assert (
+        provider_text_for_stored_turn(submitted["visible"], submitted["metadata"])
+        == submitted["text"]
+    )
+
+
+async def test_repeated_interrupts_preserve_all_source_ids(dispatch):
+    dispatch.client.fetch_merged_forward_messages.side_effect = lambda parent: [
+        {"message_id": parent, "body": {"content": json.dumps({"text": parent})}}
+    ]
+    dispatch.blocked.update({"first", "second"})
+    first = dispatch.reserve("first", event_chat_type="p2p", thread=None)
+    first.event = replace(first.event, parent_id="parent-first", root_id="root-first")
+    queue = bot_api._tab_dispatch_queues["tab"]
+    running = asyncio.create_task(dispatch.run(first, queue))
+    await dispatch.wait_started("first")
+    second = dispatch.reserve("second", event_chat_type="p2p", thread=None)
+    second.event = replace(second.event, parent_id="parent-second", root_id="root-second")
+    assert await running == "superseded"
+    running = asyncio.create_task(dispatch.run(second, queue))
+    await dispatch.wait_started("second")
+    third = dispatch.reserve("third", event_chat_type="p2p", thread=None)
+    third.event = replace(third.event, parent_id="parent-third", root_id="root-third")
+    assert await running == "superseded"
+    assert await dispatch.run(third, queue) == "completed"
+    submitted = dispatch.submitted[-1]
+    sources = submitted["metadata"]["feishu"]["messages"]
+    assert [entry["message_id"] for entry in sources] == ["first", "second", "third"]
+    assert [entry["parent_id"] for entry in sources] == [
+        "parent-first",
+        "parent-second",
+        "parent-third",
+    ]
+    assert all(
+        parent in submitted["visible"]
+        for parent in ("parent-first", "parent-second", "parent-third")
+    )
+    assert (
+        provider_text_for_stored_turn(submitted["visible"], submitted["metadata"])
+        == submitted["text"]
+    )
