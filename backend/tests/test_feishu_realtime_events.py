@@ -2794,3 +2794,82 @@ async def test_frontier_sender_timeout_preserves_human_dm_until_replay(tmp_path:
     assert sink.await_args is not None
     assert sink.await_args.args[0].dedupe_key == pushed.message.id
     await poller.quiesce()
+
+
+@pytest.mark.asyncio
+async def test_unresolved_dm_does_not_starve_journal_or_cross_chat_catchup(tmp_path: Path) -> None:
+    from claude_hub.services.feishu_web_session.rich import FeedCard, FeedPage
+
+    sink = AsyncMock(return_value=True)
+    poller, _, client = _setup_poller(tmp_path, event_sink=sink)
+    transport = client._get_web_transport()
+    assert transport is not None
+    poller._active_web_transport = transport
+    poller._frontier_connected = True
+    missing_sender = "7200000000000000099"
+    chats = {cid: WebChat(id=cid, type=CHAT_P2P) for cid in (P2P_CHAT_WEB_ID, ORDINARY_CHAT_WEB_ID)}
+    cards = tuple(FeedCard(id=cid) for cid in chats)
+    transport._web.feed_cards = AsyncMock(return_value=FeedPage(cards=cards, chats=chats))
+    await poller._run_web_replay()
+
+    def dm(suffix: int, sender: str, chat_id: str, position: int) -> PushedMessage:
+        return _build_pushed_via_wire(
+            msg_id=f"74000000000000994{suffix}",
+            from_id=sender,
+            chat_id=chat_id,
+            chat_type=CHAT_P2P,
+            nodes=[T(f"Please investigate failure {suffix}")],
+            position=position,
+        )
+
+    unresolved_push = dm(0, missing_sender, P2P_CHAT_WEB_ID, 0)
+    human_push = dm(1, COLLEAGUE_WEB_UID, ORDINARY_CHAT_WEB_ID, 0)
+    unresolved_history = dm(2, missing_sender, P2P_CHAT_WEB_ID, 1)
+    human_history = dm(3, COLLEAGUE_WEB_UID, ORDINARY_CHAT_WEB_ID, 1)
+    poller._web_journal.add(unresolved_push)
+    poller._web_journal.add(human_push)
+    transport._web.feed_cards.return_value = FeedPage(
+        cards=cards,
+        chats={cid: replace(chat, last_position=1, has_last=True) for cid, chat in chats.items()},
+    )
+    transport._web.chats = AsyncMock(return_value=chats)
+    transport._web.topics = AsyncMock(return_value={})
+    history = {
+        P2P_CHAT_WEB_ID: [unresolved_push.message, unresolved_history.message],
+        ORDINARY_CHAT_WEB_ID: [human_push.message, human_history.message],
+    }
+
+    async def messages_at(chat_id: str, positions: list[int]) -> list[WebMessage]:
+        return [history[chat_id][position] for position in positions]
+
+    transport._web.messages_at = AsyncMock(side_effect=messages_at)
+    people = {COLLEAGUE_WEB_UID: WebChatter(id=COLLEAGUE_WEB_UID)}
+
+    async def chatters(ids: list[str]) -> dict[str, WebChatter]:
+        return {uid: people[uid] for uid in ids if uid in people}
+
+    transport._web.chatters = AsyncMock(side_effect=chatters)
+    for _ in range(3):
+        await asyncio.wait_for(poller._run_web_replay(), timeout=3)
+    assert [call.args[0].dedupe_key for call in sink.await_args_list] == [
+        human_push.message.id,
+        human_history.message.id,
+    ]
+    assert [item.message.id for item in poller._web_journal.pending()] == [
+        unresolved_push.message.id,
+        unresolved_history.message.id,
+    ]
+    assert poller._web_replay._load()["chats"] == dict.fromkeys(chats, 1)
+    assert not poller._replay_ready
+
+    people[missing_sender] = WebChatter(id=missing_sender)
+    await poller._run_web_replay()
+    assert not poller._web_journal.pending()
+    assert poller._replay_ready
+    assert [call.args[0].dedupe_key for call in sink.await_args_list] == [
+        human_push.message.id,
+        human_history.message.id,
+        unresolved_push.message.id,
+        unresolved_history.message.id,
+    ]
+    await poller.quiesce()

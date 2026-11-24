@@ -30,8 +30,13 @@ the event sink can finish. The switch gates new deliveries at dispatch.
 
 Realtime filtering checks saved Bot identities and private chat bindings,
 fetched Web chat bot flags, explicit sender types, and numeric Web sender
-entities. A numeric DM with an unresolved sender remains pending for Web
-replay. A confirmed human message can dispatch once verification succeeds.
+entities. A numeric DM with an unresolved sender stays in the durable journal
+while replay processes other records and advances catch-up. Messages found by
+catch-up are journaled before their positions advance. A replay pass retries
+each unresolved record once, and stream health stays degraded until the
+pending messages settle. A confirmed human message can dispatch once
+verification succeeds.
+
 Signed personal-account AI replies stay quiet even when they mention the
 owner. Human discussion that quotes the signature within a sentence still
 routes normally.

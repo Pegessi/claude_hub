@@ -257,8 +257,13 @@ class FeishuAiPoller:
         if wt is None:
             return
         async with self._replay_lock:
+            deferred_ids: set[str] = set()
+            last_seq = 0
 
             async def deliver(pushed: Any) -> None:
+                message_id = pushed.message.id
+                if message_id in deferred_ids:
+                    return
                 with _session_guard(wt, generation_at_start):
                     pass
                 cfg = await self._service.aget_config(auto_import_lark_cli=False)
@@ -271,17 +276,27 @@ class FeishuAiPoller:
                 await self.handle_pushed_web_message(
                     pushed, expected_session=(wt, generation_at_start)
                 )
-                if self._realtime_router.fallback_generation != generation:
+                fallback = self._realtime_router.fallback_kind_since(message_id, generation)
+                if fallback == "sender_verification_pending":
+                    # Catch-up may advance its position after this returns. Keep the
+                    # unresolved payload durable first, including messages found by catch-up.
+                    await asyncio.to_thread(
+                        _journal_add_guarded, journal, pushed, wt, generation_at_start
+                    )
+                    deferred_ids.add(message_id)
+                    return
+                if fallback is not None:
                     raise RuntimeError("Feishu Web replay event delivery failed")
-                self._realtime_router.acknowledge_patrol_fallback(recovered_ids=[pushed.message.id])
+                self._realtime_router.acknowledge_patrol_fallback(recovered_ids=[message_id])
                 await asyncio.to_thread(replay.mark_handled, pushed.message)
                 await asyncio.to_thread(
                     _journal_remove_guarded, journal, pushed.message.id, wt, generation_at_start
                 )
 
             async def drain_journal() -> None:
-                while pending_batch := await asyncio.to_thread(journal.pending):
-                    for pending in pending_batch:
+                nonlocal last_seq
+                while pending_batch := await asyncio.to_thread(journal.pending_page, last_seq):
+                    for last_seq, pending in pending_batch:
                         await deliver(pending)
 
             try:
@@ -447,7 +462,7 @@ class FeishuAiPoller:
                         owner_ids=owner_ids,
                         is_owner_sender=is_owner,
                     )
-                if self._realtime_router.fallback_generation != generation:
+                if self._realtime_router.fallback_kind_since(user_msg.message_id, generation):
                     self._replay_ready = False
                     self._schedule_web_replay()
                 else:

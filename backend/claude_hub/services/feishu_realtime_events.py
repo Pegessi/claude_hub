@@ -233,6 +233,13 @@ class FeishuRealtimeEventRouter:
             self._mark_collisions(rec)
             self._pending_fallbacks[item_id] = rec
 
+    def fallback_kind_since(self, message_id: str, generation: int) -> str | None:
+        with self._lock:
+            record = self._pending_fallbacks.get(message_id)
+            if record is not None and record.generation > generation:
+                return record.kind
+        return None
+
     def _link_pair(self, table: dict[str, set[str]], a: str, b: str) -> None:
         ca, cb = (a or "").strip().casefold(), (b or "").strip().casefold()
         if ca and cb and ca != cb:
@@ -989,7 +996,7 @@ class FeishuRealtimeEventRouter:
         automated_sender = await is_automated_web_sender(wt, sender_id, is_p2p=is_p2p)
         if automated_sender is None:
             self._add_fallback_record(
-                user_msg.message_id, user_msg.message_id, "uncovered_message", *fb_base
+                user_msg.message_id, user_msg.message_id, "sender_verification_pending", *fb_base
             )
             return False
         if automated_sender:

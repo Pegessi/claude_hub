@@ -51,20 +51,29 @@ class WebPushJournal:
             )
 
     def pending(self) -> list[PushedMessage]:
+        return [pushed for _, pushed in self.pending_page()]
+
+    def pending_page(self, after_seq: int = 0) -> list[tuple[int, PushedMessage]]:
         with closing(self._connect()) as db:
-            rows = db.execute("SELECT payload FROM pending ORDER BY seq LIMIT 256").fetchall()
+            rows = db.execute(
+                "SELECT seq, payload FROM pending WHERE seq > ? ORDER BY seq LIMIT 256",
+                (after_seq,),
+            ).fetchall()
         result = []
-        for (payload,) in rows:
+        for seq, payload in rows:
             value = json.loads(payload)
             message = value["message"]
             message["content"] = base64.b64decode(message["content"], validate=True)
             message["at_user_ids"] = tuple(message.get("at_user_ids", ()))
             result.append(
-                PushedMessage(
-                    message=WebMessage(**message),
-                    chat_type=value["chat_type"],
-                    at_me=value["at_me"],
-                    removed=value["removed"],
+                (
+                    seq,
+                    PushedMessage(
+                        message=WebMessage(**message),
+                        chat_type=value["chat_type"],
+                        at_me=value["at_me"],
+                        removed=value["removed"],
+                    ),
                 )
             )
         return result
