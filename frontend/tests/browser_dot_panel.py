@@ -136,6 +136,7 @@ async def main(browser_run: BrowserRun) -> None:
         "emitted": 2,
         "suppressed": 1,
     }
+    fail_next_realtime_read = False
     writes: list[list] = []
     report = {
         "result": "FAIL",
@@ -183,7 +184,7 @@ async def main(browser_run: BrowserRun) -> None:
                 await socket.close(code=1000, reason="mocked dot smoke")
 
             async def route_all(route) -> None:
-                nonlocal execution_put_attempts, fail_next_tabs_refresh
+                nonlocal execution_put_attempts, fail_next_tabs_refresh, fail_next_realtime_read
                 request = route.request
                 parsed = urlparse(request.url)
                 if origin(request.url) != origin(base):
@@ -322,7 +323,11 @@ async def main(browser_run: BrowserRun) -> None:
                 elif path == "/api/dot/patrol" and method == "GET":
                     body = {"config": patrol_config, "running": False}
                 elif path == "/api/dot/patrol/realtime" and method == "GET":
-                    body = realtime
+                    if fail_next_realtime_read:
+                        fail_next_realtime_read = False
+                        code, body = 503, {"detail": "Transient failure"}
+                    else:
+                        body = realtime
                 elif path == "/api/dot/patrol" and method == "PATCH" and "realtime_enabled" in data:
                     realtime["effective_enabled"] = data["realtime_enabled"]
                     realtime["realtime_stream_healthy"] = data["realtime_enabled"]
@@ -483,7 +488,12 @@ async def main(browser_run: BrowserRun) -> None:
             await expect(patrol_editor.get_by_label("Work-hours Feishu triage")).to_have_count(0)
             realtime_switch = patrol_editor.get_by_label("Feishu realtime events (WebSocket)")
             await expect(realtime_switch).to_be_checked()
-            await expect(patrol_editor.get_by_role("status")).to_have_text("Replay ready")
+            realtime_health = patrol_editor.get_by_role("status")
+            await expect(realtime_health).to_have_text("Replay ready")
+            fail_next_realtime_read = True
+            await expect(realtime_health).to_have_text("Unavailable", timeout=8000)
+            await expect(realtime_switch).to_be_disabled()
+            await expect(realtime_health).to_have_text("Replay ready", timeout=8000)
             await realtime_switch.click()
             await expect(realtime_switch).not_to_be_checked()
             await expect(patrol_editor.get_by_role("status")).to_have_text("Off")

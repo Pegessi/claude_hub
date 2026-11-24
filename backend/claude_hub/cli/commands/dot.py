@@ -150,6 +150,10 @@ def dot_patrol(
             changes[name] = value
     if daily_slot:
         changes["daily_slots"] = list(daily_slot)
+    if realtime_enabled is not None and len(changes) > 1:
+        raise click.UsageError(
+            "Use --realtime/--no-realtime separately from scheduled patrol options."
+        )
     if changes:
         data = _call(ctx, "PATCH", "/patrol", json=changes)
     else:

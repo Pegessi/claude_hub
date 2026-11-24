@@ -11,6 +11,7 @@
 
 - Toggle personal-account Feishu events in Dot, Feishu settings, or the CLI and see connection and replay health.
 - Apply runtime changes immediately while keeping personal `/ai` and the Web session's CLI patrol suppression independent.
+- Suppress Bot conversations, automated senders, and signed personal `/ai` replies before they wake Dot.
 
 ### feat(feishu): route Dot events through Web position replay
 

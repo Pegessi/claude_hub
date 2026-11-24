@@ -364,9 +364,35 @@ async def test_rest_status_partial_config_run_and_auth(
         monkeypatch.delenv("CLAUDE_HUB_FEISHU_REALTIME_EVENTS_ENABLED")
         current = (await client.get("/api/dot/patrol/realtime")).json()
         assert current["effective_enabled"] is False and current["env_override"] is None
+        for enabled in (True, False):
+            realtime_path.write_text(
+                json.dumps(
+                    {
+                        "CLAUDE_HUB_FEISHU_REALTIME_EVENTS_ENABLED": not enabled,
+                        "watch_chat_ids": ["test-chat"],
+                        "url_patterns": ["example"],
+                    }
+                )
+            )
+            changed_realtime = await client.patch(
+                "/api/dot/patrol", json={"realtime_enabled": enabled}
+            )
+            assert changed_realtime.status_code == 200
+            assert changed_realtime.json()["realtime"]["effective_enabled"] is enabled
+            assert changed_realtime.json()["realtime"]["env_override"] is None
+            assert json.loads(realtime_path.read_text()) == {
+                "enabled": enabled,
+                "watch_chat_ids": ["test-chat"],
+                "url_patterns": ["example"],
+            }
         realtime_path.write_text("{")
         malformed = await client.patch("/api/dot/patrol", json={"realtime_enabled": True})
         assert malformed.status_code == 500
+        assert realtime_path.read_text() == "{"
+        mixed = await client.patch(
+            "/api/dot/patrol", json={"realtime_enabled": False, "enabled": True}
+        )
+        assert mixed.status_code == 422
         assert realtime_path.read_text() == "{"
         bad_realtime = await client.patch(
             "/api/dot/patrol", json={"realtime_enabled": "false", "enabled": True}
@@ -520,6 +546,9 @@ def test_dot_patrol_cli_reports_effective_realtime_status(monkeypatch: pytest.Mo
         "get_client",
         lambda ctx: HubClient("http://test", transport=httpx.MockTransport(handle)),
     )
+    mixed = CliRunner().invoke(cli_main.cli, ["dot", "patrol", "--enable", "--realtime"])
+    assert mixed.exit_code == 2
+    assert "separately" in mixed.output
     result = CliRunner().invoke(cli_main.cli, ["dot", "patrol", "--realtime"])
     assert result.exit_code == 0, result.output
     assert (

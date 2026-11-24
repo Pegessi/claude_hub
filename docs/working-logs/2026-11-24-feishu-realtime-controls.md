@@ -13,11 +13,22 @@ Authenticated `GET /api/dot/patrol` includes a `realtime` object.
 `{"realtime_enabled": false}` to `PATCH /api/dot/patrol` to update the
 dispatch switch. A valid `CLAUDE_HUB_FEISHU_REALTIME_EVENTS_ENABLED` value
 takes precedence and appears as `env_override` in the response. Writes
-preserve other keys in the per-runtime JSON. Decoding failures leave the
-original document intact so its contents can be recovered.
+preserve other keys and normalize the legacy switch alias in the per-runtime
+JSON. Decoding failures leave the original document intact. Update the
+scheduled patrol options with a separate request or CLI invocation so the two
+stores have independent write outcomes.
+
+The health badge reports unavailable after a failed status read. Automatic
+reads continue, while an uncertain write requires the user to refresh status
+before retrying.
 
 The personal Web listener remains available for `/ai`, and Web replay
 continues advancing through messages observed while dispatch is off. A
 configured Web session continues to suppress CLI patrol during both a
 disconnect and an intentional dispatch pause. A delivery already handed to
 the event sink can finish. The switch gates new deliveries at dispatch.
+
+Realtime filtering checks saved Bot identities and private chat bindings,
+fetched Web chat bot flags, explicit sender types, and numeric Web sender
+entities. A numeric DM stays quiet if the sender cannot be identified. Signed personal-account AI replies stay quiet in group topics and
+when they mention the owner.

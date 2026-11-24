@@ -34,14 +34,17 @@ defineProps<{ summary?: boolean }>()
 
 const status = ref<FeishuRealtimeStatus>()
 const busy = ref(false)
-const error = ref('')
+const readError = ref('')
+const uncertainWrite = ref('')
+const error = computed(() => uncertainWrite.value || readError.value)
 let reading = false
 let revision = 0
 let timer: ReturnType<typeof setInterval> | undefined
 
 const health = computed(() => {
   const current = status.value
-  if (!current) return error.value ? 'Unavailable' : 'Loading…'
+  if (error.value) return 'Unavailable'
+  if (!current) return 'Loading…'
   if (!current.effective_enabled) return 'Off'
   if (!current.has_web_session) return 'No web session'
   if (current.realtime_stream_healthy) return 'Replay ready'
@@ -54,14 +57,17 @@ async function refresh() {
   const observedRevision = revision
   try {
     const current = await loadFeishuRealtime()
-    if (observedRevision === revision) status.value = current
+    if (observedRevision === revision) {
+      status.value = current
+      readError.value = ''
+      uncertainWrite.value = ''
+    }
   } catch {
-    if (observedRevision === revision) error.value ||= 'Could not load Feishu realtime status.'
+    if (observedRevision === revision) readError.value = 'Could not load Feishu realtime status.'
     return
   } finally {
     reading = false
   }
-  if (observedRevision === revision) error.value = ''
 }
 
 async function toggle(event: Event) {
@@ -71,11 +77,10 @@ async function toggle(event: Event) {
   if (busy.value || !status.value) return
   revision += 1
   busy.value = true
-  error.value = ''
   try {
     status.value = await updateFeishuRealtime(enabled)
   } catch {
-    error.value = 'Could not confirm the change. Refresh status before retrying.'
+    uncertainWrite.value = 'Could not confirm the change. Refresh status before retrying.'
   } finally {
     busy.value = false
   }
@@ -84,7 +89,7 @@ async function toggle(event: Event) {
 onMounted(() => {
   void refresh()
   timer = setInterval(() => {
-    if (!error.value) void refresh()
+    if (!uncertainWrite.value) void refresh()
   }, 5_000)
 })
 onUnmounted(() => clearInterval(timer))

@@ -404,8 +404,12 @@ async def dot_patrol_update(
     realtime_enabled = changes.pop("realtime_enabled", None)
     if realtime_requested and not isinstance(realtime_enabled, bool):
         raise HTTPException(422, "realtime_enabled must be a boolean")
+    if realtime_requested and changes:
+        raise HTTPException(
+            422, "Update realtime_enabled separately from scheduled patrol settings"
+        )
     try:
-        if changes or not realtime_requested:
+        if not realtime_requested:
             result = (await demand_patrol_service.configure(changes)).model_dump(mode="json")
         else:
             result = (await demand_patrol_service.status())["config"]

@@ -500,7 +500,7 @@ async def main(browser_run: BrowserRun) -> None:
             if method == "PATCH" and path == "/api/dot/patrol":
                 assert submitted == {"realtime_enabled": True}
                 realtime["effective_enabled"] = True
-                await fulfill_json(route, {"realtime": realtime})
+                await fulfill_json(route, {"detail": "Uncertain response"}, status=503)
                 return
             if method == "GET" and path == "/api/feishu/bot/bots":
                 await fulfill_json(route, pool())
@@ -1101,6 +1101,9 @@ async def main(browser_run: BrowserRun) -> None:
         await expect(realtime_control.get_by_role("status")).to_have_text("Off")
         realtime_switch = realtime_control.get_by_label("Feishu realtime events (WebSocket)")
         await realtime_switch.click()
+        await expect(realtime_control.get_by_role("status")).to_have_text("Unavailable")
+        await expect(realtime_switch).to_be_disabled()
+        await realtime_control.get_by_role("button", name="Refresh", exact=True).click()
         await expect(realtime_switch).to_be_checked()
         await expect(realtime_control.get_by_role("status")).to_have_text("No web session")
         token_card = settings.get_by_test_id("feishu-ai-token-card")

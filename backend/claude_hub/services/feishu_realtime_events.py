@@ -20,6 +20,12 @@ from claude_hub.services.dot.events_gateway import (
     record_suppressed_external_event,
     submit_external_event,
 )
+from claude_hub.services.feishu_realtime_automation import (
+    BOT_SENDER_PREFIXES,
+    has_ai_reply_footer,
+    is_automated_web_sender,
+    is_pool_bot_message,
+)
 from claude_hub.services.feishu_realtime_matching import (
     _HTTP_URL_RE,
     FeishuRealtimeEventConfig,
@@ -790,9 +796,9 @@ class FeishuRealtimeEventRouter:
 
     async def _ensure_chat_metadata(
         self, web_chat_id: str, web_transport: Any, *, refresh: bool = False
-    ) -> tuple[str, str]:
+    ) -> tuple[str, str, Any]:
         if web_transport is None or not web_chat_id:
-            return "", ""
+            return "", "", None
         chat_cache, open_map = getattr(web_transport, "_chat_cache", {}), getattr(
             web_transport, "_web_to_open_chat", {}
         )
@@ -806,13 +812,22 @@ class FeishuRealtimeEventRouter:
         )
         now_m = time.monotonic()
         stale = (now_m - self._chat_meta_ts.get(web_chat_id, 0.0)) >= 60.0
-        need_fetch = cached is None or not open_chat_id or not chat_name or refresh or stale
+        need_fetch = (
+            cached is None
+            or refresh
+            or stale
+            or (
+                getattr(cached, "type", None) != _rich.CHAT_P2P
+                and (not open_chat_id or not chat_name)
+            )
+        )
         if need_fetch and web_client is not None and hasattr(web_client, "chats"):
             try:
                 async with asyncio.timeout(2.5):
                     chats_map = await web_client.chats([web_chat_id])
                 fetched = chats_map.get(web_chat_id) if isinstance(chats_map, Mapping) else None
                 if fetched is not None:
+                    cached = fetched
                     self._chat_meta_ts[web_chat_id] = now_m
                     if hasattr(web_transport, "_remember_chat"):
                         web_transport._remember_chat(fetched)
@@ -825,7 +840,7 @@ class FeishuRealtimeEventRouter:
         if open_chat_id or chat_name:
             with self._lock:
                 self._link_chat_pair(web_chat_id, open_chat_id, chat_name)
-        return open_chat_id, chat_name
+        return open_chat_id, chat_name, cached
 
     def _deliver_event_res(self, res: Any) -> bool:
         if isinstance(res, bool):
@@ -868,9 +883,11 @@ class FeishuRealtimeEventRouter:
             self.record_owner_pushed_message(pushed, user_msg, web_transport=wt)
             return False
         cfg, wcid = self.resolve_config(), (msg.chat_id or user_msg.chat_id).strip()
-        is_bot = user_msg.sender_open_id.startswith(
-            ("cli_", "app_", "bot_")
-        ) or msg.from_id.startswith(("cli_", "app_", "bot_"))
+        is_bot = (
+            user_msg.sender_type.casefold() in {"app", "bot"}
+            or user_msg.sender_open_id.startswith(BOT_SENDER_PREFIXES)
+            or msg.from_id.startswith(BOT_SENDER_PREFIXES)
+        )
         if not cfg.enabled or not wcid or is_bot:
             return False
         m_ids = (
@@ -878,6 +895,8 @@ class FeishuRealtimeEventRouter:
             *getattr(msg, "at_user_ids", ()),
         )
         ftxt = describe(msg.type, msg.content, "").strip() or user_msg.text.strip()
+        if has_ai_reply_footer(ftxt) or has_ai_reply_footer(user_msg.text):
+            return False
         urls = extract_message_urls(msg.type, msg.content, ftxt)
         is_at_me = bool(eff_oids.intersection(m_ids)) or (
             bool(pushed.at_me) and not (bool(m_ids) and set(m_ids) <= {"all", "@all"})
@@ -891,26 +910,26 @@ class FeishuRealtimeEventRouter:
             user_msg.thread_id or (msg.thread_id or msg.root_id if is_in_topic(msg) else "") or ""
         ).strip()
         cks, ocid, cname = self._chat_keys(wcid, wt), "", ""
-        is_p2p = pushed.chat_type == _rich.CHAT_P2P
+        chat_cache = getattr(wt, "_chat_cache", {})
+        chat_meta = chat_cache.get(wcid) if isinstance(chat_cache, Mapping) else None
+        is_p2p = pushed.chat_type == _rich.CHAT_P2P or (
+            not pushed.chat_type and getattr(chat_meta, "type", None) == _rich.CHAT_P2P
+        )
         if is_at_me or m_urls or is_p2p or tid:
             w_cf = {c.strip().casefold() for c in cfg.watch_chat_ids if c and c.strip()}
-            cached_ch = (
-                cc.get(wcid)
-                if isinstance(cc := getattr(wt, "_chat_cache", None), Mapping)
-                else None
-            )
-            cached_nm = " ".join(str(getattr(cached_ch, "name", "") or "").split()).casefold()
+            cached_nm = " ".join(str(getattr(chat_meta, "name", "") or "").split()).casefold()
             ref = bool(
                 m_urls
                 and cfg.watch_chat_names
                 and not (cks & w_cf)
                 and cached_nm not in cfg.watch_chat_names
             )
-            ocid, cname = await self._ensure_chat_metadata(wcid, wt, refresh=ref)
+            ocid, cname, chat_meta = await self._ensure_chat_metadata(wcid, wt, refresh=ref)
             if ocid:
                 cks |= self._chat_keys(ocid, wt)
-        chat_cache = getattr(wt, "_chat_cache", {})
-        chat_meta = chat_cache.get(wcid) if isinstance(chat_cache, Mapping) else None
+        is_p2p = is_p2p or (
+            not pushed.chat_type and getattr(chat_meta, "type", None) == _rich.CHAT_P2P
+        )
         if cks & cfg.automated_chat_ids or bool(getattr(chat_meta, "bot", False)):
             return False
         m_urls = (
@@ -960,6 +979,14 @@ class FeishuRealtimeEventRouter:
                 )
                 return False
         if not (is_at_me or is_w_url or is_p2p or in_topic):
+            return False
+        sender_keys = self._sender_keys(msg.from_id, wt) | self._sender_keys(
+            user_msg.sender_open_id, wt
+        )
+        if await asyncio.to_thread(is_pool_bot_message, sender_keys, cks, is_p2p=is_p2p):
+            return False
+        sender_id = msg.from_id or user_msg.sender_open_id
+        if await is_automated_web_sender(wt, sender_id, is_p2p=is_p2p):
             return False
         self._sync_transport_chats(wt)
         # Web replay and push share the same numeric ID; changing the event key
@@ -1018,7 +1045,7 @@ class FeishuRealtimeEventRouter:
         clbl, snd = (cname or ocid or wcid)[:120], user_msg.sender_open_id[:80]
         parts = [p for p in (clbl, snd, ftxt[:600]) if p]
         keys = "chat_id web_chat_id chat_name chat_type message_id web_message_id thread_id sender_id text trigger_reason matched_urls".split()
-        ctype = "p2p" if pushed.chat_type == _rich.CHAT_P2P else "group"
+        ctype = "p2p" if is_p2p else "group"
         trig = (
             "mention"
             if is_at_me

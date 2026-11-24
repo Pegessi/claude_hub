@@ -40,6 +40,7 @@ def write_realtime_enabled(enabled: bool) -> None:
             settings = {}
         if not isinstance(settings, dict):
             raise ValueError("Feishu realtime settings must be a JSON object")
+        settings.pop(ENABLED_ENV, None)
         settings["enabled"] = enabled
         path.parent.mkdir(parents=True, exist_ok=True)
         handle = tempfile.NamedTemporaryFile(

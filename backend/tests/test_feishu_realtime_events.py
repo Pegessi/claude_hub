@@ -53,6 +53,7 @@ from claude_hub.services.feishu_web_session.rich import (
     Node,
     T,
     WebChat,
+    WebChatter,
     WebMessage,
     rich_text,
 )
@@ -182,6 +183,18 @@ def _setup_poller(
             resp_bytes = encode("reactions_PutReactionResponse", {"count": 1})
         elif cmd_id == 26:  # DeleteReactionRequest
             resp_bytes = encode("reactions_DeleteReactionResponse", {})
+        elif cmd_id == 46:  # PullChattersByIdsRequest
+            chatter_ids = decode(
+                "lark_chatters_PullChattersByIdsRequest", base64.b64decode(pkt["payload"])
+            ).get("chatterIds", [])
+            resp_bytes = encode(
+                "lark_chatters_PullChattersByIdsResponse",
+                {
+                    "chatters": {
+                        uid: {"id": uid, "name": "Test user", "type": 1} for uid in chatter_ids
+                    }
+                },
+            )
         elif cmd_id == 5:  # PutMessageRequest
             resp_bytes = encode(
                 "lark_messages_PutMessageResponse",
@@ -2568,3 +2581,170 @@ async def test_runtime_switch_suppresses_realtime_without_releasing_cli_patrol(
     ]
     assert poller.realtime_status()["emitted"] == 3
     await poller.quiesce()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("chat_type", [CHAT_P2P, CHAT_GROUP])
+async def test_numeric_bot_entity_never_triggers_dot(tmp_path: Path, chat_type: int) -> None:
+    sink = AsyncMock(return_value=True)
+    poller, _, user_client = _setup_poller(tmp_path, event_sink=sink)
+    transport = user_client._get_web_transport()
+    assert transport is not None
+    chat_id = P2P_CHAT_WEB_ID if chat_type == CHAT_P2P else ORDINARY_CHAT_WEB_ID
+    sender = "7200000000000000099"
+    transport._web.chatters = AsyncMock(return_value={sender: WebChatter(id=sender, type=2)})
+    for index in range(2):
+        pushed = _build_pushed_via_wire(
+            msg_id=f"74000000000000990{index}",
+            from_id=sender,
+            chat_id=chat_id,
+            chat_type=chat_type,
+            nodes=[Node(text="@Owner", at=OWNER_WEB_UID), T(" Check this")],
+        )
+        assert not await poller.handle_pushed_web_message(pushed)
+    transport._web.chatters.assert_awaited_once_with([sender])
+    sink.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("locally_bound", [True, False])
+async def test_cold_p2p_bot_chat_suppresses_before_sender_lookup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, locally_bound: bool
+) -> None:
+    from claude_hub.services.feishu_bot_pool import (
+        FeishuBotConfig,
+        FeishuBotPoolStore,
+        OwnerIdentity,
+    )
+
+    monkeypatch.setenv("CLAUDE_HUB_HOME", str(tmp_path))
+    sink = AsyncMock(return_value=True)
+    poller, _, user_client = _setup_poller(tmp_path, event_sink=sink)
+    transport = user_client._get_web_transport()
+    assert transport is not None
+    open_chat_id = "oc_synthetic_bot_dm"
+    bot_open_id = "ou_synthetic_bot"
+    if locally_bound:
+        pool = FeishuBotPoolStore()
+        bot_id = pool.create_bot(
+            name="Synthetic Bot",
+            config=FeishuBotConfig("cli_synthetic_bot", "test-secret"),
+            feishu_open_id=bot_open_id,
+        )
+        pool.bind_p2p(
+            bot_id,
+            owner=OwnerIdentity("ou_test_owner", "", "oauth"),
+            tab_id="test-tab",
+            workspace_id=None,
+            sender_open_id="ou_test_bot_user",
+            chat_id=open_chat_id,
+        )
+    assert P2P_CHAT_WEB_ID not in transport._chat_cache
+    transport._web.chats = AsyncMock(
+        return_value={
+            P2P_CHAT_WEB_ID: WebChat(
+                id=P2P_CHAT_WEB_ID,
+                type=CHAT_P2P,
+                bot=not locally_bound,
+                open_chat_id=open_chat_id if locally_bound else "",
+            ),
+        }
+    )
+    transport._web.chatters = AsyncMock(return_value={})
+    pushed = _build_pushed_via_wire(
+        msg_id="740000000000009911",
+        from_id="7200000000000000099",
+        chat_id=P2P_CHAT_WEB_ID,
+        chat_type=CHAT_P2P,
+        nodes=[T("Here is my answer")],
+    )
+    assert not await poller.handle_pushed_web_message(pushed)
+    transport._web.chats.assert_awaited_once_with([P2P_CHAT_WEB_ID])
+    transport._web.chatters.assert_not_awaited()
+    sink.assert_not_awaited()
+
+    if locally_bound:
+        # A known bot sender alias is enough to suppress a group mention too.
+        transport.bind_sender_alias(bot_open_id, pushed.message.from_id)
+        group = _build_pushed_via_wire(
+            msg_id="740000000000009912",
+            from_id=pushed.message.from_id,
+            chat_id=ORDINARY_CHAT_WEB_ID,
+            nodes=[Node(text="@Owner", at=OWNER_WEB_UID), T(" Check this")],
+        )
+        assert not await poller.handle_pushed_web_message(group)
+        transport._web.chatters.assert_not_awaited()
+        sink.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mention_owner", [False, True])
+async def test_personal_ai_footer_suppresses_topic_reply(
+    tmp_path: Path,
+    mention_owner: bool,
+) -> None:
+    sink = AsyncMock(return_value=True)
+    poller, _, _ = _setup_poller(tmp_path, event_sink=sink)
+    await poller.handle_pushed_web_message(
+        _build_pushed_via_wire(
+            msg_id="740000000000009920",
+            from_id=OWNER_WEB_UID,
+            chat_id=ORDINARY_CHAT_WEB_ID,
+            thread_id="740000000000009919",
+            topic_position=1,
+            nodes=[T("Investigating")],
+        )
+    )
+    nodes = [Node(text="@Owner", at=OWNER_WEB_UID)] if mention_owner else []
+    nodes.append(T("Here is the summary.\n🤖 AI 代答，仅供参考"))
+    pushed = _build_pushed_via_wire(
+        msg_id="740000000000009921",
+        from_id=COLLEAGUE_WEB_UID,
+        chat_id=ORDINARY_CHAT_WEB_ID,
+        thread_id="740000000000009919",
+        topic_position=2,
+        create_time_s=1_760_000_101,
+        nodes=nodes,
+    )
+    assert not await poller.handle_pushed_web_message(pushed)
+    sink.assert_not_awaited()
+    human = replace(
+        pushed,
+        message=replace(
+            pushed.message,
+            content=_encode_rich_message(
+                [T("I confirmed the issue")],
+                is_post=False,
+                title="",
+            )[1],
+        ),
+    )
+    assert await poller.handle_pushed_web_message(human)
+    assert sink.await_args is not None
+    assert sink.await_args.args[0].event_type == "im.topic_reply"
+
+
+@pytest.mark.asyncio
+async def test_unknown_numeric_dm_and_explicit_app_sender_are_quiet(tmp_path: Path) -> None:
+    sink = AsyncMock(return_value=True)
+    poller, _, user_client = _setup_poller(tmp_path, event_sink=sink)
+    transport = user_client._get_web_transport()
+    assert transport is not None
+    transport._web.chatters = AsyncMock(return_value={})
+    pushed = _build_pushed_via_wire(
+        msg_id="740000000000009930",
+        from_id="7200000000000000099",
+        chat_id=P2P_CHAT_WEB_ID,
+        chat_type=CHAT_P2P,
+        nodes=[T("Here is my reply")],
+    )
+    assert not await poller.handle_pushed_web_message(pushed)
+    transport._web.chatters.assert_awaited_once_with([pushed.message.from_id])
+    transport._web.chatters.reset_mock()
+    user_msg = transport.ingest_pushed_message(pushed)
+    assert user_msg is not None
+    assert not await poller.realtime_router.handle_pushed_message(
+        pushed, replace(user_msg, sender_type="app"), web_transport=transport
+    )
+    transport._web.chatters.assert_not_awaited()
+    sink.assert_not_awaited()
