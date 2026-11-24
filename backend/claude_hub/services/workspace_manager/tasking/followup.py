@@ -27,6 +27,7 @@ class _TaskFollowupMixin(_TaskFeedbackSummaryMixin):
         if call_id and (
             call_id in task.processing_call_ids
             or call_id in task.delivered_call_ids
+            or call_id in task.reconciled_call_ids
             or call_id in task.uncertain_call_ids
         ):
             logger.debug(
@@ -73,6 +74,7 @@ class _TaskFollowupMixin(_TaskFeedbackSummaryMixin):
             call_id in current.pending_call_ids
             or call_id in current.processing_call_ids
             or call_id in current.delivered_call_ids
+            or call_id in current.reconciled_call_ids
             or call_id in current.uncertain_call_ids
         ):
             return False
@@ -95,6 +97,8 @@ class _TaskFollowupMixin(_TaskFeedbackSummaryMixin):
             WorkspaceTaskStatus.TODO,
             WorkspaceTaskStatus.QUEUED,
         ):
+            return False
+        if call_id and call_id in current.reconciled_call_ids:
             return False
         block = self._followup_prompt_block(message, call_id)
         if block in current.prompt:
@@ -199,6 +203,10 @@ class _TaskFollowupMixin(_TaskFeedbackSummaryMixin):
                 ),
                 persist=False,
             )
+            if call_id in task.reconciled_call_ids:
+                # append_event above still verifies immutable retry content.
+                # Operator-closed input must not re-stage or continue a review.
+                return event
             self._stage_task_followup_pending(task.id, call_id)
             self._stage_task_followup_prompt(task.id, message, call_id)
             try:

@@ -1,5 +1,6 @@
 """Workspace task and session request schemas."""
 
+from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -190,3 +191,17 @@ class RetryUncertainDeliveryRequest(BaseModel):
 
     call_id: str
     reason: str
+
+
+class ReconcileTerminalDeliveryRequest(BaseModel):
+    """Operator evidence reference, never a receiver processed ACK."""
+
+    model_config = {"extra": "forbid"}
+
+    operation_id: str = Field(min_length=1, max_length=256)
+    call_id: str = Field(min_length=1, max_length=256)
+    reason: str = Field(min_length=1, max_length=2000)
+    expected_created_at: datetime
+    expected_task_id: str = Field(min_length=1)
+    expected_review_cycle: int = Field(ge=0)
+    terminal_sequence: int = Field(ge=0)

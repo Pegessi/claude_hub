@@ -590,6 +590,7 @@ apply_dispatch_decision = _execution_endpoints.apply_dispatch_decision
 dispatch_workspace = _execution_endpoints.dispatch_workspace
 delete_session = _execution_endpoints.delete_session
 send_session_message = _execution_endpoints.send_session_message
+reconcile_terminal_delivery = _execution_endpoints.reconcile_terminal_delivery
 retry_uncertain_delivery = _execution_endpoints.retry_uncertain_delivery
 create_session_report = _execution_endpoints.create_session_report
 task_execution_capabilities = _execution_endpoints.task_execution_capabilities

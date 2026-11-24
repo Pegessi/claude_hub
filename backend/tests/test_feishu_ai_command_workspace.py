@@ -1022,6 +1022,12 @@ async def test_web_session_and_agent_workspace_integrated_ai_command(tmp_path: P
             resp_bytes = encode("lark_messages_PullMessagesByPositionsResponse", {"messages": {}})
         elif cmd_id == 8:  # PullMessagesByIdsRequest
             resp_bytes = encode("lark_messages_PullMessagesByIdsResponse", {"messages": {}})
+        elif cmd_id == 64:  # PullChatsByIdsRequest
+            req_dec = decode("lark_chats_PullChatsByIdsRequest", inner_raw)
+            resp_bytes = encode(
+                "lark_chats_PullChatsByIdsResponse",
+                {"chats": {cid: {"id": cid, "chatMode": 1} for cid in req_dec["chatIds"]}},
+            )
         elif cmd_id == 25:  # PutReactionRequest
             req_dec = decode("reactions_PutReactionRequest", inner_raw)
             reactions_added.append((req_dec["messageId"], req_dec["reactionType"]))

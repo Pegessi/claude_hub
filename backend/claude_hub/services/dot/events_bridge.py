@@ -8,11 +8,14 @@ import json
 import logging
 import os
 import signal
+import tempfile
 from collections.abc import AsyncIterator, Awaitable, Callable
-from typing import Literal
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from typing import Any, Literal
 
 import httpx
-from pydantic import HttpUrl
+from pydantic import HttpUrl, JsonValue
 
 from .events_gateway import MAX_EVENT_BYTES, ExternalEvent
 
@@ -36,6 +39,145 @@ CALLBACK_TYPES = {
     "merlin": ("training.finished", "evaluation.finished"),
 }
 EventSender = Callable[[ExternalEvent], Awaitable[None]]
+
+
+async def _lark_json(profile: str, *args: str) -> dict:
+    process = await asyncio.create_subprocess_exec(
+        "lark-cli",
+        *(["--profile", profile] if profile else []),
+        *args,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        env={k: v for k, v in os.environ.items() if k != "CLAUDE_HUB_DOT_EVENTS_TOKEN"},
+    )
+    try:
+        stdout, _ = await asyncio.wait_for(process.communicate(), timeout=60)
+    except (TimeoutError, asyncio.CancelledError):
+        if process.returncode is None:
+            process.kill()
+        await process.wait()
+        raise
+    if process.returncode:
+        raise RuntimeError("Lark CLI request failed")
+    result = json.loads(stdout)
+    if not isinstance(result, dict) or result.get("ok") is False:
+        raise ValueError("Invalid Lark CLI response")
+    return result
+
+
+def _write_mention_state(path: Path, state: dict) -> None:
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    fd, name = tempfile.mkstemp(dir=path.parent, prefix=".mentions-")
+    try:
+        with os.fdopen(fd, "w") as stream:
+            json.dump(state, stream)
+        os.replace(name, path)
+    finally:
+        if os.path.exists(name):
+            os.unlink(name)
+
+
+def _mention_event(message: dict, own_id: str) -> ExternalEvent | None:
+    sender = message.get("sender")
+    mentions = message.get("mentions")
+    message_id = message.get("message_id")
+    if (
+        message.get("deleted") is not False
+        or not isinstance(sender, dict)
+        or not isinstance(sender.get("id"), str)
+        or not sender["id"]
+        or sender["id"] == own_id
+        or not isinstance(message_id, str)
+        or not message_id
+        or not isinstance(mentions, list)
+        or not any(isinstance(m, dict) and m.get("id") == own_id for m in mentions)
+    ):
+        return None
+    fields = {
+        k: str(v)[:200]
+        for k, v in {
+            "chat_name": message.get("chat_name") or "",
+            "sender": sender.get("name") or "",
+            "text": message.get("content") or "",
+            "chat_id": message.get("chat_id") or "",
+            "message_id": message_id,
+        }.items()
+    }
+    payload: dict[str, JsonValue] = dict(fields)
+    return ExternalEvent(
+        source="feishu",
+        event_type="im.mention",
+        dedupe_key=message_id,
+        severity="urgent",
+        title="Feishu mention",
+        summary=" · ".join(filter(None, fields.values()))[:1000],
+        payload=payload,
+    )
+
+
+async def poll_mentions(profile: str, path: Path, send: EventSender) -> None:
+    auth = await _lark_json(profile, "auth", "status", "--json")
+    own_id = auth.get("identities", {}).get("user", {}).get("openId")
+    if not isinstance(own_id, str) or not own_id:
+        raise ValueError("Lark user identity unavailable")
+    now = datetime.now(UTC).replace(microsecond=0)
+    initializing = not path.exists()
+    state: dict[str, Any] = (
+        {"watermark": now.isoformat(), "seen": {}} if initializing else json.loads(path.read_text())
+    )
+    watermark = datetime.fromisoformat(state["watermark"])
+    if watermark.tzinfo is None or not isinstance(state["seen"], dict):
+        raise ValueError("Invalid mention state")
+    start = (watermark - timedelta(seconds=120)).isoformat(timespec="seconds")
+    # Keep the search window fixed across pages. Persist each successful delivery so
+    # a failed page or process restart can safely replay the window from its start.
+    token: str | None = None
+    tokens: set[str] = set()
+    while True:
+        result = await _lark_json(
+            profile,
+            "im",
+            "+messages-search",
+            "--as",
+            "user",
+            "--is-at-me",
+            "--start",
+            start,
+            "--end",
+            now.isoformat(timespec="seconds"),
+            "--page-size",
+            "50",
+            *(["--page-token", token] if token is not None else []),
+            "--format",
+            "json",
+        )
+        data = result.get("data")
+        if not isinstance(data, dict) or not isinstance(data.get("messages"), list):
+            raise ValueError("Incomplete mention search results")
+        next_token = data.get("page_token")
+        if data.get("has_more") and (
+            not isinstance(next_token, str) or not next_token or next_token in tokens
+        ):
+            raise ValueError("Incomplete mention search results: invalid page token")
+        for message in data["messages"]:
+            if not isinstance(message, dict):
+                raise ValueError("Invalid mention search result")
+            event = _mention_event(message, own_id)
+            if event is not None and event.dedupe_key not in state["seen"]:
+                if not initializing:
+                    await send(event)
+                state["seen"][event.dedupe_key] = now.isoformat()
+                if not initializing:
+                    _write_mention_state(path, state)
+        if not data.get("has_more"):
+            break
+        assert isinstance(next_token, str)
+        tokens.add(next_token)
+        token = next_token
+    cutoff = now - timedelta(days=7)
+    state["seen"] = {k: v for k, v in state["seen"].items() if datetime.fromisoformat(v) >= cutoff}
+    state["watermark"] = now.isoformat()
+    _write_mention_state(path, state)
 
 
 def parse_lark_event(
@@ -251,6 +393,18 @@ async def _run(args: argparse.Namespace) -> None:
         async def send(event: ExternalEvent) -> None:
             await send_event(client, args.endpoint, event, token=token)
 
+        if args.command == "mentions":
+            while True:
+                try:
+                    await poll_mentions(args.profile, args.state_file, send)
+                except Exception:
+                    if args.once:
+                        raise
+                    logger.warning("Mention poll failed; retrying")
+                if args.once:
+                    return
+                await asyncio.sleep(args.interval_seconds)
+
         if args.command == "callback":
             await send(
                 callback_event(
@@ -304,6 +458,13 @@ def main() -> None:
     lark.add_argument("--profile", default=os.environ.get("CLAUDE_HUB_DOT_LARK_PROFILE", ""))
     lark.add_argument("--event", action="append", dest="events", choices=LARK_EVENTS)
     lark.add_argument("--urgent-event", action="append", default=[], choices=LARK_EVENTS)
+    mentions = sub.add_parser("mentions", help="Poll personal mentions")
+    mentions.add_argument("--profile", default=os.environ.get("CLAUDE_HUB_DOT_LARK_PROFILE", ""))
+    mentions.add_argument("--interval-seconds", type=float, default=90)
+    mentions.add_argument(
+        "--state-file", type=Path, default=Path.home() / ".claude_hub/dot/lark_mentions_bridge.json"
+    )
+    mentions.add_argument("--once", action="store_true")
     callback = sub.add_parser("callback", help="Send a Codebase/Merlin transition")
     callback.add_argument("source", choices=CALLBACK_TYPES)
     callback.add_argument("event_type", choices=sum(CALLBACK_TYPES.values(), ()))
@@ -315,6 +476,8 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     logging.getLogger("httpx").setLevel(logging.WARNING)
     args = parser.parse_args()
+    if args.command == "mentions" and args.interval_seconds <= 0:
+        mentions.error("--interval-seconds must be positive")
     if args.command == "lark" and args.events and set(args.urgent_event) - set(args.events):
         lark.error("--urgent-event must be included in the selected --event keys")
     asyncio.run(_run(args))

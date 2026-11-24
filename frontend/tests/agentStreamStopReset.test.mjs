@@ -221,6 +221,8 @@ test('Chat delivery Stop resets on a 200 regardless of the cancelled boolean', a
   const controller = useChatDelivery({
     attachments: ref([]),
     authoritativeTurns: computed(() => [{ turnId: 'turn-1', completed: false, errors: [] }]),
+    capabilities: ref({ adapter_id: 'codex_rpc', structured: true, recovery_required: false }),
+    async refreshCapabilities() { assert.fail('Generic Stop must not force a capability refresh') },
     connectionState: ref('reconciling'),
     draftQueue: ref([]),
     enqueueDraft() {},
@@ -353,4 +355,270 @@ test('nudge() re-issues the in-flight /wait at once and stays live', async () =>
     globalThis.fetch = originalFetch
     app.unmount()
   }
+})
+
+test('MASO uncertain-delivery quarantine keeps Stop armed across failed teardown, cold orphan recovery, and repeated uncertainty', async t => {
+  const { useChatDelivery } = await loadTs('features/chat/controllers/useChatDelivery')
+  const { IncrementalTimelineReducer } = await loadTimeline()
+  const cancelPayloads = []
+  let cancelMode = 'fail_503'
+  let failCapabilityRead = false
+  let unavailableCapability = false
+  let capabilityReadGate = null
+  let capabilityReadEntered = null
+  t.mock.method(globalThis, 'fetch', async (url, options) => {
+    if (String(url).endsWith('/cancel')) {
+      cancelPayloads.push(options?.body ? JSON.parse(options.body) : null)
+      if (cancelMode === 'fail_503') {
+        return {
+          ok: false,
+          status: 503,
+          json: async () => ({ detail: 'native provider turn cancellation failed' }),
+        }
+      }
+      if (cancelMode === 'noop_false') {
+        return {
+          ok: true,
+          json: async () => ({ ok: true, cancelled: false, outcome: 'already_terminal' }),
+        }
+      }
+      return {
+        ok: true,
+        json: async () => ({ ok: true, cancelled: true, outcome: 'cancelled_matching' }),
+      }
+    }
+    return { ok: true, json: async () => ({}) }
+  })
+
+  // Cold startup after initial-POST uncertainty: tailer.start() terminalized the
+  // orphan with runtime_interrupted + status='cancelled' AND authoritative
+  // delivery_uncertain=true, quarantined_turn_id='turn-quarantined'.
+  const capabilities = ref({
+    structured: true,
+    adapter_id: 'maso_http',
+    recovery_required: true,
+    quarantined_turn_id: 'turn-quarantined',
+  })
+  const events = ref([
+    {
+      stream_sequence: 1,
+      session_id: 's1',
+      tab_id: 't1',
+      agent_type: 'maso',
+      type: 'turn_started',
+      turn_id: 'turn-quarantined',
+      message_id: 'turn-quarantined',
+      call_id: null,
+      payload: { summary: 'First MASO prompt' },
+      created_at: '2026-11-23T01:00:00Z',
+    },
+    {
+      stream_sequence: 2,
+      session_id: 's1',
+      tab_id: 't1',
+      agent_type: 'maso',
+      type: 'error',
+      turn_id: 'turn-quarantined',
+      message_id: null,
+      call_id: null,
+      payload: {
+        message: 'The backend runtime for this turn is no longer available.',
+        runtime_interrupted: true,
+      },
+      created_at: '2026-11-23T01:00:05Z',
+    },
+    {
+      stream_sequence: 3,
+      session_id: 's1',
+      tab_id: 't1',
+      agent_type: 'maso',
+      type: 'turn_completed',
+      turn_id: 'turn-quarantined',
+      message_id: 'turn-quarantined',
+      call_id: null,
+      payload: {
+        status: 'cancelled',
+        delivery_uncertain: true,
+        quarantined_turn_id: 'turn-quarantined',
+      },
+      created_at: '2026-11-23T01:00:05Z',
+    },
+    {
+      stream_sequence: 4,
+      session_id: 's1',
+      tab_id: 't1',
+      agent_type: 'maso',
+      type: 'turn_started',
+      turn_id: 'turn-rejected',
+      message_id: 'turn-rejected',
+      call_id: null,
+      payload: { summary: 'Rejected follow-up' },
+      created_at: '2026-11-23T01:00:10Z',
+    },
+    {
+      stream_sequence: 5,
+      session_id: 's1',
+      tab_id: 't1',
+      agent_type: 'maso',
+      type: 'error',
+      turn_id: 'turn-rejected',
+      message_id: null,
+      call_id: null,
+      payload: {
+        message: 'failed to deliver turn to provider',
+      },
+      created_at: '2026-11-23T01:00:10Z',
+    },
+    {
+      stream_sequence: 6,
+      session_id: 's1',
+      tab_id: 't1',
+      agent_type: 'maso',
+      type: 'turn_completed',
+      turn_id: 'turn-rejected',
+      message_id: 'turn-rejected',
+      call_id: null,
+      payload: {
+        status: 'failed',
+        delivery_rejected: true,
+        delivery_uncertain: true,
+        quarantined_turn_id: 'turn-quarantined',
+      },
+      created_at: '2026-11-23T01:00:10Z',
+    },
+  ])
+  const authoritativeTurns = computed(() => new IncrementalTimelineReducer().reduce(events.value))
+
+  const controller = useChatDelivery({
+    attachments: ref([]),
+    authoritativeTurns,
+    capabilities,
+    connectionState: ref('live'),
+    draftQueue: ref([]),
+    enqueueDraft() {},
+    events,
+    goal: ref(null),
+    goalComposerReason: ref(null),
+    goalError: ref(null),
+    goalImageRecovery: ref(false),
+    goalInputBlocked: ref(false),
+    goalSteerOnly: ref(false),
+    async hydrateGoal() {},
+    isDraftQueuePaused: ref(false),
+    isGoalHydrating: ref(false),
+    isGoalMutating: ref(false),
+    isManagedChat: ref(true),
+    isPreparingAttachments: ref(false),
+    isUpdatingMode: ref(false),
+    isUpdatingModel: ref(false),
+    isUpdatingReasoningEffort: ref(false),
+    nudge() {},
+    async refreshCapabilities() {
+      if (failCapabilityRead) throw new Error('capability read unavailable')
+      if (unavailableCapability) {
+        capabilities.value = { structured: true, recovery_required: false, unavailable_reason: 'Transport unavailable' }
+        return
+      }
+      capabilityReadEntered?.()
+      if (capabilityReadGate) await capabilityReadGate
+      if (cancelMode === 'success') {
+        capabilities.value = {
+          structured: true,
+          adapter_id: 'maso_http',
+          recovery_required: false,
+          quarantined_turn_id: null,
+        }
+      }
+    },
+    requestLatestAnchor() {},
+    streamBasePath: ref('/api/workspaces/sessions/s1/stream'),
+    syncComposerTextareaHeight() {},
+    terminalStore: { async fetchAgentStatuses() {} },
+  })
+
+  // Both turns are completed, yet Stop remains armed and targets the original quarantined turn!
+  assert.equal(authoritativeTurns.value.every(t => t.completed), true)
+  assert.equal(controller.stopArmed.value, true)
+  assert.equal(controller.canStop.value, true)
+  assert.equal(controller.stopTargetTurnId.value, 'turn-quarantined')
+
+  // 1) When provider teardown fails with HTTP 503, Stop stays armed and retryable.
+  await controller.cancelActiveTurn()
+  assert.deepEqual(cancelPayloads, [{ expected_turn_id: 'turn-quarantined' }])
+  assert.equal(controller.stopArmed.value, true)
+  assert.equal(controller.stopTargetTurnId.value, 'turn-quarantined')
+  assert.match(controller.composerError.value, /native provider turn cancellation failed/)
+
+  // 2) When /cancel returns cancelled: false (no-op teardown), quarantine is NOT cleared.
+  cancelMode = 'noop_false'
+  await controller.cancelActiveTurn()
+  assert.equal(controller.stopArmed.value, true)
+  assert.equal(controller.stopTargetTurnId.value, 'turn-quarantined')
+
+  // A successful HTTP acknowledgement cannot override a still-positive capability.
+  cancelMode = 'accepted_still_uncertain'
+  await controller.cancelActiveTurn()
+  assert.equal(controller.stopArmed.value, true)
+  // Nor can a failed authoritative refresh authorize clearing the recovery control.
+  cancelMode = 'success'
+  failCapabilityRead = true
+  await controller.cancelActiveTurn()
+  assert.equal(controller.stopArmed.value, true)
+  failCapabilityRead = false
+  unavailableCapability = true
+  await controller.cancelActiveTurn()
+  assert.equal(controller.stopArmed.value, true)
+  unavailableCapability = false
+
+  // 3) Only successful authoritative confirmation clears quarantine.
+  cancelMode = 'success'
+  await controller.cancelActiveTurn()
+  assert.equal(controller.stopArmed.value, false)
+  assert.equal(controller.stopTargetTurnId.value, null)
+
+  // 4) Even if the same turn later emits another authoritative uncertainty edge (sequence 7),
+  // Stop re-arms rather than being permanently suppressed by turn ID.
+  events.value = [
+    ...events.value,
+    {
+      stream_sequence: 7,
+      session_id: 's1',
+      tab_id: 't1',
+      agent_type: 'maso',
+      type: 'turn_completed',
+      turn_id: 'turn-rejected-2',
+      message_id: 'turn-rejected-2',
+      call_id: null,
+      payload: {
+        status: 'failed',
+        delivery_rejected: true,
+        delivery_uncertain: true,
+        quarantined_turn_id: 'turn-quarantined',
+      },
+      created_at: '2026-11-23T01:00:15Z',
+    },
+  ]
+  assert.equal(controller.stopArmed.value, true)
+  assert.equal(controller.stopTargetTurnId.value, 'turn-quarantined')
+
+  // A capability read that began before a new uncertainty event cannot suppress it.
+  let releaseRead
+  capabilityReadGate = new Promise(resolve => { releaseRead = resolve })
+  const readStarted = new Promise(resolve => { capabilityReadEntered = resolve })
+  const stopping = controller.cancelActiveTurn()
+  await readStarted
+  events.value = [...events.value, { ...events.value.at(-1), stream_sequence: 8 }]
+  releaseRead()
+  await stopping
+  assert.equal(controller.stopArmed.value, true)
+  capabilityReadGate = null
+  await controller.cancelActiveTurn()
+  assert.equal(controller.stopArmed.value, false)
+
+  // Capabilities own the target even when history names another turn; unknown
+  // legacy correlation is deliberately sent untargeted, never guessed from history.
+  capabilities.value = { structured: true, adapter_id: 'maso_http', recovery_required: true, quarantined_turn_id: 'authoritative-target' }
+  assert.equal(controller.stopTargetTurnId.value, 'authoritative-target')
+  capabilities.value = { structured: true, adapter_id: 'maso_http', recovery_required: true, quarantined_turn_id: null }
+  assert.equal(controller.stopTargetTurnId.value, null)
 })

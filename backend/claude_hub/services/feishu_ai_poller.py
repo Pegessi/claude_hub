@@ -54,6 +54,14 @@ def _message_from_dict(raw: Mapping[str, Any]) -> FeishuUserMessage | None:
         msg_type=str(raw.get("msg_type") or "text").strip(),
         text=str(raw.get("text") or ""),
         create_time_ms=int(raw.get("create_time_ms") or 0),
+        has_images=raw.get("has_images") is True,
+        image_refs=tuple(
+            (ref[0], ref[1])
+            for ref in raw.get("image_refs", [])
+            if isinstance(ref, (list, tuple))
+            and len(ref) == 2
+            and all(isinstance(value, str) and value for value in ref)
+        ),
         thread_id=(
             str(raw["thread_id"]).strip()
             if isinstance(raw.get("thread_id"), str) and raw["thread_id"].strip()

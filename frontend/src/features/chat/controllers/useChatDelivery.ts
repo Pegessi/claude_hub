@@ -1,5 +1,5 @@
 import { type Ref, type ComputedRef, computed, nextTick, ref, watch } from 'vue'
-import { type ChatGoal, type AgentStreamEvent, type WorkspaceAttachmentCreate } from '@/types'
+import { type ChatGoal, type AgentStreamEvent, type StreamCapabilities, type WorkspaceAttachmentCreate } from '@/types'
 import { type TimelineTurn } from '../timeline/types'
 import { type PendingTurn, type RetriableSend, type QuestionIdentity, type DraftAttachment } from './types'
 import { type QueuedChatDraft, type useTerminalStore } from '@/stores/terminalStore'
@@ -10,6 +10,7 @@ import { hasAuthoritativeTerminalFor } from '@/utils/agentStreamStopReset'
 interface Dependencies {
   attachments: Ref<DraftAttachment[]>
   authoritativeTurns: ComputedRef<TimelineTurn[]>
+  capabilities?: Ref<StreamCapabilities | null>
   connectionState: Ref<'idle' | 'hydrating' | 'live' | 'reconciling' | 'failed'>
   draftQueue: Ref<QueuedChatDraft[]>
   enqueueDraft: () => void
@@ -30,6 +31,7 @@ interface Dependencies {
   isUpdatingModel: Ref<boolean>
   isUpdatingReasoningEffort: Ref<boolean>
   nudge: () => void
+  refreshCapabilities?: () => Promise<void>
   requestLatestAnchor: (force?: boolean) => void
   streamBasePath: Ref<string>
   syncComposerTextareaHeight: () => void
@@ -76,6 +78,42 @@ export function useChatDelivery(deps: Dependencies) {
   // never exists server-side; the reducer's turn_completed is idempotent, and
   // the optimism is dropped as soon as the real edge lands in ``events``.
   const optimisticCancelledTurnId = ref<string | null>(null)
+  // Only a capability read begun after an event may retire its recovery hint.
+  // A Stop HTTP acknowledgement is never evidence that quarantine cleared.
+  const latestSequence = () => Math.max(-1, ...deps.events.value.map(event => event.stream_sequence ?? -1))
+  const recoveryCapabilities = ref<StreamCapabilities | null>(null)
+  if (deps.capabilities) {
+    watch(deps.capabilities, caps => {
+      // An unavailable fallback without a transport cannot prove cleanup.
+      if (caps?.adapter_id === 'maso_http' && typeof caps.recovery_required === 'boolean') {
+        recoveryCapabilities.value = caps
+      }
+    }, { immediate: true, flush: 'sync' })
+  }
+  const recoveryConfirmedThrough = ref(recoveryCapabilities.value ? latestSequence() : -1)
+  let recoveryRefreshRevision = 0
+
+  async function refreshRecoveryState() {
+    if (!deps.refreshCapabilities || !deps.capabilities) return
+    if (deps.capabilities.value?.adapter_id !== 'maso_http' &&
+      !recoveryCapabilities.value?.recovery_required &&
+      !deps.events.value.some(event => event.payload.delivery_uncertain === true)) return
+    const revision = ++recoveryRefreshRevision
+    const sequence = latestSequence()
+    const path = deps.streamBasePath.value
+    const previous = deps.capabilities.value
+    try {
+      await deps.refreshCapabilities()
+      if (revision === recoveryRefreshRevision && path === deps.streamBasePath.value &&
+        deps.capabilities.value !== previous &&
+        deps.capabilities.value?.adapter_id === 'maso_http' &&
+        typeof deps.capabilities.value.recovery_required === 'boolean') {
+        recoveryConfirmedThrough.value = Math.max(recoveryConfirmedThrough.value, sequence)
+      }
+    } catch {
+      // Keep the last positive recovery evidence if the read cannot complete.
+    }
+  }
 
   const pendingTurns = computed(() => {
     const observedTurnIds = new Set(deps.authoritativeTurns.value.map(turn => turn.turnId).filter(Boolean))
@@ -112,17 +150,36 @@ export function useChatDelivery(deps: Dependencies) {
   // error already released the composer lock, but the turn is still unfinished in
   // the timeline — Stop stays mounted so the user can terminalize it. Stop in
   // the reconnecting/FAILED banners shares this same gate.
+  const recoveryState = computed(() => {
+    const caps = recoveryCapabilities.value
+    if (caps?.recovery_required) {
+      return { recoveryRequired: true, quarantinedTurnId: caps.quarantined_turn_id ?? null }
+    }
+    const event = [...deps.events.value].reverse().find(event =>
+      event.type === 'turn_completed' && event.payload.delivery_uncertain === true &&
+      (event.stream_sequence ?? -1) > recoveryConfirmedThrough.value)
+    const target = event?.payload.quarantined_turn_id
+    return {
+      recoveryRequired: Boolean(event),
+      quarantinedTurnId: typeof target === 'string' ? target : null,
+    }
+  })
+
+  const quarantinedTurnId = computed(() => recoveryState.value.quarantinedTurnId)
+
   const stopArmed = computed(() => {
     if (pendingDirectTurns.value.length > 0) return true
     const latest = deps.authoritativeTurns.value[deps.authoritativeTurns.value.length - 1]
-    return Boolean(latest && !latest.completed)
+    if (latest && !latest.completed) return true
+    return recoveryState.value.recoveryRequired
   })
 
   const stopTargetTurnId = computed(() => {
     const latest = deps.authoritativeTurns.value[deps.authoritativeTurns.value.length - 1]
     if (latest && !latest.completed && latest.turnId) return latest.turnId
     const pending = pendingDirectTurns.value[pendingDirectTurns.value.length - 1]
-    return pending?.turnId ?? null
+    if (pending?.turnId) return pending.turnId
+    return quarantinedTurnId.value
   })
 
   /** Stop is enabled by the same rule that lets its request actually run.
@@ -207,13 +264,17 @@ export function useChatDelivery(deps: Dependencies) {
       // uses the explicit outcome so a stale Stop can never unlock a newer turn,
       // while an already-terminal retry still repairs a wedged local view.
       if (cancelledTurnId) {
-        optimisticCancelledTurnId.value = cancelledTurnId
+        const targetTurn = deps.authoritativeTurns.value.find(turn => turn.turnId === cancelledTurnId)
+        if (!targetTurn || !targetTurn.completed) {
+          optimisticCancelledTurnId.value = cancelledTurnId
+        }
       }
       deps.nudge()
       void deps.terminalStore.fetchAgentStatuses()
     } catch (err) {
       composerError.value = err instanceof Error ? err.message : 'Failed to stop the current turn.'
     } finally {
+      await refreshRecoveryState()
       isCancelling.value = false
     }
   }
@@ -414,6 +475,7 @@ export function useChatDelivery(deps: Dependencies) {
       }
       return false
     } finally {
+      await refreshRecoveryState()
       isSending.value = false
     }
   }
@@ -441,13 +503,26 @@ export function useChatDelivery(deps: Dependencies) {
     // that turn arrives (any status: the natural completion winning the race is
     // just as terminal). The reducer's turn_completed is idempotent, so until this
     // fires the synthetic edge and the real one never double-render.
-    watch(deps.events, (latest) => {
+    watch(deps.events, (latest, previous) => {
       const optimisticId = optimisticCancelledTurnId.value
-      if (!optimisticId) return
-      if (hasAuthoritativeTerminalFor(latest, optimisticId)) {
+      if (optimisticId && hasAuthoritativeTerminalFor(latest, optimisticId)) {
         optimisticCancelledTurnId.value = null
       }
+      const previousSequence = Math.max(-1, ...(previous ?? []).map(event => event.stream_sequence ?? -1))
+      if (latest.some(event => event.type === 'turn_completed' &&
+        (event.stream_sequence ?? -1) > previousSequence)) {
+        void refreshRecoveryState()
+      }
     })
+    watch(deps.streamBasePath, () => {
+      recoveryRefreshRevision += 1
+      recoveryConfirmedThrough.value = -1
+      recoveryCapabilities.value = null
+    })
+    watch(deps.connectionState, state => {
+      if (state === 'live' && recoveryState.value.recoveryRequired) void refreshRecoveryState()
+    })
+
   }
 
   return {

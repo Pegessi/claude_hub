@@ -27,7 +27,7 @@ from claude_hub.services.feishu_ai_command import (
     validate_ai_command_agent_config,
 )
 from claude_hub.services.feishu_ai_poller import FeishuAiPoller
-from claude_hub.services.feishu_bot import FeishuMessageDedupStore
+from claude_hub.services.feishu_bot import FeishuDeliveryUncertainError, FeishuMessageDedupStore
 from claude_hub.services.feishu_bot_websocket import message_event_from_sdk
 from claude_hub.services.feishu_user_client import (
     REQUIRED_SEND_AS_USER_SCOPE,
@@ -3036,10 +3036,10 @@ async def test_bot_fallback_reply_send_and_auto_invite_without_send_as_user(
         # F2 / R2: Post-accept timeout or missing receipt raises immediately without switching/retrying another bot
         simulate_timeout = True
         before_calls = len(calls)
-        with pytest.raises(httpx.ReadTimeout):
+        with pytest.raises(FeishuDeliveryUncertainError):
             await user_client.send_as_user("oc_group_fb", "text", {"text": "timeout-msg"})
         assert len(calls) == before_calls + 1
-        with pytest.raises(httpx.ReadTimeout):
+        with pytest.raises(FeishuDeliveryUncertainError):
             await user_client.reply_as_user(
                 "om_trigger_fb",
                 "post",
@@ -4206,3 +4206,43 @@ def test_codex_provider_default_without_cache_matches_capability_order(
     service.update_config({"provider": "claude"})
     default = service.update_config({"provider": "codex"}).model
     assert default == service.capabilities_dict()["provider_models"]["codex"][0] == "gpt-5.4"
+
+
+def test_web_bot_chat_mapping_config_validation_and_roundtrip() -> None:
+    from claude_hub.services.feishu_ai_command_models import FeishuAiCommandConfig
+
+    config = FeishuAiCommandConfig.from_mapping({"web_bot_chat_ids": {"20000": "oc_verified"}})
+    assert config.to_dict()["web_bot_chat_ids"] == {"20000": "oc_verified"}
+    for invalid in ({"name": "oc_target"}, {"20000": "30000"}, ["oc_target"]):
+        with pytest.raises(ValueError, match="web_bot_chat_ids"):
+            FeishuAiCommandConfig.from_mapping({"web_bot_chat_ids": invalid})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("parent_result", ["found", "missing", "error"])
+async def test_seeded_context_fetches_or_discloses_missing_parent(parent_result: str) -> None:
+    from unittest.mock import AsyncMock
+
+    from claude_hub.services.feishu_ai_command_models import FeishuAiCommandConfig
+
+    message = FeishuUserMessage(
+        "command", "chat", "owner", "user", "text", "/ai", 2, parent_id="parent"
+    )
+    parent = FeishuUserMessage("parent", "chat", "owner", "user", "image", "", 1, has_images=True)
+    client = SimpleNamespace(get_message=AsyncMock())
+    if parent_result == "error":
+        client.get_message.side_effect = httpx.ReadTimeout("read failed")
+    else:
+        client.get_message.return_value = parent if parent_result == "found" else None
+    service = object.__new__(FeishuAiCommandService)
+    if parent_result == "found":
+        context, _ = await service._fetch_context_and_refs(
+            client, message, FeishuAiCommandConfig(), seeded_context=[message]  # type: ignore[arg-type]
+        )
+        assert context == [parent, message]
+    else:
+        with pytest.raises(RuntimeError, match="引用消息"):
+            await service._fetch_context_and_refs(
+                client, message, FeishuAiCommandConfig(), seeded_context=[message]  # type: ignore[arg-type]
+            )
+    client.get_message.assert_awaited_once_with("parent")

@@ -162,9 +162,19 @@ awaits exit/resume finalizers before allowing a fresh subscription.
 MASO's bounded event IDs can reset, so an interrupted connection or failed status
 monitor fails the display turn rather than claiming lossless replay. It does not
 automatically abort remote work. A possibly accepted POST or interrupted delivery
-is quarantined; inspect/stop the remote session in MASO and create a new Chat
-rather than retrying the prompt blindly. Reopening the UI after a backend crash
-is not a lossless backfill of provider output produced while disconnected.
+is quarantined in `.maso-delivery.json` (recording `uncertain`, `post_acknowledged`,
+and `turn_id`) and never automatically resent. While quarantined, runtime status
+snapshots report `attention` rather than `idle`/`Ready`. An acknowledged POST whose
+SSE stream disconnected can auto-reconcile on the next send only after MASO confirms
+the session tree is idle both before and after `GET /messages/pending/{message_id}`
+returns `404` with no intervening activity. An unacknowledged POST (`post_acknowledged=false`,
+such as a request timeout that may still be paused before broker enqueue) never
+auto-reconciles from `idle + pending 404`; explicit Stop (`cancel_active_turn`,
+including cold targeted Stop matching the persisted `turn_id`) deletes any pending
+message, aborts and exits the old session, and rotates to a fresh MASO session so a
+delayed enqueue stays fenced on the retired session ID. Reopening the UI
+after a backend crash is not a lossless backfill of provider output produced
+while disconnected.
 
 ## Hub-managed Goals
 
@@ -190,10 +200,13 @@ mode.
 ## Stop and request uncertainty
 
 Stop immediately retires the stream generation, removes this turn's pending
-message UUID, requests abort and exits the owned MASO session tree. Exit waits
+message UUID, requests abort and exits the owned MASO session tree. MASO Stop
+returns success only after provider cleanup completes; failures remain retryable
+and do not clear the recovery control. Exit waits
 for cancellation finalizers and context persistence; an idle status alone cannot
 prove completion because MASO can emit an old `agent_end` afterwards. Hub confirms
-a live resume of the same saved session before accepting another prompt. This
+a live resume of the same saved session for an acknowledged delivery; an
+unacknowledged delivery requires the recovery rotation described below. This
 clears that session tree's remaining queued work and pauses its MASO automatic
 objective; it leaves other sessions and the shared working directory intact.
 Pending confirmation cards are retired with their turn, including on crash
@@ -202,13 +215,45 @@ Abort alone does not remove MASO broker messages. A small delivery sidecar besid
 the Hub event log preserves the owned UUID and session identity across crashes.
 Failed cleanup must succeed before a new prompt can be submitted.
 
-A failed HTTP send can leave acceptance unknown. MASO has no cancellation
-tombstone for a POST that has not reached the broker yet. Hub therefore never
-retries that POST, attempts pending-message removal and abort, and keeps the
-uncertain delivery record. Further sends on that Chat are refused, including
-after a Hub restart. The error explains that the service may still execute the
-message: inspect and stop the session in MASO before starting a new Chat. An
-idle status immediately after a timeout is not proof of cancellation.
+A failed HTTP send or mid-turn stream disconnect can leave acceptance or
+completion unknown. MASO has no cancellation tombstone for a POST that has not
+reached the broker yet. Hub therefore never automatically retries that POST and
+keeps the uncertain delivery record (including `post_acknowledged` and `turn_id`)
+across restarts. Before refusing a subsequent send, Hub reconciles against MASO
+only when the original `POST /api/sessions/{id}/messages` was acknowledged
+(`post_acknowledged=true`): if `GET /api/sessions/{id}/status` confirms the
+session tree is idle (`is_running=false`, `status=idle`, and no active children
+or condensation), `GET /api/sessions/{id}/messages/pending/{message_id}` returns
+`404` (not queued), and a second `GET /api/sessions/{id}/status` confirms the
+same `agent_id` remains idle with no intervening stream activity, Hub clears the
+quarantine sidecar and admits the new prompt without resending the old one. If
+the POST itself was never acknowledged (`post_acknowledged=false`), or if the
+remote session is active, the message UUID remains pending, or the service
+returns an error/is unreachable, further sends stay refused (fail-closed).
+Explicit Stop (`cancel_active_turn`) also runs synchronously when
+`turn_in_flight` is false but an uncertain or `abort_required` delivery sidecar
+is present: for acknowledged deliveries (`post_acknowledged=true`) it deletes the
+pending message UUID, requests abort, exits the session, confirms an idle resumed
+session, and clears the sidecar; for unacknowledged deliveries
+(`post_acknowledged=false`, including legacy uncertain sidecars without that
+field) it deletes pending, aborts and exits the old session, then allocates and
+adopts a fresh MASO session via a replayable sidecar adoption journal, resets
+first-turn runtime guidance flags, and durably seeds prior completed Hub turns into the
+new session's first prompt so any delayed server enqueue stays fenced on the
+retired session ID while preserving the stored Q/A text. The composer explains this recovery before
+Stop: images, tool state and any provider-only context are not transferred.
+An uncertain prompt is never included in that seed or automatically resent.
+The adoption journal remains until both the new identity and the existing
+fork-seed sidecar are persisted. A process restart replays that same adoption;
+persistence failures keep recovery required. This covers process interruption,
+not guarantees against filesystem or machine loss.
+
+The recovery control uses structured capability state (`recovery_required` and
+`quarantined_turn_id`). A failed cleanup or a no-op Stop does not dismiss it.
+Legacy sidecars without a turn ID recover a uniquely identifiable non-rejected unresolved turn
+from this Chat's durable history; when correlation is unavailable, only an
+untargeted manual Stop can recover them. Arbitrary historical turn IDs are refused.
+`abort_required` alone is also recovery state, before and after hydration.
 
 This integration supports local Chat, text, images, reasoning, tool output, tool
 confirmations and Hub-managed Goals. Plan mode and editing earlier turns are not

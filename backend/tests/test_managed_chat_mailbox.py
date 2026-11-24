@@ -27,6 +27,9 @@ from claude_hub.services import managed_chat
 from claude_hub.services.workspace_manager import DeliveryUncertain, WorkspaceManager
 
 _wm = import_module("claude_hub.services.workspace_manager")
+_REAL_CHAT_SEND = managed_chat.send_message
+_REAL_CHAT_DELIVERY_STATE = managed_chat.delivery_state
+_REAL_CHAT_IS_RUNNING = managed_chat.is_turn_running
 
 
 @pytest.fixture()
@@ -78,6 +81,14 @@ def mailbox(monkeypatch, tmp_path):
         assert call_id not in saved.pending_call_ids
         assert call_id in saved.pending_messages
         assert call_id in saved.call_payload_fingerprints
+        _, _, identities = managed_chat._prepare_attachments(attachments)
+        evidence = managed_chat._read_attempts(current)
+        evidence["attempts"][call_id] = {
+            "state": "accepted",
+            "turn_id": call_id,
+            "payload_sha256": managed_chat._payload_digest(text, identities),
+        }
+        managed_chat._write_attempts(current, evidence)
         receipts[call_id] = "accepted"
 
     sender = AsyncMock(side_effect=accepted)
@@ -417,3 +428,688 @@ async def test_exact_question_followup_bypasses_only_unsent_fifo(mailbox, monkey
     assert sender.await_args_list[0].args[-1] == "answer"
     assert manager.sessions[session_id].pending_call_ids == ["one", "two"]
     assert manager.sessions[session_id].chat_question_answer_calls['["turn","call"]'] == "answer"
+
+
+async def _terminal_reconciliation_case(
+    mailbox, outcome="failed", *, provenance=True, message="quota-blocked review"
+):
+    from claude_hub.models import AgentStreamEvent, AgentStreamEventType
+    from claude_hub.models.schema_domains.requests import ReconcileTerminalDeliveryRequest
+    from claude_hub.models.task_mailbox import TaskActorRole, TaskEventType
+    from claude_hub.services.agent_stream.store import AgentStreamStore
+    from claude_hub.services.task_graph import task_inbox_consumer_key
+
+    manager, session_id, receipts, sender = mailbox
+    task_id = _bind_task(manager, session_id)
+    task = manager.tasks[task_id]
+    if provenance:
+        manager.task_mailbox.append_event(
+            workspace_id=task.workspace_id,
+            task_id=task.id,
+            actor_role=TaskActorRole.SUPERVISOR,
+            event_type=TaskEventType.FOLLOWUP,
+            call_id="terminal-call",
+            action="followup",
+            consumer_key=task_inbox_consumer_key(task),
+            target=task.id,
+            review_cycle=task.review_cycle,
+            payload=manager._canonical_followup_payload(
+                task_id=task.id,
+                message=message,
+                actor_role=TaskActorRole.SUPERVISOR,
+                actor_session_id=None,
+                review_cycle=task.review_cycle,
+            ),
+            persist=True,
+        )
+    await manager.send_session_message(session_id, message, call_id="terminal-call")
+    session = manager.sessions[session_id]
+    task = manager.tasks[task_id]
+    manager.tasks[task_id] = task.model_copy(update={"processing_call_ids": ["terminal-call"]})
+    store = AgentStreamStore(session.workspace_id, session_id)
+    for sequence, kind in enumerate(
+        [AgentStreamEventType.TURN_STARTED, AgentStreamEventType.TURN_COMPLETED]
+    ):
+        await store.append(
+            AgentStreamEvent(
+                stream_sequence=sequence,
+                session_id=session_id,
+                tab_id=session.tab_id,
+                agent_type=session.agent_type,
+                type=kind,
+                turn_id="terminal-call",
+                run_epoch=1,
+                created_at=datetime.now(timezone.utc),
+                payload={"status": outcome} if sequence else {},
+            )
+        )
+    request = ReconcileTerminalDeliveryRequest(
+        operation_id="operator-reconcile-1",
+        call_id="terminal-call",
+        reason="Provider quota failure inspected",
+        expected_created_at=session.created_at,
+        expected_task_id=task_id,
+        expected_review_cycle=task.review_cycle,
+        terminal_sequence=1,
+    )
+    return manager, session_id, request, store, sender
+
+
+@pytest.mark.parametrize("outcome", ["failed", "completed"])
+async def test_terminal_operator_reconciliation_is_not_worker_ack(mailbox, outcome):
+    manager, session_id, request, _store, sender = await _terminal_reconciliation_case(
+        mailbox, outcome
+    )
+    task_before = manager.tasks[request.expected_task_id]
+    record = await manager.reconcile_terminal_delivery(session_id, request, actor="operator-user")
+    session = manager.sessions[session_id]
+    assert record.outcome == outcome
+    assert record.actor == "operator-user"
+    assert record.terminal_sequence == 1
+    assert session.processing_call_ids == []
+    assert session.delivered_call_ids == []
+    assert session.pending_messages[request.call_id] == "quota-blocked review"
+    assert request.call_id in session.call_payload_fingerprints
+    assert manager.tasks[task_before.id].model_dump(
+        exclude={"processing_call_ids", "reconciled_call_ids"}
+    ) == (task_before.model_dump(exclude={"processing_call_ids", "reconciled_call_ids"}))
+    assert manager.tasks[task_before.id].processing_call_ids == []
+    assert manager.tasks[task_before.id].reconciled_call_ids == [request.call_id]
+    assert manager.reports == {}
+    assert sender.await_count == 1
+    # Reload through the real persisted workspace document, then retry both
+    # the operator request and original delivery without starting another turn.
+    restored = WorkspaceManager()
+    assert restored.sessions[session_id].reconciled_deliveries[request.call_id] == record
+    assert (
+        await restored.reconcile_terminal_delivery(session_id, request, actor="operator-user")
+        == record
+    )
+    await manager.send_session_message(session_id, "quota-blocked review", call_id=request.call_id)
+    assert sender.await_count == 1
+    with pytest.raises(ValueError, match="different payload"):
+        await manager.send_session_message(session_id, "new work", call_id=request.call_id)
+    with pytest.raises(ValueError, match="conflicts"):
+        await manager.reconcile_terminal_delivery(session_id, request, actor="another-user")
+    async with manager.managed_chat_configuration_guard(session_id):
+        pass
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        "active",
+        "unaccepted",
+        "epoch",
+        "sequence",
+        "incarnation",
+        "assignment",
+        "cycle",
+        "unknown",
+        "uncertain",
+        "missing-start",
+        "duplicate-end",
+        "rejected",
+        "corrupt",
+    ],
+)
+async def test_terminal_reconciliation_rejects_unproven_deliveries(mailbox, monkeypatch, failure):
+    from datetime import timedelta
+
+    from claude_hub.models import AgentStreamEventType
+
+    manager, session_id, request, store, _sender = await _terminal_reconciliation_case(mailbox)
+    session = manager.sessions[session_id]
+    if failure == "active":
+        monkeypatch.setattr(managed_chat, "is_turn_running", lambda _session: True)
+    elif failure == "unaccepted":
+        monkeypatch.setattr(manager, "_chat_delivery_state", lambda *_args: "uncertain")
+    elif failure == "sequence":
+        request = request.model_copy(update={"terminal_sequence": 2})
+    elif failure == "incarnation":
+        request = request.model_copy(
+            update={"expected_created_at": session.created_at - timedelta(seconds=1)}
+        )
+    elif failure == "assignment":
+        request = request.model_copy(update={"expected_task_id": "another-task"})
+    elif failure == "cycle":
+        request = request.model_copy(update={"expected_review_cycle": 99})
+    elif failure == "unknown":
+        request = request.model_copy(update={"call_id": "unknown-call"})
+    elif failure == "uncertain":
+        manager.sessions[session_id] = session.model_copy(
+            update={"processing_call_ids": [], "uncertain_call_ids": [request.call_id]}
+        )
+    else:
+        events = list(store.iter_events())
+        if failure == "epoch":
+            events[-1] = events[-1].model_copy(update={"run_epoch": 2})
+        elif failure == "missing-start":
+            events = events[1:]
+        elif failure == "duplicate-end":
+            events.append(events[-1].model_copy(update={"stream_sequence": 2}))
+        elif failure == "rejected":
+            events[-1] = events[-1].model_copy(
+                update={"payload": {"status": "failed", "delivery_rejected": True}}
+            )
+        elif failure == "corrupt":
+            events[-1] = events[-1].model_copy(update={"type": AgentStreamEventType.ERROR})
+        await store.replace_all(events)
+    before_session = manager.sessions[session_id].model_dump()
+    before_task = manager.tasks[session.task_id].model_dump()
+    with pytest.raises(ValueError):
+        await manager.reconcile_terminal_delivery(session_id, request, actor="operator-user")
+    assert manager.sessions[session_id].model_dump() == before_session
+    assert manager.tasks[session.task_id].model_dump() == before_task
+
+
+async def test_terminal_reconciliation_rolls_back_failed_persistence(mailbox, monkeypatch):
+    manager, session_id, request, _store, sender = await _terminal_reconciliation_case(mailbox)
+    before_session = manager.sessions[session_id]
+    before_task = manager.tasks[request.expected_task_id]
+    monkeypatch.setattr(manager, "_save_workspace_state", Mock(side_effect=OSError("disk full")))
+    with pytest.raises(OSError, match="disk full"):
+        await manager.reconcile_terminal_delivery(session_id, request, actor="operator-user")
+    assert manager.sessions[session_id] == before_session
+    assert manager.tasks[before_task.id] == before_task
+    assert sender.await_count == 1
+
+
+async def test_terminal_reconciliation_api_uses_authenticated_actor(mailbox):
+    from types import SimpleNamespace
+
+    from fastapi import APIRouter, FastAPI
+    from httpx import ASGITransport, AsyncClient
+
+    from claude_hub.api.routes.workspaces.execution import register_execution_routes
+    from claude_hub.auth.dependencies import get_current_user
+    from claude_hub.models import User
+
+    manager, session_id, request, _store, _sender = await _terminal_reconciliation_case(mailbox)
+    app = FastAPI()
+    router = APIRouter(prefix="/api/workspaces")
+    register_execution_routes(router, SimpleNamespace(workspace_manager=lambda: manager))
+    app.include_router(router)
+    user = User(
+        open_id="authenticated-controller", name="Controller", email="operator@example.test"
+    )
+    app.dependency_overrides[get_current_user] = lambda: user
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://isolated") as client:
+        path = f"/api/workspaces/sessions/{session_id}/reconcile-terminal"
+        forged = request.model_dump(mode="json") | {"actor": "reviewer"}
+        assert (await client.post(path, json=forged)).status_code == 422
+        response = await client.post(path, json=request.model_dump(mode="json"))
+        assert response.status_code == 200, response.text
+        assert response.json()["actor"] == user.open_id
+        assert response.json()["outcome"] == "failed"
+        assert manager.sessions[session_id].delivered_call_ids == []
+        assert manager.reports == {}
+
+
+async def test_terminal_reconciliation_handles_post_commit_failure(mailbox, monkeypatch):
+    manager, session_id, request, _store, sender = await _terminal_reconciliation_case(mailbox)
+    save = manager._save_workspace_state
+
+    def fail_after_commit(workspace_id):
+        save(workspace_id)
+        raise OSError("response failed after commit")
+
+    monkeypatch.setattr(manager, "_save_workspace_state", fail_after_commit)
+    record = await manager.reconcile_terminal_delivery(session_id, request, actor="operator-user")
+    assert manager.sessions[session_id].reconciled_deliveries[request.call_id] == record
+    assert await manager.resume_existing_call(session_id, request.call_id)
+    assert sender.await_count == 1
+
+
+async def test_terminal_reconciliation_serializes_concurrent_operator_requests(mailbox):
+    manager, session_id, request, _store, sender = await _terminal_reconciliation_case(mailbox)
+    one, two = await asyncio.gather(
+        manager.reconcile_terminal_delivery(session_id, request, actor="operator-user"),
+        manager.reconcile_terminal_delivery(session_id, request, actor="operator-user"),
+    )
+    assert one == two
+    assert len(manager.sessions[session_id].reconciled_deliveries) == 1
+    assert sender.await_count == 1
+
+
+async def test_terminal_reconciliation_supports_existing_naive_session_time(mailbox):
+    manager, session_id, request, _store, _sender = await _terminal_reconciliation_case(mailbox)
+    session = manager.sessions[session_id]
+    naive_created = session.created_at.astimezone().replace(tzinfo=None)
+    manager.sessions[session_id] = session.model_copy(update={"created_at": naive_created})
+    request = request.model_copy(update={"expected_created_at": naive_created})
+    record = await manager.reconcile_terminal_delivery(session_id, request, actor="operator-user")
+    assert record.outcome == "failed"
+
+
+async def test_terminal_reconciliation_rejects_other_task_mailbox_call(mailbox):
+    from claude_hub.models.task_mailbox import TaskActorRole, TaskEventType
+    from claude_hub.services.task_graph import task_inbox_consumer_key
+
+    manager, session_id, request, _store, _sender = await _terminal_reconciliation_case(
+        mailbox, provenance=False
+    )
+    session = manager.sessions[session_id]
+    other = manager.create_task(
+        session.workspace_id, WorkspaceTaskCreate(title="Unrelated", prompt="Do not touch")
+    )
+    manager.task_mailbox.append_event(
+        workspace_id=session.workspace_id,
+        task_id=other.id,
+        actor_role=TaskActorRole.HUMAN,
+        event_type=TaskEventType.FOLLOWUP,
+        call_id=request.call_id,
+        action="followup",
+        consumer_key=task_inbox_consumer_key(other),
+        target=other.id,
+        payload={"message": "Unrelated task input"},
+        persist=True,
+    )
+    with pytest.raises(ValueError, match="Another Task"):
+        await manager.reconcile_terminal_delivery(session_id, request, actor="operator-user")
+    assert manager.tasks[other.id] == other
+    assert manager.sessions[session_id].processing_call_ids == [request.call_id]
+
+
+@pytest.mark.parametrize("state", ["working", "review"])
+@pytest.mark.parametrize("reassign", [False, True])
+async def test_reconciled_followup_retry_preserves_task_after_reload(mailbox, state, reassign):
+    from claude_hub.models import WorkspaceTaskStatus
+    from claude_hub.models.task_mailbox import TaskActorRole, TaskEventType
+    from claude_hub.services.task_graph import task_inbox_consumer_key
+
+    manager, session_id, request, _store, sender = await _terminal_reconciliation_case(mailbox)
+    task = manager.tasks[request.expected_task_id]
+    # Register the actual canonical TaskMailbox envelope before reconciliation.
+    message = "quota-blocked review"
+    event, _ = manager.task_mailbox.append_event(
+        workspace_id=task.workspace_id,
+        task_id=task.id,
+        actor_role=TaskActorRole.SUPERVISOR,
+        event_type=TaskEventType.FOLLOWUP,
+        call_id=request.call_id,
+        action="followup",
+        consumer_key=task_inbox_consumer_key(task),
+        review_cycle=task.review_cycle,
+        target=task.id,
+        payload=manager._canonical_followup_payload(
+            task_id=task.id,
+            message=message,
+            actor_role=TaskActorRole.SUPERVISOR,
+            actor_session_id=None,
+            review_cycle=task.review_cycle,
+        ),
+        persist=True,
+    )
+    await manager.reconcile_terminal_delivery(session_id, request, actor="operator-user")
+    manager.tasks[task.id] = manager.tasks[task.id].model_copy(
+        update={"status": WorkspaceTaskStatus(state)}
+    )
+    if reassign:
+        manager.tasks[task.id] = manager.tasks[task.id].model_copy(
+            update={"session_id": "replacement-worker"}
+        )
+    manager._save_state()
+    restored = WorkspaceManager()
+    before = restored.tasks[task.id].model_dump()
+    reports_before = dict(restored.reports)
+    receipt = await restored.followup_task(task.workspace_id, task.id, message, request.call_id)
+    assert receipt == event
+    assert restored.tasks[task.id].model_dump() == before
+    assert restored.reports == reports_before
+    assert sender.await_count == 1
+    with pytest.raises(ValueError):
+        await restored.followup_task(task.workspace_id, task.id, "different input", request.call_id)
+
+
+async def test_reconciled_chat_retry_keeps_paused_runtime_unchanged(mailbox):
+    manager, session_id, request, _store, sender = await _terminal_reconciliation_case(mailbox)
+    await manager.reconcile_terminal_delivery(session_id, request, actor="operator-user")
+    manager.sessions[session_id] = manager.sessions[session_id].model_copy(
+        update={"chat_paused": True, "status": ManagedSessionStatus.NEEDS_INPUT}
+    )
+    before = manager.sessions[session_id].model_dump()
+    await manager.send_chat_session_message(
+        session_id, "quota-blocked review", call_id=request.call_id
+    )
+    await manager.send_chat_session_message_locked(
+        session_id, "quota-blocked review", call_id=request.call_id
+    )
+    assert manager.sessions[session_id].model_dump() == before
+    assert sender.await_count == 1
+
+
+@pytest.mark.parametrize(
+    "message,outcome",
+    [
+        ("Wait for assigned tasks", "completed"),
+        ("Review original historical Task; preserve its evidence", "completed"),
+        ("Review current Task candidate", "failed"),
+    ],
+)
+async def test_legacy_session_delivery_closes_without_current_task_attribution(
+    mailbox, message, outcome
+):
+    manager, session_id, request, _store, sender = await _terminal_reconciliation_case(
+        mailbox, outcome, provenance=False, message=message
+    )
+    session = manager.sessions[session_id]
+    # This historical call is not mirrored in the currently assigned Task.
+    task = manager.tasks[request.expected_task_id]
+    manager.tasks[task.id] = task.model_copy(update={"processing_call_ids": []})
+    manager.sessions[session_id] = session.model_copy(
+        update={"role": WorkspaceSessionRole.REVIEWER}
+    )
+    before_task = manager.tasks[task.id].model_dump()
+    record = await manager.reconcile_terminal_delivery(session_id, request, actor="operator-user")
+    assert record.provenance == "session_delivery"
+    assert record.task_id is None and record.review_cycle is None
+    assert record.guard_task_id == task.id
+    assert manager.tasks[task.id].model_dump() == before_task
+    assert manager.sessions[session_id].pending_messages == session.pending_messages
+    assert manager.sessions[session_id].delivered_call_ids == []
+    assert sender.await_count == 1
+
+
+async def test_terminal_delivery_preserves_prior_review_cycle_provenance(mailbox):
+    manager, session_id, request, _store, _sender = await _terminal_reconciliation_case(mailbox)
+    task = manager.tasks[request.expected_task_id]
+    manager.tasks[task.id] = task.model_copy(update={"review_cycle": task.review_cycle + 1})
+    request = request.model_copy(update={"expected_review_cycle": task.review_cycle + 1})
+    record = await manager.reconcile_terminal_delivery(session_id, request, actor="operator-user")
+    assert record.review_cycle == task.review_cycle
+    assert record.guard_review_cycle == task.review_cycle + 1
+    assert manager.tasks[task.id].review_cycle == task.review_cycle + 1
+
+
+async def test_terminal_reconciliation_rejects_corrupt_durable_history(mailbox):
+    manager, session_id, request, store, _sender = await _terminal_reconciliation_case(mailbox)
+    with store._read_database() as (_db, name):
+        pass
+    with store._database() as db, db:
+        db.execute("INSERT INTO stream_errors VALUES (?,?,?)", (name, 100, b"corrupt fixture"))
+    with pytest.raises(ValueError, match="unreadable events"):
+        await manager.reconcile_terminal_delivery(session_id, request, actor="operator-user")
+    assert manager.sessions[session_id].processing_call_ids == [request.call_id]
+
+
+async def test_terminal_reconciliation_rejects_inconsistent_retained_envelope(mailbox):
+    manager, session_id, request, _store, _sender = await _terminal_reconciliation_case(mailbox)
+    manager.sessions[session_id].pending_messages[request.call_id] = "changed stored envelope"
+    with pytest.raises(ValueError, match="inconsistent"):
+        await manager.reconcile_terminal_delivery(session_id, request, actor="operator-user")
+
+
+async def _real_reconciliation_config_case(mailbox, monkeypatch, tmp_path):
+    from claude_hub.api import tabs as tabs_api
+    from claude_hub.services.agent_stream.tailer import TailerManager
+    from claude_hub.services.ttyd_manager import TTYDManager
+
+    manager, session_id, request, store, sender = await _terminal_reconciliation_case(mailbox)
+    session = manager.sessions[session_id]
+    ttyd_module = import_module("claude_hub.services.ttyd_manager")
+    monkeypatch.setattr(ttyd_module, "STATE_FILE", tmp_path / "tabs.json")
+    monkeypatch.setattr(ttyd_module, "ORDER_FILE", tmp_path / "order.json")
+    monkeypatch.setattr(ttyd_module, "LAUNCH_ENV_DIR", tmp_path / "launch-env")
+    tabs = TTYDManager()
+    tab = await tabs.create_tab(
+        name="Isolated config",
+        cwd=session.workspace_path,
+        agent_type=session.agent_type,
+        session_kind=SessionKind.CHAT,
+        workspace_id=session.workspace_id,
+        workspace_role=session.role,
+        managed_session_id=session_id,
+        env={},
+    )
+    manager.sessions[session_id] = session.model_copy(update={"tab_id": tab.id})
+    await store.replace_all(
+        [event.model_copy(update={"tab_id": tab.id}) for event in store.iter_events()]
+    )
+    tailers = TailerManager(session_getter=lambda sid: manager.sessions.get(sid))
+    monkeypatch.setattr(tabs_api, "ttyd_manager", tabs)
+    monkeypatch.setattr(tabs_api, "workspace_manager", manager)
+    monkeypatch.setattr(tabs_api, "_get_tailer_manager", lambda: tailers)
+    return manager, session_id, request, sender, tab, tailers
+
+
+@pytest.mark.parametrize("other_blocker", [False, True])
+async def test_reconciliation_reaches_original_guarded_config_path(
+    mailbox, monkeypatch, tmp_path, other_blocker
+):
+    from fastapi import HTTPException
+
+    from claude_hub.api import tabs as tabs_api
+    from claude_hub.models import SwitchEnvRequest, User
+
+    manager, session_id, request, _sender, tab, tailers = await _real_reconciliation_config_case(
+        mailbox, monkeypatch, tmp_path
+    )
+    user = User(open_id="controller", name="Controller", email="controller@example.test")
+    change = SwitchEnvRequest(env={"ANTHROPIC_MODEL": "simulated-model"})
+    if other_blocker:
+        session = manager.sessions[session_id]
+        manager.sessions[session_id] = session.model_copy(
+            update={"processing_call_ids": session.processing_call_ids + ["unproven-call"]}
+        )
+    try:
+        with pytest.raises(HTTPException) as old_guard:
+            await tabs_api.switch_tab_env(tab.id, change, user)
+        assert old_guard.value.status_code == 409
+        assert manager.sessions[session_id].env == {}
+        before = manager.tasks[request.expected_task_id].model_dump(
+            exclude={"processing_call_ids", "reconciled_call_ids"}
+        )
+        await manager.reconcile_terminal_delivery(session_id, request, actor=user.open_id)
+        if other_blocker:
+            with pytest.raises(HTTPException) as still_blocked:
+                await tabs_api.switch_tab_env(tab.id, change, user)
+            assert still_blocked.value.status_code == 409
+            assert manager.sessions[session_id].processing_call_ids == ["unproven-call"]
+            assert manager.sessions[session_id].env == {}
+        else:
+            updated = await tabs_api.switch_tab_env(tab.id, change, user)
+            assert updated.env == change.env
+            assert manager.sessions[session_id].env == change.env
+            tailer = tailers.get_tailer(session_id)
+            assert tailer is not None and tailer.native_transport is not None
+            assert tailer.native_transport.session.env == change.env
+        assert (
+            manager.tasks[request.expected_task_id].model_dump(
+                exclude={"processing_call_ids", "reconciled_call_ids"}
+            )
+            == before
+        )
+        assert manager.sessions[session_id].delivered_call_ids == []
+        assert manager.reports == {}
+    finally:
+        await tailers.stop_all()
+
+
+async def test_send_switch_and_reconciliation_serialize_on_real_session_guard(
+    mailbox, monkeypatch, tmp_path
+):
+    from claude_hub.api import tabs as tabs_api
+    from claude_hub.models import SwitchEnvRequest, User
+
+    manager, session_id, request, sender, tab, tailers = await _real_reconciliation_config_case(
+        mailbox, monkeypatch, tmp_path
+    )
+    user = User(open_id="controller", name="Controller", email="controller@example.test")
+    pump = manager._pump_locks.setdefault(session_id, asyncio.Lock())
+    await pump.acquire()
+    try:
+        reconcile = asyncio.create_task(
+            manager.reconcile_terminal_delivery(session_id, request, actor=user.open_id)
+        )
+        await asyncio.sleep(0)
+        switch = asyncio.create_task(
+            tabs_api.switch_tab_env(
+                tab.id, SwitchEnvRequest(env={"ANTHROPIC_MODEL": "simulated-model"}), user
+            )
+        )
+        await asyncio.sleep(0)
+        send = asyncio.create_task(
+            manager.send_chat_session_message(
+                session_id, "new authorized input", call_id="new-input"
+            )
+        )
+        await asyncio.sleep(0)
+        assert not reconcile.done() and not switch.done() and not send.done()
+    finally:
+        pump.release()
+    try:
+        result, updated, _ = await asyncio.wait_for(
+            asyncio.gather(reconcile, switch, send), timeout=5
+        )
+        assert result.outcome == "failed"
+        assert updated.env == {"ANTHROPIC_MODEL": "simulated-model"}
+        assert manager.sessions[session_id].processing_call_ids == ["new-input"]
+        assert manager.sessions[session_id].delivered_call_ids == []
+        assert sender.await_count == 2  # original terminal call and new input only
+        assert manager.reports == {}
+    finally:
+        await tailers.stop_all()
+
+
+async def test_reconciliation_uses_real_durable_handoff_and_terminal_guard(mailbox, monkeypatch):
+    from types import SimpleNamespace
+
+    manager, session_id, request, _store, _sender = await _terminal_reconciliation_case(mailbox)
+    session = manager.sessions[session_id]
+    provider = SimpleNamespace(send_message=AsyncMock(), get_tailer=lambda _sid: None)
+    monkeypatch.setattr(managed_chat, "_manager", lambda: provider)
+    monkeypatch.setattr(managed_chat, "send_message", _REAL_CHAT_SEND)
+    monkeypatch.setattr(managed_chat, "delivery_state", _REAL_CHAT_DELIVERY_STATE)
+    monkeypatch.setattr(managed_chat, "is_turn_running", _REAL_CHAT_IS_RUNNING)
+    managed_chat._write_attempts(session, {"version": 1, "attempts": {}})
+    # Only the external provider boundary is simulated. Production handoff
+    # writes its real immutable sending/accepted ledger; terminal guard reads
+    # the real SQLite lifecycle rather than a mocked reconciliation verdict.
+    await managed_chat.send_message(
+        session, f"[call_id:{request.call_id}]\nquota-blocked review", [], request.call_id
+    )
+    assert managed_chat.delivery_state(session, request.call_id) == "accepted"
+    assert not managed_chat.is_turn_running(session)
+    with pytest.raises(RuntimeError, match="delivery to become idle"):
+        async with manager.managed_chat_configuration_guard(session_id):
+            pass
+    record = await manager.reconcile_terminal_delivery(session_id, request, actor="controller")
+    assert record.outcome == "failed"
+    async with manager.managed_chat_configuration_guard(session_id):
+        pass
+    restored = WorkspaceManager()
+    assert managed_chat.delivery_state(restored.sessions[session_id], request.call_id) == "accepted"
+    await restored.send_chat_session_message(
+        session_id, "quota-blocked review", call_id=request.call_id
+    )
+    assert provider.send_message.await_count == 1
+    assert restored.sessions[session_id].delivered_call_ids == []
+
+
+async def test_late_mailbox_record_cannot_fabricate_terminal_task_provenance(mailbox):
+    from claude_hub.models.task_mailbox import TaskActorRole, TaskEventType
+    from claude_hub.services.task_graph import task_inbox_consumer_key
+
+    manager, session_id, request, _store, _sender = await _terminal_reconciliation_case(
+        mailbox, provenance=False
+    )
+    task = manager.tasks[request.expected_task_id]
+    manager.task_mailbox.append_event(
+        workspace_id=task.workspace_id,
+        task_id=task.id,
+        actor_role=TaskActorRole.SUPERVISOR,
+        event_type=TaskEventType.FOLLOWUP,
+        call_id=request.call_id,
+        action="followup",
+        consumer_key=task_inbox_consumer_key(task),
+        target=task.id,
+        review_cycle=task.review_cycle,
+        payload={"message": "late origin"},
+        persist=True,
+    )
+    with pytest.raises(ValueError, match="Terminal evidence"):
+        await manager.reconcile_terminal_delivery(session_id, request, actor="operator-user")
+    assert manager.sessions[session_id].processing_call_ids == [request.call_id]
+
+
+async def test_resident_reviewer_keeps_original_mailbox_provenance(mailbox):
+    manager, session_id, request, _store, _sender = await _terminal_reconciliation_case(mailbox)
+    task = manager.tasks[request.expected_task_id]
+    manager.tasks[task.id] = task.model_copy(
+        update={"session_id": "actual-worker", "review_session_id": session_id}
+    )
+    record = await manager.reconcile_terminal_delivery(session_id, request, actor="operator-user")
+    assert record.task_id == task.id
+    assert record.provenance == "task_mailbox"
+    assert manager.tasks[task.id].session_id == "actual-worker"
+    assert manager.tasks[task.id].review_session_id == session_id
+
+
+async def test_terminal_reconciliation_refuses_task_control_handoff(mailbox):
+    from claude_hub.models.schemas import TaskExecutionControl
+
+    manager, session_id, request, _store, _sender = await _terminal_reconciliation_case(mailbox)
+    task = manager.tasks[request.expected_task_id]
+    manager.tasks[task.id] = task.model_copy(
+        update={"execution_control": TaskExecutionControl.INITIATOR}
+    )
+    with pytest.raises(RuntimeError):
+        await manager.reconcile_terminal_delivery(session_id, request, actor="operator-user")
+    assert manager.sessions[session_id].processing_call_ids == [request.call_id]
+
+
+@pytest.mark.parametrize("field", ["turn_id", "payload_sha256", "missing_turn", "missing_digest"])
+async def test_reconciliation_rejects_contradictory_durable_handoff(mailbox, field):
+    manager, session_id, request, _store, _sender = await _terminal_reconciliation_case(mailbox)
+    session = manager.sessions[session_id]
+    evidence = managed_chat._read_attempts(session)
+    record = evidence["attempts"][request.call_id]
+    if field.startswith("missing"):
+        record.pop("turn_id" if field == "missing_turn" else "payload_sha256")
+    else:
+        record[field] = "contradictory-evidence"
+    managed_chat._write_attempts(session, evidence)
+    # The existing coarse state alone still accepts this record; the new
+    # operator proof must reject it without closing any processing envelope.
+    assert _REAL_CHAT_DELIVERY_STATE(session, request.call_id) == "accepted"
+    with pytest.raises(ValueError, match="handoff identity or payload"):
+        await manager.reconcile_terminal_delivery(session_id, request, actor="controller")
+    assert manager.sessions[session_id].processing_call_ids == [request.call_id]
+    assert manager.sessions[session_id].reconciled_deliveries == {}
+    assert manager.tasks[request.expected_task_id].processing_call_ids == [request.call_id]
+
+
+async def test_historical_mailbox_origin_is_retained_without_current_task_adoption(mailbox):
+    from claude_hub.models.task_mailbox import TaskActorRole, TaskEventType
+    from claude_hub.services.task_graph import task_inbox_consumer_key
+
+    manager, session_id, _receipts, _sender = mailbox
+    original_id = _bind_task(manager, session_id)
+    original = manager.tasks[original_id]
+    manager.task_mailbox.append_event(
+        workspace_id=original.workspace_id,
+        task_id=original.id,
+        actor_role=TaskActorRole.SUPERVISOR,
+        event_type=TaskEventType.FOLLOWUP,
+        call_id="terminal-call",
+        action="followup",
+        consumer_key=task_inbox_consumer_key(original),
+        target=original.id,
+        review_cycle=original.review_cycle,
+        payload={"message": "original historical review"},
+        persist=True,
+    )
+    manager, session_id, request, _store, _sender = await _terminal_reconciliation_case(
+        mailbox, "completed", provenance=False
+    )
+    current = manager.tasks[request.expected_task_id]
+    manager.tasks[current.id] = current.model_copy(update={"processing_call_ids": []})
+    before = manager.tasks[current.id].model_dump()
+    record = await manager.reconcile_terminal_delivery(session_id, request, actor="controller")
+    assert record.task_id == original.id
+    assert record.review_cycle == original.review_cycle
+    assert record.guard_task_id == current.id
+    assert record.provenance == "task_mailbox"
+    assert manager.tasks[original.id] == original
+    assert manager.tasks[current.id].model_dump() == before

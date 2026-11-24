@@ -334,3 +334,25 @@ test('mounted binding panel omits tab_id when binding a group in per_channel mod
     expected_revision: 4,
   })
 })
+
+test('group binding error leaves reload available and refreshes the selected Bot list', async t => {
+  const h = harness(t)
+  const initial = pool(2, [bot('a', { mode: 'per_channel', revision: 2 }), bot('b')])
+  h.store.applyPool(initial)
+  h.setServer(initial)
+  let reads = 0
+  h.setTransport(async url => {
+    if (url.endsWith('/a/chats')) { reads += 1; return response(chatList([groupChat('group-test')], 2)) }
+    if (url.endsWith('/bindings/group')) return response({ detail: 'chat_not_visible' }, 422)
+    return response(h.server())
+  })
+  const mounted = await mountBindingPanel(t, h, 'tab-1')
+  await clickNode(findByTestId(mounted.root, 'feishu-binding-trigger'))
+  await changeSelect(findByTestId(mounted.root, 'feishu-binding-group-select'), 'group-test')
+  await clickNode(findByTestId(mounted.root, 'feishu-binding-bind-group'))
+  assert.match(textOf(mounted.root), /cannot see that group/)
+  assert.ok(findByTestId(mounted.root, 'feishu-binding-reload-groups'))
+  await clickNode(findByTestId(mounted.root, 'feishu-binding-reload-groups'))
+  assert.equal(reads, 2)
+  assert.doesNotMatch(textOf(mounted.root), /cannot see that group/)
+})

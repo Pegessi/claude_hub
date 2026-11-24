@@ -697,7 +697,9 @@ async def test_web_session_1v1_dm_and_group_ai_command_in_place_reply_and_uncert
                         "chatId": req_dec.get("chatId", dm_chat_id),
                         "parentId": req_dec.get("parentId", ""),
                         "rootId": req_dec.get("rootId", ""),
-                        "position": 2 + len(sent_messages),
+                        "position": (
+                            -3 if req_dec.get("isReplyInThread") else 2 + len(sent_messages)
+                        ),
                     }
                 },
             )
@@ -1523,7 +1525,9 @@ async def test_group_chat_topic_thread_mixed_id_dedup_and_frontier_push(
                         "parentId": req_dec["parentId"],
                         "rootId": req_dec["rootId"],
                         "threadId": req_dec["rootId"] if req_dec.get("isReplyInThread") else "",
-                        "position": 10 + len(sent_messages),
+                        "position": (
+                            -3 if req_dec.get("isReplyInThread") else 10 + len(sent_messages)
+                        ),
                     }
                 },
             )
@@ -1629,10 +1633,10 @@ async def test_group_chat_topic_thread_mixed_id_dedup_and_frontier_push(
         assert sent_messages[0]["chatId"] == group_chat_id
         assert sent_messages[0]["parentId"] == group_main_cmd_id
         assert sent_messages[0]["rootId"] == group_main_cmd_id
-        assert bool(sent_messages[0].get("isReplyInThread")) is True
+        assert bool(sent_messages[0].get("isReplyInThread")) is False
         assert sent_messages[1]["parentId"] == group_main_cmd_id
         assert sent_messages[1]["rootId"] == group_main_cmd_id
-        assert bool(sent_messages[1].get("isReplyInThread")) is True
+        assert bool(sent_messages[1].get("isReplyInThread")) is False
 
         # 2. Now run poller.poll_once():
         # - `group_main_cmd_id` (7400000000000000305) must be skipped as a duplicate of `om_openapi_alias_305`!
@@ -1645,12 +1649,12 @@ async def test_group_chat_topic_thread_mixed_id_dedup_and_frontier_push(
         assert len(dispatched_prompts) == 2
         assert "线上 P0 告警排查主贴：延迟升高 300ms" in dispatched_prompts[1]
 
-        # Verify topic reply PutMessageRequest targeted parentId=topic_reply_cmd_id, rootId=topic_root_id, isReplyInThread=True
-        topic_put_reqs = [m for m in sent_messages if m["parentId"] == topic_reply_cmd_id]
+        # Verify topic reply PutMessageRequest targeted parentId=topic_root_id, rootId=topic_root_id, isReplyInThread=False
+        topic_put_reqs = [m for m in sent_messages if m["rootId"] == topic_root_id]
         assert len(topic_put_reqs) == 2
         assert topic_put_reqs[1]["chatId"] == group_chat_id
         assert topic_put_reqs[1]["rootId"] == topic_root_id
-        assert bool(topic_put_reqs[1].get("isReplyInThread")) is True
+        assert bool(topic_put_reqs[1].get("isReplyInThread")) is False
 
         # 3. Also test real-time Frontier WebSocket push intake via poller.handle_pushed_web_message
         push_cmd_bytes = encode("lark_entities_TextContent", {"text": "/ai 实时推送测试"})
@@ -1771,7 +1775,7 @@ async def test_distinct_repeated_commands_across_topics_and_auto_send_as_user_tr
         parent_id=thread_1,
         thread_id=thread_1,
         type=TYPE_TEXT,
-        position=1,
+        position=-3,
         create_time_s=now_ms // 1000,
         content=cmd_bytes,
     )
@@ -1783,7 +1787,7 @@ async def test_distinct_repeated_commands_across_topics_and_auto_send_as_user_tr
         parent_id=thread_2,
         thread_id=thread_2,
         type=TYPE_TEXT,
-        position=2,
+        position=-3,
         create_time_s=(now_ms // 1000) + 5,
         content=cmd_bytes,
     )
@@ -2076,3 +2080,419 @@ async def test_transient_503_preserves_session_stale_401_preserves_replacement_a
         assert web_store.load() is None
     finally:
         await mock_http.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("payload_kind", ["packet", "status", "json", "malformed"])
+async def test_gateway_rejection_diagnostics_are_bounded_and_redacted(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, payload_kind: str
+) -> None:
+    from claude_hub.services.feishu_web_session import FeishuWebGatewayError
+
+    store = FeishuWebSessionStore(path=tmp_path / "web.json", key_path=tmp_path / "web.key")
+    store.save(FeishuWebSession(cookies={"session": "cookie-secret"}, csrf_token="csrf-secret"))
+    text = "invalid rootId private-message-body Cookie=cookie-secret JWT=eyJhbGci.secret.sig Token=access-secret"
+    status = encode("Status", {"code": 1234, "msg": text})
+    raw = {
+        "packet": encode("Packet", {"status": 4001, "payload": base64.b64encode(status).decode()}),
+        "status": status,
+        "json": json.dumps({"code": 1234, "msg": text}).encode(),
+        "malformed": b"\xff\xffsecret-message-body",
+    }[payload_kind]
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda _: httpx.Response(
+                400, content=raw, headers={"x-tt-logid": "20261124ABCDEF123456"}
+            )
+        )
+    ) as http:
+        client = FeishuWebClient(store, http_client=http)
+        with pytest.raises(FeishuWebGatewayError) as caught:
+            await client.call(
+                "PutMessageRequest",
+                {
+                    "type": 2,
+                    "chatId": "20000",
+                    "rootId": "10000",
+                    "parentId": "10001",
+                    "isReplyInThread": True,
+                    "content": {"text": "private-message-body"},
+                },
+                is_mutation=True,
+            )
+    err = caught.value
+    assert err.status_code == 400
+    assert err.diagnostics["x_tt_logid"] == "20261124ABCDEF123456"
+    assert err.diagnostics["cmd"] == 5
+    assert err.diagnostics["has_root_id"] is True
+    assert err.diagnostics["has_parent_id"] is True
+    assert err.diagnostics["root_equals_parent"] is False
+    assert err.diagnostics["is_reply_in_thread"] is True
+    if payload_kind != "malformed":
+        assert err.diagnostics["error_code"] == 1234
+        assert "invalid rootId" in str(err)
+    if payload_kind == "packet":
+        assert err.gateway_status == 4001
+    output = str(err) + caplog.text
+    for forbidden in (
+        "cookie-secret",
+        "csrf-secret",
+        "private-message-body",
+        "access-secret",
+        "eyJhbGci",
+        "10000",
+        "10001",
+        "20000",
+    ):
+        assert forbidden not in output
+    assert "HTTP 400" in caplog.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "mode,allowed,kind,expected",
+    [
+        ("auto", True, "alias", "reply"),
+        ("auto", True, "chat", "send"),
+        ("auto", True, "bound", "send"),
+        ("auto", True, "dm", "dm"),
+        ("auto", False, "dm", "reject"),
+        ("web_session", True, "alias", "reject"),
+        ("auto", True, "uncertain", "uncertain"),
+        ("auto", True, "bot_timeout", "uncertain"),
+        ("auto", True, "bot_http502", "uncertain"),
+        ("auto", True, "bot_empty", "uncertain"),
+        ("auto", True, "server", "uncertain"),
+        ("auto", True, "discovery_timeout", "timeout"),
+        ("auto", True, "mode_unavailable", "retry"),
+        ("auto", True, "mode_unavailable_context", "retry"),
+        ("auto", True, "disabled", "reject"),
+        ("auto", True, "no_config", "reject"),
+        ("auto", True, "wrong_owner_app", "reject"),
+    ],
+)
+async def test_auto_web_rejection_uses_only_configured_safe_bot_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+    allowed: bool,
+    kind: str,
+    expected: str,
+) -> None:
+    from claude_hub.services.feishu_bot import FeishuDeliveryUncertainError
+    from claude_hub.services.feishu_web_session import FeishuWebGatewayError
+    from claude_hub.services.feishu_web_session.rich import WebChat
+
+    web_store = FeishuWebSessionStore(path=tmp_path / "web.json", key_path=tmp_path / "web.key")
+    web_store.save(
+        FeishuWebSession(cookies={"session": "synthetic"}, user_id="30000", open_id="ou_owner")
+    )
+    token_store = FeishuUserTokenStore(
+        path=tmp_path / "users.json",
+        key_path=tmp_path / "users.key",
+        lark_cli_dir=tmp_path / "no-cli",
+        lark_cli_data_dir=tmp_path / "no-cli-data",
+    )
+    monkeypatch.setattr(
+        token_store,
+        "resolve_fallback_bot_configs",
+        lambda **_: [] if kind == "no_config" else [("cli_bot", "bot-secret")],
+    )
+    sent: list[tuple[str, dict[str, Any]]] = []
+
+    def gateway(req: httpx.Request) -> httpx.Response:
+        if req.url.path == "/im/gateway/":
+            packet = decode("Packet", req.content)
+            if packet["cmd"] == 5:
+                if kind == "uncertain":
+                    raise httpx.ReadTimeout("after submit")
+                return httpx.Response(502 if kind == "server" else 400)
+            # The only other permitted Web operation is read-only chat mapping.
+            assert packet["cmd"] == command_of("PullChatsByIdsRequest").cmd
+            return httpx.Response(
+                200,
+                content=encode(
+                    "Packet",
+                    {
+                        "payload": base64.b64encode(
+                            encode("lark_chats_PullChatsByIdsResponse", {})
+                        ).decode()
+                    },
+                ),
+            )
+        body = json.loads(req.content)
+        if "tenant_access_token" in req.url.path:
+            return httpx.Response(
+                200, json={"code": 0, "tenant_access_token": "bot-token", "expire": 7200}
+            )
+        assert req.headers["authorization"] == "Bearer bot-token"
+        sent.append((req.url.path, body))
+        if kind == "bot_timeout":
+            raise httpx.ReadTimeout("Bot post-submit timeout")
+        if kind == "bot_http502":
+            return httpx.Response(502, text="upstream unavailable")
+        if kind == "bot_empty":
+            return httpx.Response(200, json={"code": 0, "data": {}})
+        if kind == "bound" and len(sent) == 1:
+            return httpx.Response(400, json={"code": 230002, "msg": "not in chat"})
+        return httpx.Response(
+            200, json={"code": 0, "data": {"message_id": "om_bot_reply", "thread_id": "omt_topic"}}
+        )
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(gateway), base_url="https://open.feishu.cn"
+    ) as http:
+        client = FeishuUserClient(
+            token_store,
+            open_id="ou_owner",
+            app_id="cli_other" if kind == "wrong_owner_app" else "cli_bot",
+            web_session_store=web_store,
+            send_mode=mode,
+            client=http,
+        )
+        wt = client._get_web_transport()
+        assert wt is not None
+        wt._remember_msg(
+            WebMessage(
+                id="10001",
+                chat_id="20000",
+                root_id="10000",
+                thread_id="10000",
+                position=17,
+                topic_position=0,
+            )
+        )
+        if kind == "alias":
+            wt.bind_message_alias("om_command", "10001")
+        if not kind.startswith("mode_unavailable"):
+            wt._remember_chat(
+                WebChat(id="20000", open_chat_id="oc_group" if kind in {"chat", "bound"} else "")
+            )
+        monkeypatch.setattr(
+            client,
+            "_resolve_chat_bound_pool_bot_configs",
+            lambda *a, **kw: [("cli_bound", "bound-secret")],
+        )
+        record = await client.aresolve_record(auto_import_lark_cli=False)
+        assert record is not None and record.source == "web_session"
+        assert client._has_oauth_token() is False
+        if kind.startswith("mode_unavailable"):
+            from unittest.mock import AsyncMock
+
+            create_tab, dispatch = AsyncMock(), AsyncMock()
+            service = FeishuAiCommandService(
+                state_path=tmp_path / "ai.json",
+                dedup_store=FeishuMessageDedupStore(path=tmp_path / "dedup.json"),
+                user_client_factory=lambda _: client,
+                tab_creator=create_tab,
+                turn_dispatcher=dispatch,
+            )
+            service.update_config({"enabled": True, "owner_open_id": "ou_owner", "ack_emoji": ""})
+            message = FeishuUserMessage(
+                "10001", "20000", "ou_owner", "user", "text", "/ai inspect", 1
+            )
+            from claude_hub.services.feishu_bot import FeishuMessageEvent
+
+            if kind == "mode_unavailable_context":
+                monkeypatch.setattr(
+                    service,
+                    "_fetch_context_and_refs",
+                    AsyncMock(side_effect=RuntimeError("context failed")),
+                )
+            event = FeishuMessageEvent("ev", "10001", "app", "ou_owner", "20000", "/ai inspect", 1)
+            assert await service.handle_ws_event(event)
+            assert service.get_pending_command("10001") is None
+            assert service._dedup.claim("ai_cmd:ou_owner:10001")
+            assert not sent
+            create_tab.assert_not_awaited()
+            dispatch.assert_not_awaited()
+            return
+        if kind == "discovery_timeout":
+            from unittest.mock import AsyncMock
+
+            monkeypatch.setattr(
+                client,
+                "_reply_after_web_rejection",
+                AsyncMock(side_effect=httpx.ReadTimeout("lookup")),
+            )
+            with pytest.raises(httpx.ReadTimeout):
+                await client.reply_as_user(
+                    "10001", "text", {"text": "answer"}, chat_id="20000", reply_in_thread=True
+                )
+            assert not sent
+            return
+        if expected in {"reject", "uncertain"}:
+            with pytest.raises(
+                FeishuDeliveryUncertainError if expected == "uncertain" else FeishuWebGatewayError
+            ):
+                await client.reply_as_user(
+                    "10001",
+                    "text",
+                    {"text": "answer"},
+                    chat_id="20000",
+                    reply_in_thread=True,
+                    allow_bot_fallback=kind != "disabled",
+                    allow_bound_or_dm_fallback_on_not_in_chat=allowed,
+                )
+            assert len(sent) == (1 if kind in {"bot_timeout", "bot_empty", "bot_http502"} else 0)
+            if kind == "bot_http502":
+                from unittest.mock import AsyncMock
+
+                sent.clear()
+                create_tab, dispatch = AsyncMock(), AsyncMock()
+                service = FeishuAiCommandService(
+                    state_path=tmp_path / "ai.json",
+                    dedup_store=FeishuMessageDedupStore(path=tmp_path / "dedup.json"),
+                    user_client_factory=lambda _: client,
+                    tab_creator=create_tab,
+                    turn_dispatcher=dispatch,
+                )
+                service.update_config(
+                    {"enabled": True, "owner_open_id": "ou_owner", "ack_emoji": ""}
+                )
+                message = FeishuUserMessage(
+                    message_id="10001",
+                    chat_id="20000",
+                    sender_open_id="ou_owner",
+                    sender_type="user",
+                    msg_type="text",
+                    text="/ai inspect report",
+                    create_time_ms=1,
+                )
+                result = await service.handle_message(message, seeded_context=[message])
+                assert result.status == "failed"
+                assert "delivery may have occurred" in result.reason
+                assert len(sent) == 1  # No error reply after the uncertain interim Bot send.
+                create_tab.assert_not_awaited()
+                dispatch.assert_not_awaited()
+        else:
+            receipt = await client.reply_as_user(
+                "10001",
+                "text",
+                {"text": "answer"},
+                chat_id="20000",
+                reply_in_thread=True,
+                allow_bound_or_dm_fallback_on_not_in_chat=allowed,
+            )
+            assert receipt.message_id == "om_bot_reply"
+            path, body = sent[-1]
+            if expected == "reply":
+                assert path.endswith("/om_command/reply") and body["reply_in_thread"] is True
+            else:
+                assert path == "/open-apis/im/v1/messages"
+                assert body["receive_id"] == ("ou_owner" if expected == "dm" else "oc_group")
+            assert all(
+                "10001" not in path and body.get("receive_id") != "20000" for path, body in sent
+            )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("visible,mapped", [(True, True), (False, True), (True, False)])
+@pytest.mark.parametrize("bound", [False, True])
+@pytest.mark.parametrize("alias", [False, True])
+async def test_numeric_owner_fallback_requires_visible_explicit_chat_mapping(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    visible: bool,
+    mapped: bool,
+    bound: bool,
+    alias: bool,
+) -> None:
+    from unittest.mock import AsyncMock, Mock
+
+    from claude_hub.services.feishu_bot import FeishuBotConfigurationError, FeishuChatInfo
+
+    store = FeishuUserTokenStore(path=tmp_path / "users.json", key_path=tmp_path / "users.key")
+    client = FeishuUserClient(
+        token_store=store,
+        web_bot_chat_ids={"20000": "oc_verified"} if mapped else {},
+    )
+    from claude_hub.services.feishu_user_token_store import FeishuUserTokenRecord
+
+    record = FeishuUserTokenRecord(
+        open_id="30000",
+        app_id="web_session",
+        access_token="synthetic",
+        refresh_token="",
+        expires_at=0,
+        scope="",
+        source="web_session",
+    )
+    transport = Mock()
+    transport.resolve_open_chat_id = AsyncMock(return_value=None)
+    transport.get_message_alias.return_value = (
+        "om_command" if alias and visible and mapped else None
+    )
+    bot = Mock()
+    bot.list_chats = AsyncMock(
+        return_value=[FeishuChatInfo(chat_id="oc_verified")] if visible else []
+    )
+    from claude_hub.services.feishu_bot import FeishuReplyReceipt
+
+    bot._reply_message_payload = AsyncMock(
+        return_value=FeishuReplyReceipt(message_id="om_synthetic", thread_id="omt_synthetic")
+    )
+    bot.send_message_with_identity = AsyncMock(return_value="om_synthetic")
+    monkeypatch.setattr(client, "_get_web_transport", lambda: transport)
+    monkeypatch.setattr(
+        client,
+        "_resolve_fallback_bot_configs",
+        lambda _: [] if bound else [("cli_bot", "synthetic")],
+    )
+    monkeypatch.setattr(client, "_get_fallback_bot_client", lambda *_: bot)
+    monkeypatch.setattr(
+        client,
+        "_resolve_chat_bound_pool_bot_configs",
+        lambda *_: [("cli_bound", "synthetic")] if bound else [],
+    )
+    send = AsyncMock(return_value={"message_id": "om_synthetic"})
+    monkeypatch.setattr(client, "_send_via_bot_fallback", send)
+    from claude_hub.services.feishu_bot import FeishuReplyReceipt
+
+    async def reply() -> FeishuReplyReceipt:
+        return await client._reply_after_web_rejection(
+            record,
+            "10001",
+            "text",
+            {"text": "synthetic"},
+            chat_id="20000",
+            reply_in_thread=True,
+            uuid=None,
+            allow_bound_or_dm=True,
+        )
+
+    if visible and mapped:
+        receipt = await reply()
+        assert receipt.message_id == "om_synthetic"
+        if alias:
+            assert bot._reply_message_payload.await_args is not None
+            assert bot._reply_message_payload.await_args.args[0] == "om_command"
+            bot.send_message_with_identity.assert_not_awaited()
+        else:
+            assert bot.send_message_with_identity.await_args is not None
+            assert bot.send_message_with_identity.await_args.args[0] == "oc_verified"
+            bot._reply_message_payload.assert_not_awaited()
+    else:
+        with pytest.raises(FeishuBotConfigurationError):
+            await reply()
+        send.assert_not_awaited()
+        bot.send_message_with_identity.assert_not_awaited()
+    send.assert_not_awaited()
+
+
+def test_official_put_message_extended_fields_wire_tags() -> None:
+    # Official messages.PutMessageRequest, worker 5492 (2026-11-24):
+    # bool fields 8,10,11,13,15,17,19,20; no threadId field exists.
+    body = {
+        "sendToChat": True,
+        "isThreadGroupTopic": True,
+        "isAnonymous": True,
+        "isEncrypted": True,
+        "isShare": True,
+        "syncToChat": True,
+        "isSmartReply": True,
+        "isMentionDoubao": True,
+    }
+    wire = encode("lark_messages_PutMessageRequest", body)
+    assert wire == bytes.fromhex("40015001580168017801880101980101a00101")
+    assert decode("lark_messages_PutMessageRequest", wire) == body

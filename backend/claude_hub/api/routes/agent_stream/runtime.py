@@ -274,9 +274,12 @@ async def capabilities_for(
             tailer = await manager.ensure_started(session)
         except (ValueError, StructuredSourceUnavailable) as exc:
             return unavailable(str(exc) or "Live provider unavailable")
-        if tailer.native_error is not None:
-            return unavailable(tailer.native_error)
         transport = tailer.native_transport
+        if tailer.native_error is not None:
+            return unavailable(
+                tailer.native_error,
+                transport.capabilities() if transport is not None else None,
+            )
         if transport is None:
             return unavailable("Live provider transport unavailable")
         cache = cache_preparation and session.agent_type != AgentType.MASO
@@ -288,7 +291,7 @@ async def capabilities_for(
                 refresh=refresh,
             )
         except StructuredSourceUnavailable as exc:
-            return unavailable(str(exc) or "Live provider unavailable")
+            return unavailable(str(exc) or "Live provider unavailable", transport.capabilities())
         if manager.hard_failed(session.id):
             return unavailable(tailer.last_error or "Live provider unavailable", caps)
         if not caps.structured:

@@ -77,6 +77,13 @@
         {{ error }}
       </p>
       <p
+        v-if="groupBindError"
+        class="feedback feedback--error"
+        role="alert"
+      >
+        {{ groupBindError }}
+      </p>
+      <p
         v-if="copyError"
         class="feedback feedback--error"
         role="alert"
@@ -602,7 +609,7 @@ const selectedChatId = ref<string | null>(null)
 const {
   bots, binding, bindings, mode, currentBot, selectedBotId, selectedBot, pendingCode, claim,
   confirmWord, error, needsLogin, isHydrated, isLoading, isMutating, viewState, statusText, groups,
-  groupsLoaded, groupsLoading, groupsError, refresh, selectBot, generateCode, activate, bindGroup,
+  groupsLoaded, groupsLoading, groupsError, groupBindError, refresh, selectBot, generateCode, activate, bindGroup,
   loadGroups, ensureGroups, disconnect, releaseChannel, resume, pause,
 } = useFeishuBinding(toRef(props, 'tabId'))
 const isPerChannelMode = computed(() => mode.value === 'per_channel')

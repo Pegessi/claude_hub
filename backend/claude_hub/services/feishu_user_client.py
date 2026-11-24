@@ -8,7 +8,6 @@ reaction/reply implementation across Bot and User identities.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Mapping, Sequence, TypeVar
 from urllib.parse import quote
 
@@ -25,10 +24,36 @@ from claude_hub.services.feishu_bot import (
     FeishuDeliveryUncertainError,
     FeishuReplyReceipt,
     _chat_info_from_payload,
-    _forward_body,
-    _forward_content,
     create_feishu_http_client,
 )
+from claude_hub.services.feishu_user_client_models import (
+    RECOMMENDED_AI_COMMAND_SCOPES as RECOMMENDED_AI_COMMAND_SCOPES,
+)
+from claude_hub.services.feishu_user_client_models import (
+    REQUIRED_IM_MESSAGE_SCOPE as REQUIRED_IM_MESSAGE_SCOPE,
+)
+from claude_hub.services.feishu_user_client_models import (
+    REQUIRED_SEND_AS_USER_SCOPE as REQUIRED_SEND_AS_USER_SCOPE,
+)
+from claude_hub.services.feishu_user_client_models import FeishuMessagePage as FeishuMessagePage
+from claude_hub.services.feishu_user_client_models import (
+    FeishuMessageSearchPage as FeishuMessageSearchPage,
+)
+from claude_hub.services.feishu_user_client_models import (
+    FeishuScopePreflightResult as FeishuScopePreflightResult,
+)
+from claude_hub.services.feishu_user_client_models import (
+    FeishuUserScopeError as FeishuUserScopeError,
+)
+from claude_hub.services.feishu_user_client_models import _extract_item_text as _extract_item_text
+from claude_hub.services.feishu_user_client_models import _parse_user_message as _parse_user_message
+from claude_hub.services.feishu_user_client_models import (
+    build_auth_login_command as build_auth_login_command,
+)
+from claude_hub.services.feishu_user_client_models import (
+    evaluate_scope_preflight as evaluate_scope_preflight,
+)
+from claude_hub.services.feishu_user_message import FeishuUserMessage
 from claude_hub.services.feishu_user_token_store import (
     FeishuUserTokenRecord,
     FeishuUserTokenStore,
@@ -38,17 +63,6 @@ from claude_hub.services.feishu_user_token_store import (
 _T = TypeVar("_T")
 logger = logging.getLogger(__name__)
 
-REQUIRED_SEND_AS_USER_SCOPE = "im:message.send_as_user"
-REQUIRED_IM_MESSAGE_SCOPE = "im:message"
-RECOMMENDED_AI_COMMAND_SCOPES: tuple[str, ...] = (
-    "im:message",
-    "im:message.reactions:write_only",
-    "im:chat:read",
-    "im:message.group_msg:get_as_user",
-    "im:message.p2p_msg:get_as_user",
-    "search:message",
-    "im:message:readonly",
-)
 _EXPIRED_TOKEN_CODES = {
     99991677,
     99991663,
@@ -65,233 +79,6 @@ _BOT_NOT_IN_CHAT_CODES = {
     230002,
     "230002",
 }
-
-
-class FeishuUserScopeError(FeishuBotConfigurationError):
-    """Raised when the user token lacks required scopes and no fallback bot can send."""
-
-    def __init__(
-        self,
-        message: str,
-        *,
-        missing_scopes: tuple[str, ...] = (REQUIRED_SEND_AS_USER_SCOPE,),
-        auth_login_command: str = "",
-    ) -> None:
-        super().__init__(message)
-        self.missing_scopes = missing_scopes
-        self.auth_login_command = auth_login_command
-
-
-@dataclass(frozen=True)
-class FeishuScopePreflightResult:
-    """Scope readiness and remediation guidance for ``/ai`` user-identity actions."""
-
-    has_token: bool
-    open_id: str | None
-    user_name: str | None
-    app_id: str | None
-    source: str | None
-    expires_at: float
-    token_expired: bool
-    granted_scopes: tuple[str, ...]
-    required_send_scope: str
-    can_send_as_user: bool
-    can_react_as_user: bool
-    can_read_messages: bool
-    missing_required_scopes: tuple[str, ...]
-    missing_recommended_scopes: tuple[str, ...]
-    auth_login_command: str
-    remediation_steps: tuple[str, ...]
-    can_send: bool = False
-    send_mode: str = "none"
-    has_send_as_user_scope: bool = False
-    can_send_via_bot: bool = False
-    fallback_bot_app_id: str | None = None
-    has_web_session: bool = False
-    web_user_id: str | None = None
-    web_user_name: str | None = None
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "has_token": self.has_token,
-            "open_id": self.open_id,
-            "user_name": self.user_name,
-            "app_id": self.app_id,
-            "source": self.source,
-            "expires_at": self.expires_at,
-            "token_expired": self.token_expired,
-            "granted_scopes": list(self.granted_scopes),
-            "required_send_scope": self.required_send_scope,
-            "can_send": self.can_send,
-            "can_send_as_user": self.can_send_as_user,
-            "has_send_as_user_scope": self.has_send_as_user_scope,
-            "can_send_via_bot": self.can_send_via_bot,
-            "fallback_bot_app_id": self.fallback_bot_app_id,
-            "has_web_session": self.has_web_session,
-            "web_user_id": self.web_user_id,
-            "web_user_name": self.web_user_name,
-            "send_mode": self.send_mode,
-            "can_react_as_user": self.can_react_as_user,
-            "can_read_messages": self.can_read_messages,
-            "missing_required_scopes": list(self.missing_required_scopes),
-            "missing_recommended_scopes": list(self.missing_recommended_scopes),
-            "auth_login_command": self.auth_login_command,
-            "remediation_steps": list(self.remediation_steps),
-        }
-
-
-@dataclass(frozen=True)
-class FeishuUserMessage:
-    """Normalized message record returned by user-identity IM read APIs."""
-
-    message_id: str
-    chat_id: str
-    sender_open_id: str
-    sender_type: str
-    msg_type: str
-    text: str
-    create_time_ms: int
-    thread_id: str | None = None
-    parent_id: str | None = None
-    root_id: str | None = None
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "message_id": self.message_id,
-            "chat_id": self.chat_id,
-            "sender_open_id": self.sender_open_id,
-            "sender_type": self.sender_type,
-            "msg_type": self.msg_type,
-            "text": self.text,
-            "create_time_ms": self.create_time_ms,
-            "thread_id": self.thread_id,
-            "parent_id": self.parent_id,
-            "root_id": self.root_id,
-        }
-
-
-@dataclass(frozen=True)
-class FeishuMessageSearchPage:
-    """One page of message IDs from ``POST /open-apis/search/v2/message``."""
-
-    items: tuple[str, ...]
-    has_more: bool
-    page_token: str | None = None
-
-
-@dataclass(frozen=True)
-class FeishuMessagePage:
-    """One paginated page of messages from ``GET /open-apis/im/v1/messages``."""
-
-    items: tuple[FeishuUserMessage, ...]
-    has_more: bool = False
-    page_token: str = ""
-
-
-def build_auth_login_command(
-    scopes: tuple[str, ...] = RECOMMENDED_AI_COMMAND_SCOPES,
-) -> str:
-    scope_arg = " ".join(scopes)
-    return f'lark-cli auth login --scope "{scope_arg}" --no-wait --json'
-
-
-def evaluate_scope_preflight(
-    record: FeishuUserTokenRecord | None,
-    *,
-    now: float | None = None,
-    fallback_bot_app_id: str | None = None,
-    web_session: Any | None = None,
-    configured_send_mode: str = "auto",
-    configured_owner_open_id: str | None = None,
-    api_base_url: str | None = None,
-) -> FeishuScopePreflightResult:
-    """Inspect a user token record (and optional web session) and produce clear scope & auth guidance."""
-    from claude_hub.services.feishu_web_session.adapter import (
-        evaluate_scope_preflight_with_web_session,
-    )
-
-    return evaluate_scope_preflight_with_web_session(
-        record,
-        now=now,
-        fallback_bot_app_id=fallback_bot_app_id,
-        web_session=web_session,
-        configured_send_mode=configured_send_mode,
-        configured_owner_open_id=configured_owner_open_id,
-        api_base_url=api_base_url,
-    )
-
-
-def _extract_item_text(item: Mapping[str, Any]) -> str:
-    msg_type = str(item.get("msg_type") or item.get("message_type") or "text")
-    body = _forward_body(item)
-    if msg_type == "text":
-        if isinstance(body, Mapping):
-            raw = body.get("text")
-            if isinstance(raw, str):
-                text = raw
-            else:
-                text = ""
-        elif isinstance(body, str):
-            text = body
-        else:
-            text = ""
-    else:
-        text, _ = _forward_content(body)
-    # Substitute mention placeholders (@_user_1) when mentions metadata is present
-    mentions = item.get("mentions")
-    if isinstance(mentions, list) and text:
-        for mention in mentions:
-            if not isinstance(mention, Mapping):
-                continue
-            key = mention.get("key")
-            name = mention.get("name")
-            if isinstance(key, str) and key and isinstance(name, str) and name:
-                text = text.replace(key, f"@{name}")
-    return text.strip()
-
-
-def _parse_user_message(
-    item: Mapping[str, Any], default_chat_id: str = ""
-) -> FeishuUserMessage | None:
-    if item.get("deleted") is True:
-        return None
-    message_id = str(item.get("message_id") or item.get("id") or "").strip()
-    if not message_id:
-        return None
-    chat_id = str(item.get("chat_id") or default_chat_id or "").strip()
-    sender = item.get("sender")
-    if isinstance(sender, Mapping):
-        sender_open_id = str(
-            sender.get("id") or sender.get("open_id") or sender.get("sender_id") or ""
-        ).strip()
-        sender_type = str(sender.get("sender_type") or "user").strip()
-    else:
-        sender_open_id = str(item.get("sender_open_id") or "").strip()
-        sender_type = str(item.get("sender_type") or "user").strip()
-    msg_type = str(item.get("msg_type") or item.get("message_type") or "text").strip()
-    raw_ctime = item.get("create_time")
-    try:
-        ctime_val = int(str(raw_ctime).strip()) if raw_ctime is not None else 0
-        if 0 < ctime_val < 10_000_000_000:
-            ctime_val *= 1000
-    except (ValueError, TypeError):
-        ctime_val = 0
-    thread_id = str(item.get("thread_id") or "").strip() or None
-    parent_id = str(item.get("parent_id") or "").strip() or None
-    root_id = str(item.get("root_id") or "").strip() or None
-    text = _extract_item_text(item)
-    return FeishuUserMessage(
-        message_id=message_id,
-        chat_id=chat_id,
-        sender_open_id=sender_open_id,
-        sender_type=sender_type,
-        msg_type=msg_type,
-        text=text,
-        create_time_ms=ctime_val,
-        thread_id=thread_id,
-        parent_id=parent_id,
-        root_id=root_id,
-    )
 
 
 _RECORD_OMITTED = object()
@@ -311,6 +98,7 @@ class FeishuUserClient:
         token_refresher: Callable[..., Any] | None = None,
         web_session_store: Any | None = None,
         send_mode: str = "auto",
+        web_bot_chat_ids: Mapping[str, str] | None = None,
     ) -> None:
         self._store = token_store or get_feishu_user_token_store()
         self._open_id = (open_id or "").strip() or None
@@ -321,6 +109,7 @@ class FeishuUserClient:
         self._web_session_store = web_session_store
         self._send_mode = (send_mode or "auto").strip().lower()
         self._web_transport: Any | None = None
+        self._web_bot_chat_ids = dict(web_bot_chat_ids or {})
         self._bot_client = FeishuBotClient(
             FeishuBotConfig(
                 app_id=self._app_id or "user-client",
@@ -806,7 +595,7 @@ class FeishuUserClient:
                                 continue
                             raise
                     owner_open_id = record.open_id.strip()
-                    if owner_open_id and record.app_id.strip() == bot_app_id:
+                    if owner_open_id.startswith("ou_") and record.app_id.strip() == bot_app_id:
                         dm_msg_id = await bot_client.send_message_with_identity(
                             owner_open_id,
                             msg_type,
@@ -907,7 +696,7 @@ class FeishuUserClient:
                                     continue
                                 raise
                     owner_open_id = record.open_id.strip()
-                    if owner_open_id and record.app_id.strip() == bot_app_id:
+                    if owner_open_id.startswith("ou_") and record.app_id.strip() == bot_app_id:
                         dm_msg_id = await bot_client.send_message_with_identity(
                             owner_open_id,
                             msg_type,
@@ -994,6 +783,104 @@ class FeishuUserClient:
                 )
             raise
 
+    async def _reply_after_web_rejection(
+        self,
+        record: FeishuUserTokenRecord,
+        message_id: str,
+        msg_type: str,
+        content: Mapping[str, object],
+        *,
+        chat_id: str | None,
+        reply_in_thread: bool,
+        uuid: str | None,
+        allow_bound_or_dm: bool,
+    ) -> FeishuReplyReceipt:
+        wt = self._get_web_transport()
+        open_chat_id = chat_id if chat_id and chat_id.startswith("oc_") else None
+        if allow_bound_or_dm and chat_id and wt is not None and not open_chat_id:
+            try:
+                open_chat_id = await wt.resolve_open_chat_id(chat_id)
+            except FeishuBotError:
+                pass
+        mapped_bot: FeishuBotClient | None = None
+        if allow_bound_or_dm and not open_chat_id and chat_id:
+            mapped = self._web_bot_chat_ids.get(chat_id, "")
+            if mapped.startswith("oc_"):
+                # Only use operator-declared equivalence, confirmed visible to
+                # a configured Bot. Names and numeric IDs cannot prove identity.
+                candidates = self._resolve_fallback_bot_configs(record)
+                candidates += self._resolve_chat_bound_pool_bot_configs(mapped)
+                for app_id, secret in dict(candidates).items():
+                    bot = self._get_fallback_bot_client(app_id, secret)
+                    try:
+                        visible = await bot.list_chats()
+                    except (FeishuBotError, httpx.HTTPError):
+                        continue
+                    if any(chat.chat_id == mapped for chat in visible):
+                        mapped_bot = bot
+                        open_chat_id = mapped
+                        break
+        alias = wt.get_message_alias(message_id) if wt is not None else None
+        open_message_id = message_id if message_id.startswith("om_") else alias
+        if open_message_id and open_message_id.startswith("om_"):
+            if mapped_bot is not None:
+                return self._require_reply_receipt_identity(
+                    await mapped_bot._reply_message_payload(
+                        open_message_id,
+                        msg_type,
+                        content,
+                        reply_in_thread=reply_in_thread,
+                        uuid=uuid,
+                    )
+                )
+            return await self._reply_via_bot_fallback(
+                record,
+                open_message_id,
+                msg_type,
+                content,
+                chat_id=open_chat_id,
+                reply_in_thread=reply_in_thread,
+                uuid=uuid,
+                allow_bound_or_dm_fallback_on_not_in_chat=allow_bound_or_dm,
+            )
+        if not allow_bound_or_dm:
+            raise FeishuBotConfigurationError(
+                "Web reply rejected; no OpenAPI message alias for Bot reply"
+            )
+        # Numeric Web IDs are not OpenAPI IDs. An explicit chat mapping permits
+        # the existing configured/bound Bot path; otherwise only the owner DM is safe.
+        if open_chat_id:
+            if mapped_bot is not None:
+                sent_id = await mapped_bot.send_message_with_identity(
+                    open_chat_id, msg_type, content, uuid=uuid
+                )
+                return self._require_reply_receipt_identity(
+                    FeishuReplyReceipt(message_id=sent_id, thread_id=None)
+                )
+            sent = await self._send_via_bot_fallback(
+                record,
+                open_chat_id,
+                msg_type,
+                content,
+                uuid=uuid,
+                allow_bound_or_dm_fallback_on_not_in_chat=True,
+            )
+            return self._require_reply_receipt_identity(
+                FeishuReplyReceipt(message_id=sent["message_id"], thread_id=None)
+            )
+        configs = self._resolve_fallback_bot_configs(record)
+        if configs and record.open_id.startswith("ou_") and record.app_id == configs[0][0]:
+            bot = self._get_fallback_bot_client(*configs[0])
+            sent_id = await bot.send_message_with_identity(
+                record.open_id, msg_type, content, uuid=uuid, receive_id_type="open_id"
+            )
+            return self._require_reply_receipt_identity(
+                FeishuReplyReceipt(message_id=sent_id, thread_id=None)
+            )
+        raise FeishuBotConfigurationError(
+            "Web reply rejected; no mapped chat or matching owner Bot DM"
+        )
+
     async def reply_as_user(
         self,
         message_id: str,
@@ -1009,6 +896,8 @@ class FeishuUserClient:
         allow_bound_or_dm_fallback_on_not_in_chat: bool = False,
     ) -> FeishuReplyReceipt:
         """Reply to ``message_id`` as the authenticated user (or bot fallback when configured)."""
+        from claude_hub.services.feishu_web_session.client import FeishuWebGatewayError
+
         if dry_run:
             return FeishuReplyReceipt(
                 message_id=f"dry-run:{uuid or message_id}",
@@ -1030,6 +919,30 @@ class FeishuUserClient:
                     return reply_res
                 except FeishuDeliveryUncertainError:
                     raise
+                except FeishuWebGatewayError as exc:
+                    # Only explicit request rejection can authorize another send.
+                    # 5xx, timeouts and ambiguous statuses must never duplicate delivery.
+                    if (
+                        self._send_mode != "auto"
+                        or not allow_bot_fallback
+                        or exc.status_code not in {400, 404, 405, 413, 415, 422}
+                    ):
+                        raise
+                    try:
+                        return await self._reply_after_web_rejection(
+                            record,
+                            message_id,
+                            msg_type,
+                            content,
+                            chat_id=chat_id,
+                            reply_in_thread=reply_in_thread,
+                            uuid=uuid,
+                            allow_bound_or_dm=allow_bound_or_dm_fallback_on_not_in_chat,
+                        )
+                    except (FeishuBotConfigurationError, FeishuBotRemoteError):
+                        # Keep the original sanitized gateway evidence if the
+                        # configured fallback is unavailable or explicitly rejected.
+                        raise exc from None
                 except FeishuBotError:
                     if (
                         self._send_mode == "web_session"
@@ -1348,6 +1261,12 @@ class FeishuUserClient:
             cursor = page.page_token
 
         return collected
+
+    async def download_message_image(self, message: FeishuUserMessage, image_key: str) -> bytes:
+        """Download only under this user's verified identity; never fall back to a Bot."""
+        from claude_hub.services.feishu_user_media import download_user_image
+
+        return await download_user_image(self, message, image_key)
 
     async def get_message(self, message_id: str) -> FeishuUserMessage | None:
         """Fetch one message by ``message_id`` using the user token."""

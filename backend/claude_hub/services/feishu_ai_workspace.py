@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from claude_hub.models import AgentType, SessionKind
+from claude_hub.models.chat_image import ChatImageAttachment
 from claude_hub.services.feishu_ai_command_models import (
     DEFAULT_AI_COMMAND_WORKSPACE_NAME,
     FeishuAiCommandConfig,
@@ -581,10 +582,18 @@ async def dispatch_managed_turn(
     turn_metadata: Mapping[str, Any],
     *,
     dispatcher_seam: Callable[..., Any] | None = None,
+    attachments: list[ChatImageAttachment] | None = None,
 ) -> str:
     """Send one turn to a managed Chat session and await its final answer."""
     if dispatcher_seam is not None:
-        res = dispatcher_seam(session, prompt, turn_id, visible_text, dict(turn_metadata))
+        res = dispatcher_seam(
+            session,
+            prompt,
+            turn_id,
+            visible_text,
+            dict(turn_metadata),
+            **({"attachments": attachments} if attachments else {}),
+        )
         return str(await res if inspect.isawaitable(res) else res)
 
     from claude_hub.api.agent_stream import get_managed_tailer_manager
@@ -596,15 +605,28 @@ async def dispatch_managed_turn(
     last_error = ""
     try:
         queue = await manager.subscribe_completion(session)
-        await manager.send_message(
-            session,
-            prompt,
-            [],
-            turn_id,
-            visible_text=visible_text,
-            turn_metadata=dict(turn_metadata),
-            allow_question_answer=False,
-        )
+        if attachments:
+            from claude_hub.api.agent_stream import AgentStreamSendRequest, _send_to_native
+
+            await _send_to_native(
+                session,
+                AgentStreamSendRequest(
+                    text=prompt, attachments=attachments, client_turn_id=turn_id
+                ),
+                manager,
+                visible_text=visible_text,
+                turn_metadata=dict(turn_metadata),
+            )
+        else:
+            await manager.send_message(
+                session,
+                prompt,
+                [],
+                turn_id,
+                visible_text=visible_text,
+                turn_metadata=dict(turn_metadata),
+                allow_question_answer=False,
+            )
         while True:
             event = await queue.get()
             if event.turn_id != turn_id:
@@ -680,11 +702,20 @@ async def dispatch_turn(
     turn_id: str,
     visible_text: str,
     turn_metadata: Mapping[str, Any],
+    *,
+    attachments: list[ChatImageAttachment] | None = None,
 ) -> str:
     """Route one /ai turn to its managed session or the standalone tab path."""
     if service._turn_dispatcher is not None:
         return str(
-            await service._turn_dispatcher(tab_id, prompt, turn_id, visible_text, turn_metadata)
+            await service._turn_dispatcher(
+                tab_id,
+                prompt,
+                turn_id,
+                visible_text,
+                turn_metadata,
+                **({"attachments": attachments} if attachments else {}),
+            )
         )
 
     record = service._channel_record_for_tab(tab_id)
@@ -699,6 +730,7 @@ async def dispatch_turn(
                     turn_id,
                     visible_text,
                     turn_metadata,
+                    **({"attachments": attachments} if attachments else {}),
                 )
             )
         logger.warning(
@@ -715,4 +747,5 @@ async def dispatch_turn(
         turn_id,
         visible_text=visible_text,
         turn_metadata=dict(turn_metadata),
+        attachments=attachments,
     )

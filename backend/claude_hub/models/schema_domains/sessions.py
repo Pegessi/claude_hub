@@ -1,7 +1,7 @@
 """Managed-session schemas and public redaction helpers."""
 
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -16,6 +16,28 @@ from claude_hub.models.schema_domains.runtime import (
     WorkspaceSessionRole,
 )
 from claude_hub.models.schema_domains.tasks import WorkspaceAttachment
+
+
+class TerminalDeliveryReconciliation(BaseModel):
+    """Durable operator disposition; does not assert worker processing or task success."""
+
+    operation_id: str
+    request_fingerprint: str
+    actor: str
+    reason: str
+    call_id: str
+    # Original authoritative mailbox provenance, if one exists. A legacy
+    # session message never acquires the Task currently assigned to its resident.
+    task_id: Optional[str] = None
+    review_cycle: Optional[int] = None
+    provenance: Literal["task_mailbox", "session_delivery"] = "task_mailbox"
+    guard_task_id: Optional[str] = None
+    guard_review_cycle: Optional[int] = None
+    session_created_at: datetime
+    terminal_sequence: int
+    run_epoch: int
+    outcome: Literal["completed", "failed"]
+    created_at: datetime
 
 
 class ManagedSession(BaseModel):
@@ -129,6 +151,9 @@ class ManagedSession(BaseModel):
     # worker ACK, or back to pending on explicit retry.
     uncertain_call_ids: List[str] = Field(default_factory=list)
     delivered_call_ids: List[str] = Field(default_factory=list)
+    # Separate from receiver ACK. Retain evidence and prevent replay after an
+    # authenticated operator closes an accepted, terminal Chat delivery.
+    reconciled_deliveries: Dict[str, TerminalDeliveryReconciliation] = Field(default_factory=dict)
     # Per-call_id claim timestamps. Keyed by call_id, value is the UTC datetime
     # when the receiver pump moved the call_id from pending to processing.
     # Used by ``_expire_processing_leases`` to decide whether a claimed but

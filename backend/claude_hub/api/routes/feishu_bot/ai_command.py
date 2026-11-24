@@ -39,6 +39,7 @@ class FeishuAiCommandPatchInput(BaseModel):
     footer: Optional[str] = Field(default=None, max_length=256)
     reply_in_thread: Optional[bool] = None
     send_mode: Optional[str] = Field(default=None, max_length=32)
+    web_bot_chat_ids: Optional[dict[str, str]] = None
 
 
 class FeishuAiWebSessionLoginStartInput(BaseModel):

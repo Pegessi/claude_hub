@@ -145,6 +145,11 @@ class _WorkspaceManagerBase(_RuntimeHostContract):
     ) -> str: ...
 
     @abstractmethod
+    def _delivery_envelope(
+        self, session: ManagedSession, message: str, call_id: str
+    ) -> tuple[str, list[WorkspaceAttachment]]: ...
+
+    @abstractmethod
     async def _resume_chat_session(self, session_id: str) -> None: ...
 
     @abstractmethod

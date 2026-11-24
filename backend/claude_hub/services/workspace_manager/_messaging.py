@@ -114,12 +114,19 @@ from claude_hub.services.session_seat import SessionSeatMismatch, validate_sessi
 from claude_hub.services.workspace_manager._base import _WorkspaceManagerBase
 from claude_hub.services.workspace_manager._constants import *  # noqa: F401,F403
 from claude_hub.services.workspace_manager.messaging.delivery import _MessageDeliveryMixin
+from claude_hub.services.workspace_manager.messaging.reconciliation import (
+    _MessageReconciliationMixin,
+)
 from claude_hub.services.workspace_manager.messaging.recovery import _MessageRecoveryMixin
 from claude_hub.services.workspace_manager.messaging.retry import _MessageRetryMixin
 
 
 class _MessagingMixin(
-    _MessageDeliveryMixin, _MessageRecoveryMixin, _MessageRetryMixin, _WorkspaceManagerBase
+    _MessageDeliveryMixin,
+    _MessageRecoveryMixin,
+    _MessageRetryMixin,
+    _MessageReconciliationMixin,
+    _WorkspaceManagerBase,
 ):
     def _assert_session_seat(self, session: ManagedSession) -> str:
         return validate_session_seat(session, processes=ttyd_manager.processes)

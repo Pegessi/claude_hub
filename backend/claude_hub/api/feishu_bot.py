@@ -634,7 +634,14 @@ def _bot_bound_to_tab(tab_id: str) -> BotEntry | None:
 def feishu_bound_to_tab(tab_id: str) -> bool:
     """Return whether an enabled Feishu Bot can currently reach this tab."""
     try:
-        return _bot_bound_to_tab(tab_id) is not None
+        entry = _bot_bound_to_tab(tab_id)
+        if entry is None:
+            return False
+        effective = _pool.effective(entry.bot_id)
+        return any(
+            b.tab_id == tab_id and _binding_still_routes(effective, b)
+            for b in _entry_bindings(entry)
+        )
     except FeishuBotPoolError:
         return False
 
@@ -647,12 +654,6 @@ async def push_to_tab(
     try:
         entry = _bot_bound_to_tab(tab_id)
         if entry is None:
-            return False
-        binding = next(
-            (candidate for candidate in _entry_bindings(entry) if candidate.tab_id == tab_id),
-            entry.binding,
-        )
-        if binding is None:
             return False
         effective = _pool.effective(entry.bot_id)
     except FeishuBotPoolError:
@@ -667,6 +668,16 @@ async def push_to_tab(
         # Token acquisition can block on Feishu and must stay outside the gate.
         await client.get_tenant_token()
         async with _gate(effective.bot_id):
+            binding = next(
+                (
+                    b
+                    for b in _entry_bindings(entry)
+                    if b.tab_id == tab_id and _binding_still_routes(effective, b)
+                ),
+                None,
+            )
+            if binding is None:
+                return False
             for index, payload in enumerate(payloads):
                 if not _pool.is_current_for_delivery(effective) or not _binding_still_routes(
                     effective, binding
@@ -957,9 +968,12 @@ async def _handle_message_event(
                 status_reason = "binding_missing"
                 return
             if entry is not None and entry.enabled and entry.mode == BOT_MODE_PER_CHANNEL:
-                binding, effective, reject_reason, reject_notice = (
-                    await _provision_per_channel_binding(bot_id, event, effective)
-                )
+                (
+                    binding,
+                    effective,
+                    reject_reason,
+                    reject_notice,
+                ) = await _provision_per_channel_binding(bot_id, event, effective)
                 if binding is None:
                     if reject_notice is None:
                         return

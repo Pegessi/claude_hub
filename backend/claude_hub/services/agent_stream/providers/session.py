@@ -7,7 +7,17 @@ import os
 import shutil
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
-from typing import Any, Awaitable, Callable, Dict, Iterator, List, Literal, Optional, Tuple
+from typing import (
+    Any,
+    Awaitable,
+    Callable,
+    Dict,
+    Iterator,
+    List,
+    Literal,
+    Optional,
+    Tuple,
+)
 
 from ....models import (
     AgentType,
@@ -18,7 +28,12 @@ from ....models import (
     StreamModeOption,
 )
 from ..provider_network import ProviderNetworkError
-from .contracts import ProviderGoal, ProviderGoalOrigin, ProviderGoalSnapshot, ProviderRuntime
+from .contracts import (
+    ProviderGoal,
+    ProviderGoalOrigin,
+    ProviderGoalSnapshot,
+    ProviderRuntime,
+)
 from .guidance import SUBAGENT_HUB_RUNTIME_GUIDANCE
 from .spec import ApprovalChannel, ImageTransport, ProviderSpec, Surface, get_spec
 
@@ -67,7 +82,9 @@ class SessionCore(ABC):
         return Surface.DIRECT_CHAT in self._spec.goals.surfaces
 
     @property
-    def goal_execution_owner(self) -> Optional[Literal["provider_native", "hub_managed"]]:
+    def goal_execution_owner(
+        self,
+    ) -> Optional[Literal["provider_native", "hub_managed"]]:
         return self._spec.goals.default_owner
 
     @property
@@ -148,6 +165,8 @@ class SessionCore(ABC):
         # If that response is lost, completion or confirmed Stop still owns the
         # live turn; generic send failure cleanup must not release its guard.
         self._delivery_uncertain = False
+        self._submission_delivery_uncertain = False
+        self._quarantined_turn_id: Optional[str] = None
         # Completion can settle execution while the request response reports a
         # contradictory rejection. Runtime input surfaces that response without
         # writing a second terminal edge.
@@ -401,10 +420,11 @@ class SessionCore(ABC):
         (both lock-free); this method owns the lock and the turn guard.
         """
         async with self._send_lock:
+            self._submission_delivery_uncertain = False
+            self._submission_outcome_uncertain = False
             await self._prepare_for_send()
             self.check_delivery_admission()
             self._delivery_uncertain = False
-            self._submission_outcome_uncertain = False
             self._begin_turn()
             try:
                 if images:
@@ -585,6 +605,8 @@ class SessionCore(ABC):
         """Makes a guarded constructive rotation the active conversation."""
         self._conversation_id = conversation_id
         self._conversation_id_verified = False
+        self._hub_runtime_guidance_injected = False
+        self._dot_hidden_system_pack_delivered = False
 
     async def discard_rotated_conversation(self, conversation_id: str) -> None:
         """Releases a candidate rejected before its identity was adopted."""
@@ -846,6 +868,8 @@ class SessionCore(ABC):
                 raise
         self._conversation_id = conversation_id
         self._conversation_id_verified = True
+        self._hub_runtime_guidance_injected = False
+        self._dot_hidden_system_pack_delivered = False
 
     def maybe_capture_conversation_id(self, record: Dict[str, Any]) -> None:
         """Provider-specific hook to extract the conversation id from a record.

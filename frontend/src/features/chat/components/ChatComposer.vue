@@ -74,6 +74,16 @@
         {{ composerError }}
       </div>
 
+      <div
+        v-if="capabilities?.adapter_id === 'maso_http' && capabilities.recovery_required"
+        class="composer-recovery"
+        role="status"
+      >
+        Stop will recover this Chat. If delivery was not confirmed, recovery creates
+        a new provider session with completed messages carried over as text.
+        Prior images and tool state are not transferred.
+      </div>
+
       <!-- Diff review comments stay next to the composer until sent as one
            message through the ordinary queue. -->
       <ChatReviewTray />
@@ -374,6 +384,12 @@ const { isManagedChat, connectionState, capabilities, appStore, props } = requir
 }
 
 .attachment-preview { width: 100%; height: 100%; padding: 0; display: flex; border: 0; background: transparent; cursor: zoom-in; }
+
+.composer-recovery {
+  padding: 6px 0;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
 
 .composer-hints {
   display: flex;

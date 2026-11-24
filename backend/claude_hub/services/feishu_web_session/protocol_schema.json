@@ -261,6 +261,12 @@
         4,
         9,
         false
+      ],
+      [
+        "origin",
+        2,
+        "lark_entities_Image",
+        false
       ]
     ],
     "lark_entities_ImageSetV2": [
@@ -489,9 +495,27 @@
         false
       ],
       [
+        "sendToChat",
+        8,
+        8,
+        false
+      ],
+      [
         "version",
         9,
         5,
+        false
+      ],
+      [
+        "isThreadGroupTopic",
+        10,
+        8,
+        false
+      ],
+      [
+        "isAnonymous",
+        11,
+        8,
         false
       ],
       [
@@ -501,10 +525,82 @@
         false
       ],
       [
+        "isEncrypted",
+        13,
+        8,
+        false
+      ],
+      [
         "atUserIdList",
         14,
         3,
         true
+      ],
+      [
+        "isShare",
+        15,
+        8,
+        false
+      ],
+      [
+        "aiInfoContext",
+        16,
+        "lark_entities_AIInfoContext",
+        false
+      ],
+      [
+        "syncToChat",
+        17,
+        8,
+        false
+      ],
+      [
+        "partialReplyInfo",
+        18,
+        "lark_entities_PartialReplyInfo",
+        false
+      ],
+      [
+        "isSmartReply",
+        19,
+        8,
+        false
+      ],
+      [
+        "isMentionDoubao",
+        20,
+        8,
+        false
+      ],
+      [
+        "larkAgentContext",
+        21,
+        "lark_messages_LarkAgentContext",
+        false
+      ],
+      [
+        "urlPreviewContext",
+        22,
+        "lark_messages_PutMessageRequest_URLPreviewContext",
+        false
+      ],
+      [
+        "leftStaticResourceKeys",
+        101,
+        9,
+        true
+      ],
+      [
+        "thriftMessage",
+        102,
+        12,
+        false
+      ],
+      [
+        "msgId",
+        103,
+        3,
+        false
       ]
     ],
     "lark_messages_PutMessageRequest_Content": [
@@ -1215,6 +1311,20 @@
         false
       ]
     ],
+    "Status": [
+      [
+        "code",
+        1,
+        5,
+        false
+      ],
+      [
+        "msg",
+        2,
+        9,
+        false
+      ]
+    ],
     "Packet": [
       [
         "sid",
@@ -1328,6 +1438,160 @@
         "end",
         2,
         9,
+        false
+      ]
+    ],
+    "lark_entities_RichTextElement_ImageProperty": [
+      [
+        "imageKey",
+        2,
+        9,
+        false
+      ]
+    ],
+    "lark_entities_Image": [
+      [
+        "key",
+        1,
+        9,
+        false
+      ]
+    ],
+    "lark_entities_QuickActionInfo": [
+      [
+        "actionId",
+        1,
+        9,
+        false
+      ],
+      [
+        "inputMap",
+        2,
+        [
+          "map",
+          9,
+          9
+        ],
+        true
+      ],
+      [
+        "caller",
+        3,
+        9,
+        false
+      ],
+      [
+        "actionType",
+        4,
+        5,
+        false
+      ]
+    ],
+    "lark_entities_AISceneObject": [
+      [
+        "objectId",
+        1,
+        9,
+        false
+      ],
+      [
+        "objectType",
+        2,
+        9,
+        false
+      ]
+    ],
+    "lark_entities_ChatContext": [
+      [
+        "extraMap",
+        1,
+        [
+          "map",
+          9,
+          9
+        ],
+        true
+      ],
+      [
+        "object",
+        2,
+        "lark_entities_AISceneObject",
+        false
+      ]
+    ],
+    "lark_entities_AtAIInChatInfo": [
+      [
+        "isAtAiInChat",
+        1,
+        8,
+        false
+      ]
+    ],
+    "lark_entities_AIInfoContext": [
+      [
+        "aiChatModeId",
+        1,
+        3,
+        false
+      ],
+      [
+        "quickActionInfo",
+        3,
+        "lark_entities_QuickActionInfo",
+        false
+      ],
+      [
+        "chatContext",
+        4,
+        "lark_entities_ChatContext",
+        false
+      ],
+      [
+        "atAiInChatInfo",
+        5,
+        "lark_entities_AtAIInChatInfo",
+        false
+      ],
+      [
+        "isNewTopic",
+        6,
+        8,
+        false
+      ],
+      [
+        "rootRoundId",
+        7,
+        3,
+        false
+      ]
+    ],
+    "lark_entities_PartialReplyInfo": [
+      [
+        "content",
+        1,
+        "lark_entities_RichText",
+        false
+      ],
+      [
+        "position",
+        2,
+        5,
+        false
+      ]
+    ],
+    "lark_messages_LarkAgentContext": [
+      [
+        "activeChatId",
+        1,
+        9,
+        false
+      ]
+    ],
+    "lark_messages_PutMessageRequest_URLPreviewContext": [
+      [
+        "sendScene",
+        1,
+        5,
         false
       ]
     ]

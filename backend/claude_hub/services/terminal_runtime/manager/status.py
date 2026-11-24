@@ -296,7 +296,10 @@ class ManagerStatusMixin(ManagerHost):
             from ... import workspace_manager
 
             for task in list(getattr(workspace_manager, "tasks", {}).values()):
-                if task.status in {WorkspaceTaskStatus.DONE, WorkspaceTaskStatus.FAILED}:
+                if task.status in {
+                    WorkspaceTaskStatus.DONE,
+                    WorkspaceTaskStatus.FAILED,
+                }:
                     continue
                 matched = bool(
                     (
@@ -408,7 +411,11 @@ class ManagerStatusMixin(ManagerHost):
             # Deferred import: the agent_stream package imports this manager's
             # module graph, so a module-level import would be circular. The
             # inbox wording lives next to the tool labels that use it.
-            from ...agent_stream.activity_labels import IDLE_DETAIL
+            from ...agent_stream.activity_labels import (
+                IDLE_DETAIL,
+                UNCERTAIN_DELIVERY_DETAIL,
+            )
+            from ...managed_chat import _maso_delivery_uncertain_for_ids
 
             native = self._runtime.get_tab_native_runtime_snapshot(tab_id)
             # Producers older than the inbox contract pass a bare snapshot, so
@@ -417,7 +424,14 @@ class ManagerStatusMixin(ManagerHost):
             activity = getattr(native, "activity", None) if native else None
             activity_since = getattr(native, "activity_since", None) if native else None
             if native is None:
-                if self._runtime.native_provider_binary_available(process.agent_type):
+                if _maso_delivery_uncertain_for_ids(
+                    *tab_stream_identity(
+                        process.tab_id, process.workspace_id, process.managed_session_id
+                    )
+                ):
+                    native_runtime_status = AgentRuntimeStatus.ATTENTION
+                    native_detail = UNCERTAIN_DELIVERY_DETAIL
+                elif self._runtime.native_provider_binary_available(process.agent_type):
                     native_runtime_status = AgentRuntimeStatus.IDLE
                     native_detail = IDLE_DETAIL
                 else:

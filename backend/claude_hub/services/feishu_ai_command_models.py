@@ -414,6 +414,7 @@ class FeishuAiCommandConfig:
     footer: str = DEFAULT_AI_COMMAND_FOOTER
     reply_in_thread: bool = True
     send_mode: str = DEFAULT_AI_COMMAND_SEND_MODE
+    web_bot_chat_ids: dict[str, str] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         out = asdict(self)
@@ -468,6 +469,16 @@ class FeishuAiCommandConfig:
                 f"Invalid send_mode {raw_send_mode!r}; expected one of: {allowed_modes}"
             )
 
+        mappings = data.get("web_bot_chat_ids") or {}
+        if not isinstance(mappings, Mapping) or any(
+            not isinstance(k, str)
+            or not k.isascii()
+            or not k.isdigit()
+            or not isinstance(v, str)
+            or not re.fullmatch(r"oc_[A-Za-z0-9_]+", v)
+            for k, v in mappings.items()
+        ):
+            raise ValueError("web_bot_chat_ids must map numeric Web chat IDs to oc_ IDs")
         kw: dict[str, Any] = {
             "enabled": bool(data.get("enabled", False)),
             "prefix": prefix,
@@ -487,6 +498,7 @@ class FeishuAiCommandConfig:
             "footer": s("footer", DEFAULT_AI_COMMAND_FOOTER),
             "reply_in_thread": bool(data.get("reply_in_thread", True)),
             "send_mode": raw_send_mode,
+            "web_bot_chat_ids": dict(mappings),
         }
         return cls(**kw)
 
@@ -795,6 +807,10 @@ def build_ai_dispatch_prompt(
         f"Command instruction: {parsed.instruction or '(follow up on the conversation context below)'}",
         f"Chat ID: {message.chat_id}",
     ]
+    if message.image_refs or any(ctx.image_refs for ctx in context_messages):
+        lines.append(
+            "Image attachments accompany this turn; inspect the actual images, not resource identifiers."
+        )
     if message.thread_id:
         lines.append(f"Thread ID: {message.thread_id}")
     if refs.mr_refs:
@@ -808,7 +824,8 @@ def build_ai_dispatch_prompt(
         for ctx in context_messages[-30:]:
             safe_text = ctx.text.replace("<", "&lt;").replace(">", "&gt;")
             lines.append(
-                f"[{ctx.message_id} · sender={ctx.sender_open_id} · type={ctx.msg_type}] {safe_text}"
+                f"[{ctx.message_id} · sender={ctx.sender_open_id} · type={ctx.msg_type}"
+                f" · has_images={ctx.has_images}] {safe_text}"
             )
         lines.append("</feishu_thread_context>")
     return "\n".join(lines)

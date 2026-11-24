@@ -266,8 +266,8 @@ test('a rejected group bind reports a readable reason and reconciles the pool', 
   await h.api.resume()
   const reads = h.calls.length
   assert.equal(await h.api.bindGroup('oc-group'), false)
-  assert.match(h.api.error.value, /already connected to another Bot/)
-  assert.equal(h.api.viewState.value, 'error')
+  assert.match(h.api.groupBindError.value, /already connected to another Bot/)
+  assert.equal(h.api.viewState.value, 'unbound')
   assert.equal(h.api.isMutating.value, false)
   assert.equal(h.api.groupsError.value, null)
   assert.equal(h.calls.length, reads + 1, 'a 409 reconciles the pool before another action')
@@ -383,4 +383,32 @@ test('releasing a single channel in per_channel mode sends pairing_id and retain
   assert.deepEqual(releasedCalls, [{ botId: 'a', revision: 2, pairingId: 'pair-dm' }])
   assert.equal(h.api.selectedBotId.value, 'a')
   assert.deepEqual(h.api.bindings.value.map(item => item.pairing_id), ['pair-group'])
+})
+
+test('group bind failure keeps recovery reachable and reload clears only after success', async t => {
+  let reads = 0
+  const h = bindingHarness(t, {
+    listChats: async () => {
+      reads += 1
+      if (reads === 2) throw new config.FeishuBotRequestError(502, 'bot_chats_unavailable', 'Permission unavailable')
+      return chatList(reads === 1 ? [] : [groupChat('group-new')], 2)
+    },
+    bindGroup: async () => { throw new config.FeishuBotRequestError(422, 'chat_not_visible', 'Cannot see group') },
+  })
+  const initial = pool(2, [bot('a', { mode: 'per_channel', revision: 2 }), bot('b')])
+  h.setServer(initial)
+  await h.api.resume()
+  await h.api.loadGroups()
+  assert.equal(await h.api.bindGroup('group-new'), false)
+  assert.equal(h.api.viewState.value, 'unbound')
+  assert.equal(h.api.groupBindError.value, 'Cannot see group')
+  assert.equal(await h.api.loadGroups(), false)
+  assert.equal(h.api.groupBindError.value, 'Cannot see group')
+  assert.equal(h.api.groupsError.value, 'Permission unavailable')
+  assert.equal(await h.api.loadGroups(), true)
+  assert.equal(h.api.groupBindError.value, null)
+  assert.equal(h.api.groups.value[0].chat_id, 'group-new')
+  h.api.selectBot('b')
+  assert.deepEqual(h.api.groups.value, [])
+  assert.equal(h.api.groupBindError.value, null)
 })

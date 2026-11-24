@@ -28,6 +28,8 @@ from claude_hub.models import (
     WorkspaceTask,
     WorkspaceTaskUpdate,
 )
+from claude_hub.models.schema_domains.requests import ReconcileTerminalDeliveryRequest
+from claude_hub.models.schema_domains.sessions import TerminalDeliveryReconciliation
 from claude_hub.models.schemas import (
     TaskExecutionCapabilities,
     TaskExecutionHandoffRequest,
@@ -65,6 +67,7 @@ class WorkspaceExecutionEndpoints:
     unarchive_session: Callable[..., Any]
     delete_session: Callable[..., Any]
     send_session_message: Callable[..., Any]
+    reconcile_terminal_delivery: Callable[..., Any]
     retry_uncertain_delivery: Callable[..., Any]
     create_session_report: Callable[..., Any]
     task_execution_capabilities: Callable[..., Any]
@@ -323,6 +326,25 @@ def register_execution_routes(
         except (RuntimeError, ValueError) as e:
             raise HTTPException(status_code=400, detail=str(e)) from e
 
+    @router.post(
+        "/sessions/{managed_session_id}/reconcile-terminal",
+        response_model=TerminalDeliveryReconciliation,
+    )
+    async def reconcile_terminal_delivery(
+        managed_session_id: str,
+        payload: ReconcileTerminalDeliveryRequest,
+        current_user: User = Depends(get_current_user),
+    ) -> TerminalDeliveryReconciliation:
+        """Record operator closure of terminal delivery, without a receiver ACK."""
+        try:
+            return await bindings.workspace_manager().reconcile_terminal_delivery(
+                managed_session_id, payload, actor=current_user.open_id
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="Session not found") from exc
+        except (ValueError, RuntimeError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
     @router.post("/sessions/{managed_session_id}/retry-uncertain", status_code=204)
     async def retry_uncertain_delivery(
         managed_session_id: str,
@@ -453,6 +475,7 @@ def register_execution_routes(
         unarchive_session=unarchive_session,
         delete_session=delete_session,
         send_session_message=send_session_message,
+        reconcile_terminal_delivery=reconcile_terminal_delivery,
         retry_uncertain_delivery=retry_uncertain_delivery,
         create_session_report=create_session_report,
         task_execution_capabilities=task_execution_capabilities,

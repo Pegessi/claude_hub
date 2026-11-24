@@ -60,6 +60,7 @@ class CodexProtocolSession(CodexConfiguredSession):
             self._cancel_state = None
         self._native_stop_requires_confirmation = False
         self._delivery_uncertain = False
+        self._submission_delivery_uncertain = False
         self._submission_outcome_uncertain = False
         self._pending_questions.clear()
         self._clear_staged_images()
@@ -254,6 +255,7 @@ class CodexProtocolSession(CodexConfiguredSession):
             ):
                 self._provider_turn_id = turn_id
             self._delivery_uncertain = False
+            self._submission_delivery_uncertain = False
         except asyncio.CancelledError:
             claimed_id = self._turn_start_claimed_id_while_pending
             claimed_completed = (
@@ -262,6 +264,7 @@ class CodexProtocolSession(CodexConfiguredSession):
             if self._turn_start_claimed_while_pending and not claimed_completed:
                 self._native_stop_requires_confirmation = True
                 self._delivery_uncertain = True
+                self._submission_delivery_uncertain = True
             elif not self._turn_start_claimed_while_pending:
                 inflight = self._inflight_images
                 self._inflight_images = []
@@ -280,6 +283,7 @@ class CodexProtocolSession(CodexConfiguredSession):
                 # execution it could not correlate to this request.
                 self._native_stop_requires_confirmation = False
                 self._delivery_uncertain = False
+                self._submission_delivery_uncertain = False
                 self._last_error = None
                 if isinstance(exc, ProviderRpcError):
                     self._submission_outcome_uncertain = True
@@ -292,6 +296,7 @@ class CodexProtocolSession(CodexConfiguredSession):
                 # only matching completion or confirmed Stop may release it.
                 self._native_stop_requires_confirmation = True
                 self._delivery_uncertain = True
+                self._submission_delivery_uncertain = True
                 self._last_error = None
             else:
                 # No provider start was observed. The turn never crossed the

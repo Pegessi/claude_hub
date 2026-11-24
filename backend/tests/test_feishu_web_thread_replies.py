@@ -23,6 +23,8 @@ async def test_thread_followup_keeps_original_root(tmp_path: Any, monkeypatch: A
     client = FeishuWebClient(FeishuWebSessionStore(tmp_path / "session.json"))
 
     async def call(command: str, body: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
+        if command == "PullChatsByIdsRequest":
+            return {"chats": {chat_id: {"id": chat_id, "chatMode": 1}}}
         assert command == "PutMessageRequest"
         requests.append(body)
         return {
@@ -60,6 +62,8 @@ async def test_incoming_thread_metadata_survives_fresh_transport(
     client = FeishuWebClient(FeishuWebSessionStore(tmp_path / "session.json"))
 
     async def call(command: str, body: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
+        if command == "PullChatsByIdsRequest":
+            return {"chats": {chat_id: {"id": chat_id, "chatMode": 1}}}
         assert command == "PutMessageRequest"  # PullMessagesByIdsRequest is unavailable.
         requests.append(body)
         return {"message": {"id": "7400000000000000004", "chatId": chat_id}}
@@ -92,3 +96,61 @@ async def test_incoming_thread_metadata_survives_fresh_transport(
     assert requests[0]["parentId"] == message_id
     assert requests[0]["rootId"] == root_id
     assert requests[0]["isReplyInThread"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", [1, 2, 3])
+@pytest.mark.parametrize("shape", ["quote", "topic"])
+@pytest.mark.parametrize("lookup", ["found", "empty", "fail"])
+async def test_reply_chat_mode_matrix(mode: int, shape: str, lookup: str) -> None:
+    from claude_hub.services.feishu_web_session.client import FeishuWebSessionError
+    from claude_hub.services.feishu_web_session.rich import chat_of
+
+    chat_id, message_id, root_id = (
+        "7400000000000000001",
+        "7400000000000000002",
+        "7400000000000000003",
+    )
+
+    class Gateway:
+        def __init__(self) -> None:
+            self.sent: list[Any] = []
+
+        async def chats(self, ids: Any) -> dict[str, Any]:
+            if lookup == "fail":
+                raise TimeoutError("lookup failed before sending")
+            return (
+                {chat_id: chat_of({"id": chat_id, "chatMode": mode})} if lookup == "found" else {}
+            )
+
+        async def send(self, out: Any) -> WebMessage:
+            self.sent.append(out)
+            return WebMessage(id="7400000000000000004", chat_id=chat_id)
+
+    gateway = Gateway()
+    transport = FeishuWebUserTransport(gateway)  # type: ignore[arg-type]
+    transport._remember_msg(
+        WebMessage(
+            id=message_id,
+            chat_id=chat_id,
+            root_id=root_id,
+            thread_id=root_id,
+            position=4,
+            topic_position=2 if shape == "topic" else None,
+        )
+    )
+    if shape == "topic" and lookup != "found":
+        with pytest.raises(FeishuWebSessionError):
+            await transport.reply_message(message_id, "text", {"text": "reply"}, chat_id=chat_id)
+        assert not gateway.sent
+        return
+    await transport.reply_message(message_id, "text", {"text": "reply"}, chat_id=chat_id)
+    out = gateway.sent[0]
+    if shape == "topic" and mode in (2, 3):
+        assert (out.reply_to.id, out.reply_to.root_id, out.in_thread) == (root_id, root_id, False)
+    else:
+        assert (out.reply_to.id, out.reply_to.root_id, out.in_thread) == (
+            message_id,
+            root_id,
+            shape == "topic",
+        )

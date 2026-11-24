@@ -7,7 +7,10 @@ import logging
 import threading
 import time
 from collections import OrderedDict
+from dataclasses import replace
 from typing import Any, Mapping
+
+import httpx
 
 from claude_hub.services.feishu_bot import (
     FeishuChatInfo,
@@ -26,6 +29,7 @@ from claude_hub.services.feishu_user_client import (
 )
 from claude_hub.services.feishu_user_token_store import FeishuUserTokenRecord
 from claude_hub.services.feishu_web_session.client import (
+    FeishuWebChatModeUnavailableError,
     FeishuWebClient,
     FeishuWebFrontierListener,
     FeishuWebQRLoginExpiredError,
@@ -45,6 +49,8 @@ from claude_hub.services.feishu_web_session.rich import (
     describe,
     extract_text_and_title_from_openapi_content,
     formatted_out,
+    has_images,
+    image_keys,
 )
 from claude_hub.services.feishu_web_session.store import (
     FeishuWebSession,
@@ -61,7 +67,13 @@ _MAX_CACHED_MESSAGES = 1024
 
 def is_in_topic(msg: WebMessage) -> bool:
     """Return True if ``msg`` was written inside a thread/topic (`agent.go:inTopic`)."""
-    return bool(msg.root_id) or bool(msg.thread_id and msg.thread_id != msg.id)
+    if msg.topic_position is not None:
+        return True  # Explicit protocol thread coordinate or topic-endpoint provenance.
+    # Main-chat quoted replies also carry root/thread IDs. A positive main-chat
+    # position is not a topic reply; restored records may have no position.
+    if msg.position > 0:
+        return False
+    return bool(msg.thread_id and msg.thread_id != msg.id) or bool(msg.position < 0 and msg.root_id)
 
 
 def matches_authorized_owner_sender(
@@ -505,6 +517,16 @@ class FeishuWebUserTransport:
             return self._open_to_web_chat.get(clean, clean)
         return clean
 
+    async def resolve_open_chat_id(self, chat_id: str) -> str | None:
+        """Resolve a Web chat to its explicit OpenAPI identity; never guess IDs."""
+        clean = chat_id.strip()
+        if clean.startswith("oc_"):
+            return clean
+        if clean not in self._web_to_open_chat:
+            for chat in (await self._web.chats([clean])).values():
+                self._remember_chat(chat)
+        return self._web_to_open_chat.get(clean)
+
     def bind_message_alias(self, openapi_message_id: str, web_message_id: str) -> None:
         om = (openapi_message_id or "").strip()
         wm = (web_message_id or "").strip()
@@ -560,13 +582,43 @@ class FeishuWebUserTransport:
             chat_id=msg.chat_id,
             sender_open_id=sender_id,
             sender_type="user",
-            msg_type="post" if msg.type == 2 else "text",
+            msg_type="post" if msg.type == 2 else "image" if msg.type == 5 else "text",
             text=text,
             create_time_ms=msg.create_time_ms,
             thread_id=thread_id,
             parent_id=msg.parent_id or None,
             root_id=msg.root_id or None,
+            has_images=has_images(msg.type, msg.content),
+            image_refs=tuple((msg.id, key) for key in image_keys(msg.type, msg.content)),
         )
+
+    async def download_message_image(self, message: FeishuUserMessage, key: str) -> bytes:
+        from urllib.parse import quote, urlencode
+
+        from claude_hub.services.feishu_user_media import read_image_response
+
+        session = self._web._require_session()
+        authorized, _ = is_web_session_authorized_for_owner(
+            session, self._owner_open_id or None, api_base_url=self._api_base_url
+        )
+        if not authorized:
+            raise FeishuWebSignedOutError("Personal image session does not match the owner")
+        if (
+            not is_web_entity_id(message.message_id)
+            or not is_web_entity_id(message.chat_id)
+            or (message.message_id, key) not in message.image_refs
+        ):
+            raise FeishuWebSessionError("Image resource does not belong to this Web message")
+        url = (
+            f"https://internal-api-lark-file.{session.domain()}/download/messages/"
+            f"{quote(message.message_id, safe='')}/keys/{quote(key, safe='')}?"
+            + urlencode({"chat_id": message.chat_id})
+        )
+        headers = self._web.headers(session)
+        if self._web._external_http is not None:
+            return await read_image_response(self._web._external_http, url, headers)
+        async with httpx.AsyncClient(timeout=30) as http:
+            return await read_image_response(http, url, headers)
 
     async def resolve_web_chat_id(self, chat_id: str) -> str:
         clean = (chat_id or "").strip()
@@ -887,14 +939,6 @@ class FeishuWebUserTransport:
             raise FeishuWebSessionError("missing message_id for web reply")
         if is_web_entity_id(clean_mid):
             target_msg = self._msg_cache.get(clean_mid)
-            if target_msg is None:
-                try:
-                    fetched = await self._web.messages_by_id([clean_mid])
-                    if fetched:
-                        target_msg = fetched[0]
-                        self._remember_msg(target_msg)
-                except Exception:
-                    pass
         else:
             mapped_id = self._open_to_web_msg.get(clean_mid)
             target_msg = self._msg_cache.get(mapped_id) if mapped_id else None
@@ -902,6 +946,17 @@ class FeishuWebUserTransport:
                 raise FeishuWebSessionError(
                     f"Cannot reply via Feishu web gateway to unresolved OpenAPI message_id {clean_mid!r}"
                 )
+
+        # A fresh per-turn transport may only have normalized queue metadata.
+        if target_msg is None or (target_msg.position == 0 and target_msg.topic_position is None):
+            try:
+                web_mid = target_msg.id if target_msg is not None else clean_mid
+                fetched = await self._web.messages_by_id([web_mid])
+                if fetched:
+                    target_msg = fetched[0]
+                    self._remember_msg(target_msg)
+            except Exception:
+                pass  # Explicit normalized thread_id remains usable; root alone does not.
 
         raw_chat_id = (chat_id or (target_msg.chat_id if target_msg else "")).strip()
         web_chat_id = await self.resolve_web_chat_id(raw_chat_id)
@@ -914,14 +969,40 @@ class FeishuWebUserTransport:
         # Explicit thread replies apply to P2P chats as well as groups. Existing
         # topic replies must stay in their topic even without the explicit flag.
         effective_in_thread = bool(reply_in_thread) or is_in_topic(target_msg)
+        chat = self._chat_cache.get(web_chat_id)
+        if chat is None and effective_in_thread:
+            try:
+                chats = await self._web.chats([web_chat_id])
+            except Exception as exc:
+                raise FeishuWebChatModeUnavailableError(
+                    f"cannot determine chat mode for threaded reply to {clean_mid}"
+                ) from exc
+            chat = chats.get(web_chat_id)
+            if chat is None:
+                raise FeishuWebChatModeUnavailableError(
+                    f"cannot determine chat mode for threaded reply to {clean_mid}"
+                )
+            self._remember_chat(chat)
+        # Official Messenger distinguishes topic-group replies from ordinary
+        # chat message threads: field 12 is true only for the latter.
+        wire_in_thread = effective_in_thread and not (chat is not None and chat.thread)
+
+        reply_target = target_msg
+        if reply_in_thread and not is_in_topic(target_msg):
+            reply_target = replace(target_msg, root_id="", thread_id="")
+        if chat is not None and chat.thread and effective_in_thread:
+            topic_root = reply_target.root_id or reply_target.thread_id or reply_target.id
+            reply_target = replace(reply_target, id=topic_root, root_id=topic_root)
 
         text, title = extract_text_and_title_from_openapi_content(msg_type, content)
         out = formatted_out(
             WebOut(
                 chat=web_chat_id,
                 title=title,
-                reply_to=target_msg,
-                in_thread=effective_in_thread,
+                # Starting a topic on a main-chat quote must use this message,
+                # not the earlier message it quotes, as the new topic root.
+                reply_to=reply_target,
+                in_thread=wire_in_thread,
                 cid=(uuid or "").strip(),
             ),
             text,
@@ -931,8 +1012,10 @@ class FeishuWebUserTransport:
             raise FeishuDeliveryUncertainError(
                 "Feishu web reply message identity is unavailable; delivery may have occurred"
             )
+        sent_thread = (sent.thread_id or sent.root_id) if effective_in_thread else None
+        if sent_thread and not sent.thread_id:
+            sent = replace(sent, thread_id=sent_thread)
         self._remember_msg(sent)
-        sent_thread = (sent.thread_id or sent.root_id) if is_in_topic(sent) else None
         return FeishuReplyReceipt(message_id=sent.id, thread_id=sent_thread)
 
     async def search_messages_page(

@@ -49,7 +49,11 @@ class _ChatMixin(_WorkspaceManagerBase):
             if existing is not None:
                 if existing != fingerprint:
                     raise ValueError("call_id already identifies a different message")
-                if call_id in current.processing_call_ids or call_id in current.delivered_call_ids:
+                if (
+                    call_id in current.processing_call_ids
+                    or call_id in current.delivered_call_ids
+                    or call_id in current.reconciled_deliveries
+                ):
                     return
         lock = self._pump_locks.setdefault(session_id, asyncio.Lock())
         async with self.workspace_mutation_lock(current.workspace_id):
@@ -92,7 +96,11 @@ class _ChatMixin(_WorkspaceManagerBase):
         if call_id and call_id in session.call_payload_fingerprints:
             if session.call_payload_fingerprints[call_id] != fingerprint:
                 raise ValueError("call_id already identifies a different message")
-            if call_id in session.processing_call_ids or call_id in session.delivered_call_ids:
+            if (
+                call_id in session.processing_call_ids
+                or call_id in session.delivered_call_ids
+                or call_id in session.reconciled_deliveries
+            ):
                 return
         if session.status == ManagedSessionStatus.STOPPED:
             raise ValueError("The managed Chat session has been stopped")

@@ -238,6 +238,9 @@ class WorkspaceTask(BaseModel):
     # NOTE: delivered_call_ids == "processed by the worker", not "sent by the
     # Hub". A call_id stays in pending_call_ids until the worker ACKs it.
     delivered_call_ids: List[str] = Field(default_factory=list)
+    # Operator terminal closure, distinct from a worker-processed ACK. Keep a
+    # Task tombstone across worker reassignment and resident-session removal.
+    reconciled_call_ids: List[str] = Field(default_factory=list)
     # Call ids persisted in the outbox (sender side) whose message sits in the
     # session's pending_messages inbox awaiting pump delivery. The sender only
     # ever appends here; it never sends to tmux directly. On restart, every

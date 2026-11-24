@@ -7,6 +7,18 @@ from claude_hub.services.workspace_manager._constants import *  # noqa: F401,F40
 
 
 class _MessageDeliveryMixin(_WorkspaceManagerBase):
+    def _delivery_envelope(
+        self, session: ManagedSession, message: str, call_id: str
+    ) -> tuple[str, list[WorkspaceAttachment]]:
+        """Build the same immutable provider envelope for sending and verification."""
+        persisted = session.pending_attachments.get(call_id, [])
+        native_attachments: list[WorkspaceAttachment] = []
+        if session.session_kind == SessionKind.CHAT:
+            native_attachments = [item for item in persisted if item.mime_type.startswith("image/")]
+            persisted = [item for item in persisted if not item.mime_type.startswith("image/")]
+        full_message = self._append_attachment_block(f"[call_id:{call_id}]\n{message}", persisted)
+        return full_message, native_attachments
+
     async def send_session_message(
         self,
         session_id: str,
@@ -63,7 +75,11 @@ class _MessageDeliveryMixin(_WorkspaceManagerBase):
                         "cannot mutate a committed delivery. Use a new call_id for a "
                         "different message."
                     )
-                if call_id in current.processing_call_ids or call_id in current.delivered_call_ids:
+                if (
+                    call_id in current.processing_call_ids
+                    or call_id in current.delivered_call_ids
+                    or call_id in current.reconciled_deliveries
+                ):
                     return
         lock = self._pump_locks.setdefault(session_id, asyncio.Lock())
         async with self.workspace_mutation_lock(current.workspace_id):
@@ -129,6 +145,10 @@ class _MessageDeliveryMixin(_WorkspaceManagerBase):
             # resume_existing_call, which operates on the persisted envelope
             # without comparing fingerprints.
             existing_fp = session.call_payload_fingerprints.get(call_id)
+            if call_id in session.reconciled_deliveries:
+                if existing_fp != new_fp:
+                    raise ValueError("Reconciled delivery payload cannot change")
+                return
 
             # ------------------------------------------------------------------
             # Legacy backfill: a call_id may be present in a state list
@@ -361,6 +381,9 @@ class _MessageDeliveryMixin(_WorkspaceManagerBase):
         if session_id not in self.sessions:
             raise KeyError(f"session {session_id} not found")
         session = self.sessions[session_id]
+
+        if call_id in session.reconciled_deliveries:
+            return True
 
         if call_id in session.uncertain_call_ids:
             raise DeliveryUncertain(
@@ -598,25 +621,16 @@ class _MessageDeliveryMixin(_WorkspaceManagerBase):
             # ---- SEND to tmux ----
             # The [call_id:<id>] marker lets the worker correlate its ACK.
             # It is NOT used by the Hub as a receipt or dedup basis.
-            marker = f"[call_id:{call_id}]"
             try:
                 # Attachments were already persisted by send_session_message
                 # into session.pending_attachments[call_id]. Retrieve them
                 # here so the delivered message includes the attachment
                 # block. We do NOT re-persist (that would duplicate files).
-                persisted = session.pending_attachments.get(call_id, [])
                 self._assert_session_seat(self.sessions[session_id])
                 await self._ensure_session_ready_for_send(self.sessions[session_id])
-                full_message = f"{marker}\n{message}"
-                native_attachments: list[WorkspaceAttachment] = []
-                if session.session_kind == SessionKind.CHAT:
-                    native_attachments = [
-                        item for item in persisted if item.mime_type.startswith("image/")
-                    ]
-                    persisted = [
-                        item for item in persisted if not item.mime_type.startswith("image/")
-                    ]
-                full_message = self._append_attachment_block(full_message, persisted)
+                full_message, native_attachments = self._delivery_envelope(
+                    session, message, call_id
+                )
             except SessionSeatMismatch:
                 logger.exception(
                     "pump: session seat mismatch for call_id=%s session %s; "

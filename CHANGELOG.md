@@ -7,6 +7,52 @@
 
 ## Released
 
+### fix(feishu): protect reply delivery and context
+
+- Reject replies when the group mode is unknown, distinguish uncertain sends from read failures, and disclose missing quoted context.
+- Page mention searches without stalling and split user-client models to keep the module maintainable.
+
+### fix(feishu): distinguish topic-group replies and verify Bot chat mappings
+
+- Match official Web Messenger topic-group reply flags and complete the PutMessageRequest envelope schema.
+- Accept explicit Web-to-Bot chat mappings only for Bot-visible groups, and reject numeric owner IDs as Bot OpenIDs.
+
+### fix(feishu): diagnose Web gateway rejections and recover auto replies
+
+- Record bounded, sanitized gateway error codes, request structure and trace IDs in logs and `/ai` run reasons without response bodies, message text or credentials.
+- Allow `auto` replies rejected by the Web gateway to use configured Bot replies through explicit message/chat mappings or the permitted owner DM fallback. Preserve explicit Web routing and never retry uncertain delivery or server errors through a Bot.
+
+### fix(workspace): reconcile terminal Chat deliveries without impersonating worker ACKs
+
+- Add an authenticated operator API for individually closing retained processing
+  envelopes against durable accepted-turn terminal evidence. Keep failed and
+  completed dispositions separate from receiver ACK and Task/review acceptance.
+- Persist actor, reason, operation identity and evidence atomically with outbox
+  closure; preserve original envelopes and prevent replay after restart. Reject
+  stale bindings, active/uncertain deliveries and mismatched stream evidence.
+- Close initialization and historical reviewer deliveries against their session
+  lifecycle, preserving original mailbox provenance when known and never
+  attributing legacy messages to the resident's currently assigned Task.
+
+### fix(feishu): recover group binding after lookup failures
+
+- Accept group details that omit the requested chat ID and keep group reload available after a binding error.
+
+### fix(maso): reconcile idle uncertain delivery and close locally rejected turns
+
+- Allow `MasoHttpSession` to auto-reconcile an acknowledged uncertain-delivery quarantine sidecar (`post_acknowledged=true`) before a new send only when MASO confirms the session tree is idle both before and after `GET /api/sessions/{id}/messages/pending/{message_id}` returns `404` with no intervening activity; keep unacknowledged POSTs (`post_acknowledged=false`) fail-closed against auto-reconciliation, and let explicit Stop (`cancel_active_turn`, including cold and legacy targeted Stop) clear quarantine synchronously by deleting pending messages, aborting/exiting the session, and rotating to a fresh MASO session via a crash-safe sidecar adoption journal with re-armed runtime guidance and prior-turn context seeding when POST acknowledgment was uncertain.
+- Surface persisted MASO delivery quarantine (`uncertain` or `abort_required`) as `attention` (`Delivery uncertain — stop or inspect session`) and structured `StreamCapabilities` (`recovery_required`, `quarantined_turn_id`) across direct-tab and managed-chat runtime snapshots, and drive composer Stop recovery from authoritative capability/event state with confirmed teardown rather than English error strings.
+- Distinguish in-flight submission uncertainty from pre-delivery local rejections in `runtime/input.py` so turns rejected before reaching the provider (including retries and scheduled turns under an existing quarantine) immediately emit `error` and `turn_completed(status="failed", delivery_rejected=True)` without leaving open ghost turns.
+
+### fix(feishu): distinguish main-chat quotes from topic replies
+
+- Start a requested topic on the command itself, preserving existing topics and restored-thread reply identity. Preserve explicit protocol thread coordinates (including zero and root position) on message reads and Frontier frames, so THREAD-group replies with positive chat positions retain their existing topic.
+
+- Deliver personal `/ai` direct, rich-text and quoted images through the existing native Agent attachment input. Download under the message owner's Web/OAuth identity, enforce attachment limits and retain image provenance; image read failures remain explicit.
+### fix(dot): deliver notifications and poll personal mentions
+
+- Select the currently routed bot binding and poll personal mentions with a durable watermark.
+
 ### fix(dot): prefer strong scouting verification models
 
 - Rank high-reasoning models ahead of base and inexpensive fallback choices.

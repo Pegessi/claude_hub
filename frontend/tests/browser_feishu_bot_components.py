@@ -488,6 +488,28 @@ async def main(browser_run: BrowserRun) -> None:
                 await fulfill_json(route, pool())
                 return
 
+            if method == "GET" and path == "/api/feishu/bot/bots/bot-created/chats":
+                await fulfill_json(
+                    route,
+                    {
+                        "revision": bot_by_id("bot-created")["revision"],
+                        "chats": [
+                            {
+                                "chat_id": "group-test",
+                                "name": "Test group",
+                                "chat_mode": "topic",
+                                "is_topic_mode": True,
+                                "user_count": 1,
+                                "bot_count": 1,
+                            }
+                        ],
+                    },
+                )
+                return
+            if method == "POST" and path == "/api/feishu/bot/bots/bot-created/bindings/group":
+                await fulfill_json(route, {"detail": "chat_not_visible"}, status=422)
+                return
+
             if method == "GET" and path == "/api/feishu/bot/ai-command":
                 ai_get_calls += 1
                 if ai_get_calls == 1:
@@ -917,6 +939,27 @@ async def main(browser_run: BrowserRun) -> None:
         assert disconnect_call["body"] == {"expected_revision": 5}
         await binding_panel.get_by_role("button", name="Close", exact=True).click()
         await expect(binding_panel).to_have_count(0)
+
+        # A rejected group bind must not hide the group reload control.
+        bot_by_id("bot-created")["mode"] = "per_channel"
+        bot_by_id("bot-created")["revision"] += 1
+        pool_revision += 1
+        await page.evaluate("window.__FEISHU_BOT_TEST__.setTabId('tab-group')")
+        await trigger.click()
+        await binding_panel.get_by_label("Bot", exact=True).select_option("bot-created")
+        await binding_panel.get_by_test_id("feishu-binding-group-select").select_option(
+            "group-test"
+        )
+        await binding_panel.get_by_test_id("feishu-binding-bind-group").click()
+        await expect(binding_panel.get_by_text(re.compile("cannot see that group"))).to_be_visible()
+        await binding_panel.get_by_test_id("feishu-binding-reload-groups").click()
+        await expect(binding_panel.get_by_text(re.compile("cannot see that group"))).to_have_count(
+            0
+        )
+        await binding_panel.get_by_role("button", name="Close", exact=True).click()
+        bot_by_id("bot-created")["mode"] = "single"
+        bot_by_id("bot-created")["revision"] += 1
+        pool_revision += 1
 
         # Avatar failures belong to one Chat/Bot identity, not to the
         # reused panel instance or URL. Bot A's failed request must not

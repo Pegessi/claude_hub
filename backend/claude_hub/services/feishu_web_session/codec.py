@@ -79,6 +79,7 @@ _PUSH_SCHEMA: dict[str, list[list[Any]]] = {
         ["position", 13, 5, False],
         ["threadId", 20, 9, False],
         ["isRemoved", 23, 8, False],
+        ["threadPosition", 28, 5, False],
         ["chatType", 46, 5, False],
     ],
     "PushMessagesRequest": [

@@ -13,8 +13,6 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Mapping, Sequence
 
-import httpx
-
 from claude_hub.config import settings
 from claude_hub.models import (
     AgentType,
@@ -22,6 +20,7 @@ from claude_hub.models import (
     StreamModelOption,
     StreamReasoningEffortOption,
 )
+from claude_hub.models.chat_image import ChatImageAttachment
 from claude_hub.services import feishu_ai_workspace
 from claude_hub.services.feishu_ai_command_models import (
     _MASO_MODEL_VARIANTS,
@@ -73,6 +72,8 @@ from claude_hub.services.feishu_ai_command_models import (
 from claude_hub.services.feishu_ai_command_models import (
     validate_ai_command_agent_config,
 )
+from claude_hub.services.feishu_ai_context import fetch_context_and_refs
+from claude_hub.services.feishu_ai_images import message_from_event, prepare_images
 from claude_hub.services.feishu_bot import (
     FeishuMessageDedupStore,
     FeishuMessageEvent,
@@ -96,6 +97,7 @@ from claude_hub.services.feishu_web_session import (
     matches_authorized_owner_sender,
     normalize_and_claim_ai_command_message,
 )
+from claude_hub.services.feishu_web_session.client import FeishuWebChatModeUnavailableError
 from claude_hub.services.local_storage import (
     document_exists,
     read_document,
@@ -659,6 +661,7 @@ class FeishuAiCommandService:
             app_id=cfg.app_id or settings.feishu_app_id or None,
             web_session_store=self._web_session_store,
             send_mode=cfg.send_mode,
+            web_bot_chat_ids=cfg.web_bot_chat_ids,
         )
 
     def preflight_status(
@@ -793,18 +796,7 @@ class FeishuAiCommandService:
             return None
         if not hmac.compare_digest(fetched.sender_open_id.strip(), cfg.owner_open_id.strip()):
             return None
-        return FeishuUserMessage(
-            message_id=event.message_id,
-            chat_id=event.chat_id or fetched.chat_id,
-            sender_open_id=cfg.owner_open_id.strip(),
-            sender_type="user",
-            msg_type=event.message_type or fetched.msg_type,
-            text=event.text,
-            create_time_ms=event.message_created_at_ms or fetched.create_time_ms,
-            thread_id=event.thread_id or fetched.thread_id,
-            parent_id=event.parent_id or fetched.parent_id,
-            root_id=event.root_id or fetched.root_id,
-        )
+        return message_from_event(event, fetched)
 
     async def _fetch_context_and_refs(
         self,
@@ -814,44 +806,7 @@ class FeishuAiCommandService:
         *,
         seeded_context: Sequence[FeishuUserMessage] | None = None,
     ) -> tuple[list[FeishuUserMessage], AiCommandContextRefs]:
-        context_msgs: list[FeishuUserMessage] = list(seeded_context or [])
-        if not context_msgs:
-            if message.thread_id:
-                try:
-                    context_msgs = await client.list_messages(
-                        container_id_type="thread",
-                        container_id=message.thread_id,
-                        sort_type="ByCreateTimeAsc",
-                        page_size=cfg.max_context_messages,
-                    )
-                except Exception:
-                    logger.warning(
-                        "Failed to list Feishu thread messages for %s",
-                        message.thread_id,
-                    )
-            if not context_msgs and message.chat_id:
-                try:
-                    desc_msgs = await client.list_messages(
-                        container_id_type="chat",
-                        container_id=message.chat_id,
-                        sort_type="ByCreateTimeDesc",
-                        page_size=cfg.max_context_messages,
-                    )
-                    context_msgs = list(reversed(desc_msgs))
-                except Exception:
-                    logger.warning("Failed to list Feishu chat messages for %s", message.chat_id)
-            if message.parent_id and all(m.message_id != message.parent_id for m in context_msgs):
-                try:
-                    parent_msg = await client.get_message(message.parent_id)
-                    if parent_msg is not None:
-                        context_msgs.insert(0, parent_msg)
-                except Exception:
-                    pass
-
-        texts = [m.text for m in context_msgs if m.text]
-        if message.text and message.text not in texts:
-            texts.append(message.text)
-        return context_msgs, extract_context_references(texts)
+        return await fetch_context_and_refs(client, message, cfg, seeded_context=seeded_context)
 
     async def _ensure_execution_tab(
         self,
@@ -944,6 +899,8 @@ class FeishuAiCommandService:
         turn_id: str,
         visible_text: str,
         turn_metadata: Mapping[str, Any],
+        *,
+        attachments: list[ChatImageAttachment] | None = None,
     ) -> str:
         return await feishu_ai_workspace.dispatch_managed_turn(
             session,
@@ -952,6 +909,7 @@ class FeishuAiCommandService:
             visible_text,
             turn_metadata,
             dispatcher_seam=self._managed_turn_dispatcher,
+            attachments=attachments,
         )
 
     def _get_tab(self, tab_id: str) -> Any:
@@ -980,9 +938,11 @@ class FeishuAiCommandService:
         turn_id: str,
         visible_text: str,
         turn_metadata: Mapping[str, Any],
+        *,
+        attachments: list[ChatImageAttachment] | None = None,
     ) -> str:
         return await feishu_ai_workspace.dispatch_turn(
-            self, tab_id, prompt, turn_id, visible_text, turn_metadata
+            self, tab_id, prompt, turn_id, visible_text, turn_metadata, attachments=attachments
         )
 
     def _get_managed_session(self, session_id: str) -> Any:
@@ -1135,6 +1095,7 @@ class FeishuAiCommandService:
         final_receipt = FeishuReplyReceipt()
         dispatch_entered = False
         final_reply_started = False
+        retryable_unsent = False
         held_channel_lock: asyncio.Lock | None = None
         turn_completed = resuming_completed
         answer = str(pending_item["answer"]) if resuming_completed and pending_item else ""
@@ -1211,9 +1172,11 @@ class FeishuAiCommandService:
                             cfg.ack_emoji,
                             message.message_id,
                         )
-
                 context_msgs, refs = await self._fetch_context_and_refs(
                     user_client, message, cfg, seeded_context=seeded_context
+                )
+                attachments, image_metadata = await prepare_images(
+                    user_client, message, context_msgs
                 )
                 interim_text = build_interim_reply_text(parsed, refs, footer=cfg.footer)
                 interim_post = build_ai_post_payload(interim_text, footer=cfg.footer)
@@ -1233,7 +1196,6 @@ class FeishuAiCommandService:
                     raise FeishuDeliveryUncertainError(
                         "Feishu interim reply message identity is unavailable; delivery may have occurred"
                     )
-
                 execution_message = feishu_ai_workspace.execution_message(
                     message, interim_receipt.thread_id, reply_in_thread=reply_in_thread
                 )
@@ -1253,12 +1215,14 @@ class FeishuAiCommandService:
                     "model": parsed.model,
                     "reasoning_effort": parsed.reasoning_effort,
                     **refs.to_dict(),
+                    "images": image_metadata,
                 }
                 dispatch_entered = True
                 self.mark_pending_command_state(
                     message.message_id,
                     "in_flight",
                     dispatch_state="dispatched",
+                    message=message.to_dict(),
                     tab_id=tab_id,
                     turn_id=turn_id,
                     ack_reaction_id=ack_reaction_id,
@@ -1274,6 +1238,7 @@ class FeishuAiCommandService:
                     turn_id,
                     parsed.instruction or message.text,
                     turn_metadata,
+                    attachments=attachments,
                 )
                 turn_completed = True
                 self.mark_pending_command_state(
@@ -1282,7 +1247,6 @@ class FeishuAiCommandService:
                     dispatch_state="turn_completed",
                     answer=answer,
                 )
-
             if resuming_completed:
                 held_channel_lock = await feishu_ai_workspace.acquire_execution_lock(self, message)
             final_text = ensure_ai_footer(answer, footer=cfg.footer)
@@ -1369,20 +1333,13 @@ class FeishuAiCommandService:
             status_val = "failed"
             reason_val = str(exc) or type(exc).__name__
             logger.exception("Feishu /ai command execution failed for %s", message.message_id)
-            uncertain_final_delivery = final_reply_started and isinstance(
-                exc,
-                (
-                    FeishuDeliveryUncertainError,
-                    httpx.TimeoutException,
-                    httpx.ReadError,
-                    httpx.WriteError,
-                    httpx.RemoteProtocolError,
-                    httpx.DecodingError,
-                ),
-            )
+            uncertain_reply_delivery = isinstance(exc, FeishuDeliveryUncertainError)
+            uncertain_final_delivery = final_reply_started and uncertain_reply_delivery
             error_text = ""
             error_post: dict[str, Any] = {}
-            if not uncertain_final_delivery:
+            # An interim receipt can also have been accepted without a response.
+            # Never issue an error reply after uncertainty on either reply stage.
+            if not uncertain_reply_delivery:
                 error_text = ensure_ai_footer(
                     f"没能生成回答，请稍后再试或直接联系本人。（{reason_val[:160]}）",
                     footer=cfg.footer,
@@ -1397,7 +1354,12 @@ class FeishuAiCommandService:
                         reply_in_thread=reply_in_thread,
                         uuid=bounded_message_uuid(message.message_id, "error"),
                     )
-                except Exception:
+                except Exception as fallback_exc:
+                    retryable_unsent = (
+                        not dispatch_entered
+                        and not resuming_completed
+                        and isinstance(fallback_exc, FeishuWebChatModeUnavailableError)
+                    )
                     logger.warning(
                         "Failed to post /ai error fallback reply for %s",
                         message.message_id,
@@ -1446,6 +1408,9 @@ class FeishuAiCommandService:
                         )
                 if status_val != "cancelled":
                     for dk in (dedup_claim_key, *extra_dedup_keys):
+                        if retryable_unsent:
+                            self._dedup.release(dk)
+                            continue
                         self._dedup.finish(
                             dk,
                             status_val,
@@ -1462,18 +1427,7 @@ class FeishuAiCommandService:
             text=event.text,
             config=cfg,
         ):
-            user_msg = FeishuUserMessage(
-                event.message_id,
-                event.chat_id,
-                event.sender_open_id,
-                "user",
-                event.message_type,
-                event.text,
-                event.message_created_at_ms,
-                event.thread_id,
-                event.parent_id,
-                event.root_id,
-            )
+            user_msg = message_from_event(event)
         else:
             verified_msg = await self._verify_cross_app_ws_owner(event, cfg)
             if verified_msg is None:

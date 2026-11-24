@@ -67,7 +67,7 @@ from ...models import (
     ManagedSession,
     SessionKind,
 )
-from .activity_labels import IDLE_DETAIL, WORKING_ACTIVITY
+from .activity_labels import IDLE_DETAIL, UNCERTAIN_DELIVERY_DETAIL, WORKING_ACTIVITY
 from .attachments import AgentStreamAttachmentStore, _sync_existing_directory
 from .base import (
     AgentStreamAdapter,
@@ -87,7 +87,11 @@ from .native import (
 )
 from .redaction import redact_event
 from .registry import get_adapter_for_session
-from .runtime.dependencies import ImageCacheWriter, NativeSessionFactory, RuntimeDependencies
+from .runtime.dependencies import (
+    ImageCacheWriter,
+    NativeSessionFactory,
+    RuntimeDependencies,
+)
 
 # Keep the legacy imports, including the sanitizer factory patched by callers.
 from .runtime.goal_protocol import _CHECKPOINT_OPENER as _CHECKPOINT_OPENER
@@ -295,7 +299,8 @@ class _GoalProtocolSanitizer(_goal_protocol._GoalProtocolSanitizer):
     @staticmethod
     def _possible_opener_suffix(text: str, *, openers: Optional[Tuple[str, ...]] = None) -> int:
         return _goal_protocol._GoalProtocolSanitizer._possible_opener_suffix(
-            text, openers=_GoalProtocolSanitizer._OPENERS if openers is None else openers
+            text,
+            openers=_GoalProtocolSanitizer._OPENERS if openers is None else openers,
         )
 
     def _envelope_state(self, text: str) -> str:
@@ -460,7 +465,9 @@ class _LegacyRuntimeDependencies(RuntimeDependencies):
         return discard_snapshot
 
     @property
-    def get_adapter_for_session(self) -> Callable[[ManagedSession], Optional[AgentStreamAdapter]]:
+    def get_adapter_for_session(
+        self,
+    ) -> Callable[[ManagedSession], Optional[AgentStreamAdapter]]:
         return get_adapter_for_session
 
     @property
@@ -480,7 +487,9 @@ class _LegacyRuntimeDependencies(RuntimeDependencies):
         return _detect_image_mime
 
     @property
-    def parse_ask_question_response(self) -> Callable[[str], Optional[List[Dict[str, Any]]]]:
+    def parse_ask_question_response(
+        self,
+    ) -> Callable[[str], Optional[List[Dict[str, Any]]]]:
         return parse_ask_question_response
 
 
@@ -582,15 +591,27 @@ def turn_activity_extras(tailer: _RuntimeSessionTailer) -> dict[str, Any]:
     }
 
 
-def _native_runtime_snapshot(tailer: _RuntimeSessionTailer) -> Optional[NativeRuntimeSnapshot]:
+def _native_runtime_snapshot(
+    tailer: _RuntimeSessionTailer,
+) -> Optional[NativeRuntimeSnapshot]:
     pending_question = tailer.has_pending_question()
+    transport = tailer.native_transport
+    if transport is not None and (
+        getattr(transport, "_delivery_uncertain", False)
+        or getattr(transport, "_needs_abort", False)
+        or getattr(transport, "_adoption_journal", None) is not None
+    ):
+        return NativeRuntimeSnapshot(
+            status=AgentRuntimeStatus.ATTENTION,
+            detail=UNCERTAIN_DELIVERY_DETAIL,
+            pending_question=pending_question,
+        )
     if tailer.hard_failed or tailer.native_error is not None:
         return NativeRuntimeSnapshot(
             status=AgentRuntimeStatus.OFFLINE,
             detail=tailer.native_error or tailer.last_error or "native provider unavailable",
             pending_question=pending_question,
         )
-    transport = tailer.native_transport
     if transport is None:
         return None
     if transport.last_error is not None:

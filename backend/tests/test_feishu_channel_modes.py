@@ -591,11 +591,14 @@ def test_patch_bot_mode_switch_requires_no_active_bindings(env_api) -> None:
     assert bad_mode.status_code == 400
 
 
-def test_group_bind_in_per_channel_mode_auto_creates_tab_when_tab_id_omitted(env_api) -> None:
+@pytest.mark.parametrize("chat_mode", ["group", "topic"])
+def test_group_bind_in_per_channel_mode_auto_creates_tab_when_tab_id_omitted(
+    env_api, chat_mode: str
+) -> None:
     env_api.wire.chats["oc-group-alpha"] = {
         "chat_id": "oc-group-alpha",
         "name": "Alpha Squad",
-        "chat_mode": "group",
+        "chat_mode": chat_mode,
         "chat_type": "public",
     }
     bot_id = env_api.pool.create_bot(name="One", config=_config("app-1"), environ={})

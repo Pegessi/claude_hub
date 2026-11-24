@@ -1752,8 +1752,14 @@ async def exercise_cross_origin_images(page, base: str, report: dict) -> None:
             for index in range(3):
                 previous = len(requests)
                 await page.evaluate("window.__imageStreamProbe.append(' tail')")
+                await expect(root).to_contain_text(" tail" * (index + 1))
                 await expect(image).to_have_js_property("naturalWidth", 48)
-                assert [row["mode"] for row in requests[previous:]] == ["cors"], requests
+                await expect(image).to_have_attribute("crossorigin", "anonymous")
+                # Observe delayed requests after the DOM update before checking modes.
+                await asyncio.sleep(0.25)
+                # Reusing the loaded image needs no network request; if the
+                # rewrite reloads it, it must retain CORS and only load once.
+                assert [row["mode"] for row in requests[previous:]] in ([], ["cors"]), requests
             assert await page.evaluate("window.__imageStreamProbe.mounts") == 1
 
         start = len(requests)

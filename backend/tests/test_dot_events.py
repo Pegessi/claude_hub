@@ -15,6 +15,7 @@ from fastapi import FastAPI
 
 from claude_hub.api import dot as dot_api
 from claude_hub.services.dot import DotService, DotStore
+from claude_hub.services.dot import events_bridge as bridge
 from claude_hub.services.dot import events_gateway as gateway
 from claude_hub.services.dot.context import build_turn_pack
 from claude_hub.services.dot.events_bridge import (
@@ -34,6 +35,155 @@ EVENT = {
     "dedupe_key": "job-1-failed",
     "title": "CI failed",
 }
+
+
+@pytest.mark.asyncio
+async def test_mention_poll_baseline_filter_and_dedup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    message = {
+        "message_id": "one",
+        "deleted": False,
+        "sender": {"id": "other", "name": "A"},
+        "mentions": [{"id": "me"}],
+        "content": "hello",
+    }
+    messages = [message]
+    calls: list[tuple[str, ...]] = []
+
+    async def cli(_profile: str, *args: str) -> dict:
+        calls.append(args)
+        if args[0] == "auth":
+            return {"identities": {"user": {"openId": "me"}}}
+        return {"data": {"messages": messages, "has_more": False}}
+
+    monkeypatch.setattr(bridge, "_lark_json", cli)
+    send = AsyncMock()
+    state = tmp_path / "state.json"
+    await bridge.poll_mentions("", state, send)
+    send.assert_not_awaited()
+    messages.append({**message, "message_id": "two"})
+    messages.append({**message, "message_id": "self", "sender": {"id": "me"}})
+    messages.append({**message, "message_id": "all", "mentions": [{"id": "all"}]})
+    messages.append({**message, "message_id": "deleted", "deleted": True})
+    await bridge.poll_mentions("", state, send)
+    assert send.await_count == 1
+    assert send.await_args is not None
+    event = send.await_args.args[0]
+    assert (event.dedupe_key, event.severity, event.source) == ("two", "urgent", "feishu")
+    await bridge.poll_mentions("", state, send)
+    assert send.await_count == 1
+    args = calls[-1]
+    assert "." not in args[args.index("--start") + 1]
+    assert "." not in args[args.index("--end") + 1]
+
+
+@pytest.mark.asyncio
+async def test_mention_poll_does_not_advance_on_truncation_or_delivery_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state = tmp_path / "state.json"
+    state.write_text(json.dumps({"watermark": "2026-01-01T00:00:00+00:00", "seen": {}}))
+    original = state.read_text()
+    truncated = True
+
+    async def cli(_profile: str, *args: str) -> dict:
+        if args[0] == "auth":
+            return {"identities": {"user": {"openId": "me"}}}
+        return {
+            "data": {
+                "has_more": truncated,
+                "messages": [
+                    {
+                        "message_id": "one",
+                        "deleted": False,
+                        "sender": {"id": "other"},
+                        "mentions": [{"id": "me"}],
+                    }
+                ],
+            }
+        }
+
+    monkeypatch.setattr(bridge, "_lark_json", cli)
+    send = AsyncMock(side_effect=RuntimeError("unavailable"))
+    with pytest.raises(ValueError, match="Incomplete"):
+        await bridge.poll_mentions("", state, send)
+    assert state.read_text() == original
+    truncated = False
+    with pytest.raises(RuntimeError, match="unavailable"):
+        await bridge.poll_mentions("", state, send)
+    assert state.read_text() == original
+
+
+@pytest.mark.asyncio
+async def test_mention_poll_paginates_and_resumes_after_delivery_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state = tmp_path / "state.json"
+    initial = "2026-01-01T00:00:00+00:00"
+    state.write_text(json.dumps({"watermark": initial, "seen": {}}))
+    calls: list[tuple[str, ...]] = []
+
+    async def cli(_profile: str, *args: str) -> dict:
+        if args[0] == "auth":
+            return {"identities": {"user": {"openId": "me"}}}
+        calls.append(args)
+        token = args[args.index("--page-token") + 1] if "--page-token" in args else ""
+        index = {"": 1, "next-1": 2, "next-2": 3, "next-3": 4}[token]
+        return {
+            "data": {
+                "messages": [
+                    {
+                        "message_id": str(index),
+                        "deleted": False,
+                        "sender": {"id": "other"},
+                        "mentions": [{"id": "me"}],
+                    }
+                ],
+                "has_more": index < 4,
+                "page_token": f"next-{index}" if index < 4 else "",
+            }
+        }
+
+    monkeypatch.setattr(bridge, "_lark_json", cli)
+    delivered: list[str] = []
+    fail = True
+
+    async def send(event: gateway.ExternalEvent) -> None:
+        if event.dedupe_key == "3" and fail:
+            raise RuntimeError("unavailable")
+        delivered.append(event.dedupe_key)
+
+    with pytest.raises(RuntimeError, match="unavailable"):
+        await bridge.poll_mentions("", state, send)
+    assert json.loads(state.read_text())["watermark"] == initial
+    assert delivered == ["1", "2"]
+    fail = False
+    await bridge.poll_mentions("", state, send)
+    assert delivered == ["1", "2", "3", "4"]
+    assert json.loads(state.read_text())["watermark"] != initial
+    assert all(
+        args[args.index("--start") + 1] == calls[0][calls[0].index("--start") + 1] for args in calls
+    )
+
+
+@pytest.mark.asyncio
+async def test_mention_poll_rejects_repeated_cursor_without_advancing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state = tmp_path / "state.json"
+    state.write_text(json.dumps({"watermark": "2026-01-01T00:00:00+00:00", "seen": {}}))
+    original = state.read_text()
+
+    async def cli(_profile: str, *args: str) -> dict:
+        if args[0] == "auth":
+            return {"identities": {"user": {"openId": "me"}}}
+        return {"data": {"messages": [], "has_more": True, "page_token": "same"}}
+
+    monkeypatch.setattr(bridge, "_lark_json", cli)
+    with pytest.raises(ValueError, match="page token"):
+        await bridge.poll_mentions("", state, AsyncMock())
+    assert state.read_text() == original
 
 
 @pytest.fixture

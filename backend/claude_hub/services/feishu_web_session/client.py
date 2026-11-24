@@ -82,6 +82,10 @@ class FeishuWebSessionError(FeishuBotError):
     """Base error for Feishu web-session operations."""
 
 
+class FeishuWebChatModeUnavailableError(FeishuWebSessionError):
+    """Chat mode could not be read before submitting a threaded reply."""
+
+
 class FeishuWebSignedOutError(FeishuBotConfigurationError, FeishuWebSessionError):
     """Raised when the Feishu web session is missing or expired (`ErrSignedOut`)."""
 
@@ -89,10 +93,102 @@ class FeishuWebSignedOutError(FeishuBotConfigurationError, FeishuWebSessionError
 class FeishuWebGatewayError(FeishuWebSessionError):
     """Raised when the Feishu web gateway returns a definite HTTP or status error."""
 
-    def __init__(self, message: str, *, status_code: int = 0, gateway_status: int = 0) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int = 0,
+        gateway_status: int = 0,
+        diagnostics: Mapping[str, Any] | None = None,
+    ) -> None:
+        self.diagnostics = dict(diagnostics or {})
+        if self.diagnostics:
+            message += " " + json.dumps(self.diagnostics, sort_keys=True, separators=(",", ":"))
         super().__init__(message)
         self.status_code = status_code
         self.gateway_status = gateway_status
+
+
+# Response text can echo credentials or message content. Retain only protocol
+# vocabulary, never arbitrary response prose, IDs, quoted values or opaque tokens.
+_ERROR_WORDS = frozenset(
+    "bad request invalid parameter parameters param argument arguments required missing "
+    "unsupported forbidden permission denied unauthorized expired not found failed failure "
+    "error illegal mismatch root parent thread chat message reply content type version cid "
+    "rootId parentId threadId chatId isReplyInThread check validation validate status code "
+    "internal server gateway timeout unavailable too many requests rate limit exceeded "
+    "must be in of for and or cannot empty length size malformed".lower().split()
+)
+
+
+def _gateway_text_summary(value: str) -> str:
+    # Bound before regex processing. No raw body is included in logging or errors.
+    words = re.findall(r"[A-Za-z]+|[^A-Za-z\s]+", value[:2048])
+    return " ".join(word if word.lower() in _ERROR_WORDS else "[redacted]" for word in words)[:256]
+
+
+def _gateway_rejection_diagnostics(
+    response: httpx.Response,
+    body: Mapping[str, Any],
+    cmd: int,
+) -> dict[str, Any]:
+    details: dict[str, Any] = {
+        "http_status": response.status_code,
+        "cmd": cmd,
+        "type": body.get("type") if isinstance(body.get("type"), int) else None,
+        "has_root_id": bool(body.get("rootId")),
+        "has_parent_id": bool(body.get("parentId")),
+        "root_equals_parent": bool(body.get("rootId"))
+        and body.get("rootId") == body.get("parentId"),
+        "is_reply_in_thread": body.get("isReplyInThread") is True,
+    }
+    log_id = response.headers.get("x-tt-logid", "")
+    if log_id:
+        details["x_tt_logid"] = (
+            log_id if re.fullmatch(r"[A-Fa-f0-9]{16,64}", log_id) else "[redacted]"
+        )
+    raw = response.content[:65536]
+    payload = raw
+    try:
+        packet = decode("Packet", raw)
+        if "status" in packet:
+            details["packet_status"] = _num(packet["status"])
+        if "payload" in packet:
+            payload = base64.b64decode(packet["payload"], validate=True)
+            details["payload_format"] = "Packet"
+    except Exception:
+        pass
+    # Error payloads vary by gateway. Best-effort Status/JSON decoding must not
+    # mask the original HTTP failure or emit undecodable binary as text.
+    error: Mapping[str, Any] = {}
+    try:
+        status = decode("Status", payload)
+        if "code" in status or "msg" in status:
+            error = status
+            details["payload_format"] = "Status"
+    except Exception:
+        pass
+    if not error:
+        try:
+            parsed = json.loads(payload)
+            if isinstance(parsed, Mapping):
+                error = parsed
+                details["payload_format"] = "JSON"
+        except (ValueError, UnicodeError, RecursionError):
+            pass
+    code = error.get("code")
+    if isinstance(code, int) and not isinstance(code, bool) and -(1 << 31) <= code < (1 << 32):
+        details["error_code"] = code
+    text = error.get("msg") or error.get("message") or error.get("error")
+    if isinstance(text, str):
+        details["error_summary"] = _gateway_text_summary(text)
+    elif not error and "packet_status" not in details:
+        details["payload_format"] = "unrecognized"
+        if response.headers.get("content-type", "").split(";", 1)[0] == "text/plain":
+            details["error_summary"] = _gateway_text_summary(
+                payload.decode("utf-8", errors="replace")
+            )
+    return details
 
 
 class FeishuWebQRLoginExpiredError(FeishuWebSessionError):
@@ -744,16 +840,23 @@ class FeishuWebClient:
             raise
 
         raw = resp.content[: 32 << 20]
-        if resp.status_code in {401, 403}:
-            self._store.mark_invalid(s)
-            raise FeishuWebSignedOutError(
-                f"feishu web session rejected for {name} (HTTP {resp.status_code})"
-            )
         if resp.status_code != 200:
-            raise FeishuWebGatewayError(
+            details = _gateway_rejection_diagnostics(resp, body, cmd.cmd)
+            error = FeishuWebGatewayError(
                 f"web gateway HTTP {resp.status_code} for {name}",
                 status_code=resp.status_code,
+                gateway_status=_num(details.get("packet_status")),
+                diagnostics=details,
             )
+            logger.warning("%s", error)
+            if resp.status_code in {401, 403}:
+                self._store.mark_invalid(s)
+                raise FeishuWebSignedOutError(str(error))
+            if name == "PutMessageRequest" and resp.status_code in {500, 502, 503, 504}:
+                raise FeishuDeliveryUncertainError(
+                    f"Feishu web gateway {name} returned HTTP {resp.status_code}; delivery may have occurred"
+                ) from error
+            raise error
         try:
             p = decode("Packet", raw)
         except Exception as exc:
@@ -973,10 +1076,10 @@ class FeishuWebClient:
                         chat_id=chat_val,
                         root_id=root_val,
                         thread_id=thread_val,
-                        position=t_pos,
+                        topic_position=t_pos,
                     )
                     res.append(m)
-        res.sort(key=lambda item: item.position)
+        res.sort(key=lambda item: item.topic_position or 0)
         return res
 
     async def react(self, message_id: str, reaction_type: str = REACT_ON_IT) -> None:

@@ -37,6 +37,7 @@ export function useFeishuBinding(
   const requestGroupBind = dependencies.bindGroup ?? bindBotGroup
   const selectedBotId=ref<string|null>(null),pendingCode=ref<FeishuPairStartResponse|null>(null),confirmWord=ref('')
   const error=ref<string|null>(null),needsLogin=ref(false),isHydrated=ref(false),isLoading=ref(false),isMutating=ref(false)
+  const groupBindError = ref<string | null>(null)
   // Group binding is a second, independent path: its own read and its own error,
   // so a failed group list never disturbs the p2p pairing state machine.
   const groups=ref<FeishuBotChat[]>([]),groupsLoaded=ref(false),groupsLoading=ref(false),groupsError=ref<string|null>(null)
@@ -96,6 +97,7 @@ function resetGroups() {
   groupsLoaded.value = false
   groupsLoading.value = false
   groupsError.value = null
+  groupBindError.value = null
 }
 function schedulePoll() {
   clearPollTimer()
@@ -150,6 +152,7 @@ function schedulePoll() {
     // server refuses a private chat id itself (``chat_not_group``).
     groups.value = [...value.chats]
     groupsLoaded.value = true
+    groupBindError.value = null
     return true
   } catch (cause) {
     if (requestEpoch !== groupEpoch || request.signal.aborted) return false
@@ -266,6 +269,7 @@ function ensureGroups(): void {
   if (!isPerChannel && active.length > 0) return false
   if (isPerChannel && active.length >= MAX_BOT_CHANNELS) return false
   const { requestEpoch, request } = beginMutation()
+  groupBindError.value = null
   try {
     // The mutation response is the authoritative pool snapshot: applyPool adopts
     // it and reconciles when the pool moved on while this request was open.
@@ -280,7 +284,9 @@ function ensureGroups(): void {
     return true
   } catch (cause) {
     if (requestEpoch !== epoch || request.signal.aborted) return false
-    setFailure(cause, 'Failed to bind this group.')
+    const e = cause instanceof FeishuBotRequestError ? cause : null
+    groupBindError.value = e?.message ?? 'Failed to bind this group.'
+    needsLogin.value = e?.status === 401
     await reconcileAfterFailure(cause, request.signal)
     return false
   } finally { finishMutation(requestEpoch) }
@@ -356,5 +362,5 @@ function finishMutation(requestEpoch: number) {
   schedulePoll()
 }
 
-  return{bots,binding,bindings,mode,currentBot,selectedBotId,selectedBot,pendingCode,claim,confirmWord,error,needsLogin,isHydrated,isLoading,isMutating,viewState,statusText,groups,groupsLoaded,groupsLoading,groupsError,refresh,selectBot,generateCode,activate,bindGroup,loadGroups,ensureGroups,disconnect,releaseChannel,resume,pause}
+  return{bots,binding,bindings,mode,currentBot,selectedBotId,selectedBot,pendingCode,claim,confirmWord,error,groupBindError,needsLogin,isHydrated,isLoading,isMutating,viewState,statusText,groups,groupsLoaded,groupsLoading,groupsError,refresh,selectBot,generateCode,activate,bindGroup,loadGroups,ensureGroups,disconnect,releaseChannel,resume,pause}
 }

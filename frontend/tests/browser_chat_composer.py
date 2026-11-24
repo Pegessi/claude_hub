@@ -433,9 +433,11 @@ async def iphone_picker_scenario(page, output, model_changes, state) -> None:
     await expect(name).not_to_be_focused()
     cwd = page.locator("#tabCwd")
     await expect(cwd).not_to_be_focused()
-    await page.locator(".session-kind-control").get_by_role(
-        "button", name="Terminal", exact=True
-    ).tap()
+    await (
+        page.locator(".session-kind-control")
+        .get_by_role("button", name="Terminal", exact=True)
+        .tap()
+    )
     await expect(name).not_to_be_focused()
     await page.locator(".session-kind-control").get_by_role("button", name="Chat", exact=True).tap()
     await expect(name).not_to_be_focused()
@@ -456,9 +458,9 @@ async def iphone_picker_scenario(page, output, model_changes, state) -> None:
     await path.fill("/fixture/browsed")
     await path.press("Enter")
     await expect(path).to_have_value("/fixture/browsed")
-    await page.locator(".file-browser-footer").get_by_role(
-        "button", name="Select", exact=False
-    ).tap()
+    await (
+        page.locator(".file-browser-footer").get_by_role("button", name="Select", exact=False).tap()
+    )
     await expect(cwd).to_have_value("/fixture/browsed")
     await page.locator(".modal").get_by_role("button", name="Cancel", exact=True).tap()
     (output / "iphone-measurements.json").write_text(json.dumps(measurements, indent=2))
@@ -731,6 +733,10 @@ async def main(browser_run: BrowserRun) -> None:
                     "agent_type": agent_type,
                     "supports_mode_switch": False,
                     "current_model": tab["env"].get(model_key, "seed-high"),
+                    "recovery_required": bool(state.get("quarantined")),
+                    "quarantined_turn_id": (
+                        state.get("quarantined_turn_id") if state.get("quarantined") else None
+                    ),
                     "available_models": [
                         {
                             "id": "seed",
@@ -801,6 +807,47 @@ async def main(browser_run: BrowserRun) -> None:
             elif method == "POST" and path in {f"{BASE}/send", f"{MANAGED_BASE}/send"}:
                 payload = json.loads(request.post_data or "{}")
                 sends.append(payload)
+                if state.get("quarantined"):
+                    sequence = len(state["events"])
+                    rejected_turn = payload["client_turn_id"]
+                    detail = (
+                        "MASO message acceptance is uncertain. Further sends are refused for this Chat. "
+                        "The service may still execute the message; inspect and stop the session in MASO."
+                    )
+                    state["events"].extend(
+                        [
+                            event(
+                                sequence + 1,
+                                "turn_started",
+                                {"summary": payload.get("text", "")},
+                                turn_id=rejected_turn,
+                            ),
+                            event(
+                                sequence + 2,
+                                "error",
+                                {"message": detail},
+                                turn_id=rejected_turn,
+                            ),
+                            event(
+                                sequence + 3,
+                                "turn_completed",
+                                {
+                                    "status": "failed",
+                                    "delivery_rejected": True,
+                                    "delivery_uncertain": True,
+                                    "quarantined_turn_id": state.get("quarantined_turn_id"),
+                                },
+                                turn_id=rejected_turn,
+                                message_id=rejected_turn,
+                            ),
+                        ]
+                    )
+                    await route.fulfill(
+                        status=503,
+                        content_type="application/json",
+                        body=json.dumps({"detail": detail}),
+                    )
+                    return
                 if payload.get("text") in state["fail_texts"]:
                     state["fail_texts"].discard(payload.get("text"))
                     await route.fulfill(
@@ -865,24 +912,49 @@ async def main(browser_run: BrowserRun) -> None:
                 f"{BASE}/cancel",
                 f"{MANAGED_BASE}/cancel",
             }:
-                interrupts.append(json.loads(request.post_data or "{}"))
-                sequence = len(state["events"])
-                interrupted_turn = next(
-                    item["turn_id"]
-                    for item in reversed(state["events"])
-                    if item["type"] == "turn_started"
-                )
-                state["events"].append(
-                    event(
-                        sequence + 1,
-                        "turn_completed",
-                        {"status": "interrupted"},
-                        turn_id=interrupted_turn,
-                        message_id=interrupted_turn,
+                cancel_body = json.loads(request.post_data or "{}")
+                interrupts.append(cancel_body)
+                if state.get("quarantined"):
+                    if state.get("fail_quarantine_cancel"):
+                        state["fail_quarantine_cancel"] = False
+                        await route.fulfill(
+                            status=503,
+                            content_type="application/json",
+                            body=json.dumps({"detail": "native provider turn cancellation failed"}),
+                        )
+                        return
+                    if state.get("noop_quarantine_cancel"):
+                        state["noop_quarantine_cancel"] = False
+                        await route.fulfill(
+                            content_type="application/json",
+                            body=json.dumps({"ok": True, "cancelled": False}),
+                        )
+                        return
+                    state["quarantined"] = False
+                    state["quarantined_turn_id"] = None
+                    body = {
+                        "ok": True,
+                        "cancelled": True,
+                        "outcome": "cancelled_matching",
+                    }
+                else:
+                    sequence = len(state["events"])
+                    interrupted_turn = next(
+                        item["turn_id"]
+                        for item in reversed(state["events"])
+                        if item["type"] == "turn_started"
                     )
-                )
-                state["turn_open"] = False
-                body = {"ok": True}
+                    state["events"].append(
+                        event(
+                            sequence + 1,
+                            "turn_completed",
+                            {"status": "interrupted"},
+                            turn_id=interrupted_turn,
+                            message_id=interrupted_turn,
+                        )
+                    )
+                    state["turn_open"] = False
+                    body = {"ok": True}
             elif method == "GET" and path in {f"{BASE}/live", f"{MANAGED_BASE}/live"}:
                 await route.fulfill(
                     status=200,
@@ -945,8 +1017,14 @@ async def main(browser_run: BrowserRun) -> None:
                         ],
                     }
                     for model, label in [
-                        ("gpt-example-model-c886ad270fea", "gpt-example-model-c886ad270fea"),
-                        ("gpt-example-model-d050a243e4ed", "gpt-example-model-d050a243e4ed"),
+                        (
+                            "gpt-example-model-c886ad270fea",
+                            "gpt-example-model-c886ad270fea",
+                        ),
+                        (
+                            "gpt-example-model-d050a243e4ed",
+                            "gpt-example-model-d050a243e4ed",
+                        ),
                     ]
                 ]
                 await route.fulfill(
@@ -1718,6 +1796,92 @@ async def main(browser_run: BrowserRun) -> None:
         # Native delivery has no identity deduplication. An explicit resend is
         # a distinct intent; Goal/Managed Chat retention is tested separately.
         assert sends[-1]["client_turn_id"] != sends[-2]["client_turn_id"], sends[-2:]
+
+        # When a MASO turn fails with an SSE disconnect (persisting uncertain
+        # delivery quarantine), the turn closes in the timeline with status=failed,
+        # yet Stop must remain visible and user-accessible in the composer, scoped
+        # to the quarantined turn even after a locally rejected follow-up send.
+        quarantined_turn_id = sends[-1]["client_turn_id"]
+        sequence = len(state["events"])
+        state["events"].extend(
+            [
+                event(
+                    sequence + 1,
+                    "error",
+                    {
+                        "message": "MASO event stream disconnected; remote execution was not stopped. Inspect the MASO session before retrying."
+                    },
+                    turn_id=quarantined_turn_id,
+                ),
+                event(
+                    sequence + 2,
+                    "turn_completed",
+                    {
+                        "status": "failed",
+                        "delivery_uncertain": True,
+                        "quarantined_turn_id": quarantined_turn_id,
+                    },
+                    turn_id=quarantined_turn_id,
+                    message_id=quarantined_turn_id,
+                ),
+            ]
+        )
+        state["turn_open"] = False
+        state["quarantined"] = True
+        state["quarantined_turn_id"] = quarantined_turn_id
+        state["fail_quarantine_cancel"] = True
+        state["noop_quarantine_cancel"] = True
+        # A cold UI must restore recovery from capabilities without another send.
+        await page.reload()
+        await expect(page.locator(".composer-recovery")).to_contain_text("completed messages")
+        await expect(send_button).to_have_text("Send")
+        await expect(page.locator(".composer-stop-btn")).to_be_visible()
+        await expect(page.locator(".composer-stop-btn")).to_be_enabled()
+        recovery_viewport = page.viewport_size
+        for width in (1440, 390):
+            await page.set_viewport_size({"width": width, "height": 844})
+            notice = page.locator(".composer-recovery")
+            await expect(notice).to_be_visible()
+            notice_box = await notice.bounding_box()
+            assert notice_box is not None and notice_box["x"] >= 0
+            assert notice_box["x"] + notice_box["width"] <= width, notice_box
+            await page.screenshot(
+                path=str(output / f"maso-recovery-{width}.png"),
+                full_page=True,
+                animations="disabled",
+            )
+        if recovery_viewport:
+            await page.set_viewport_size(recovery_viewport)
+        await composer.fill("Follow-up while quarantined")
+        await send_button.click()
+        await expect(page.locator(".composer-error")).to_contain_text(
+            "MASO message acceptance is uncertain"
+        )
+        await expect(page.locator(".composer-stop-btn")).to_be_visible()
+        await expect(page.locator(".composer-stop-btn")).to_be_enabled()
+        interrupts_before_quarantine_stop = len(interrupts)
+        # First Stop attempt fails teardown (HTTP 503): Stop must stay visible and retryable.
+        await page.locator(".composer-stop-btn").click()
+        assert len(interrupts) == interrupts_before_quarantine_stop + 1, interrupts
+        assert interrupts[-1] == {"expected_turn_id": quarantined_turn_id}, interrupts[-1]
+        await expect(page.locator(".composer-error")).to_contain_text(
+            "native provider turn cancellation failed"
+        )
+        await expect(page.locator(".composer-stop-btn")).to_be_visible()
+        await expect(page.locator(".composer-stop-btn")).to_be_enabled()
+        # A no-op Stop also leaves the authoritative recovery target retryable.
+        await page.locator(".composer-stop-btn").click()
+        await expect(page.locator(".composer-stop-btn")).to_be_enabled()
+        assert len(interrupts) == interrupts_before_quarantine_stop + 2, interrupts
+        # Third Stop attempt succeeds and clears quarantine.
+        await page.locator(".composer-stop-btn").click()
+        assert len(interrupts) == interrupts_before_quarantine_stop + 3, interrupts
+        assert interrupts[-1] == {"expected_turn_id": quarantined_turn_id}, interrupts[-1]
+        await expect(page.locator(".composer-stop-btn")).to_have_count(0)
+        await expect(page.locator(".composer-error")).to_have_count(0)
+        await send_button.click()
+        await expect(composer).to_have_value("")
+        await expect(page.locator(".composer-stop-btn")).to_be_visible()
 
         # Mobile: the composer and both controls stay usable and on screen.
         await page.set_viewport_size({"width": 390, "height": 844})

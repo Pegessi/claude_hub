@@ -477,6 +477,7 @@ class FeishuBotClient:
                 },
             )
         except (
+            httpx.TimeoutException,
             httpx.ReadError,
             httpx.WriteError,
             httpx.RemoteProtocolError,
@@ -485,6 +486,10 @@ class FeishuBotClient:
             raise FeishuDeliveryUncertainError(
                 f"Feishu message send transport failed after submit ({type(exc).__name__}); delivery may have occurred"
             ) from exc
+        if response.status_code in {500, 502, 503, 504}:
+            raise FeishuDeliveryUncertainError(
+                f"Feishu message submission returned HTTP {response.status_code}; delivery may have occurred"
+            )
         try:
             payload = response.json()
         except ValueError:
@@ -597,7 +602,13 @@ class FeishuBotClient:
         if not isinstance(payload, dict) or payload.get("code") != 0:
             raise FeishuBotError("Feishu refused the Bot chat lookup")
         data = payload.get("data")
-        info = _chat_info_from_payload(data) if isinstance(data, Mapping) else None
+        # Get-chat responses need not echo the identifier in their data body.
+        # List responses still require each item to carry its own identity.
+        info = (
+            _chat_info_from_payload({"chat_id": chat_id, **data})
+            if isinstance(data, Mapping)
+            else None
+        )
         if info is None:
             raise FeishuBotError("Feishu returned no usable chat identity")
         return info
@@ -665,6 +676,7 @@ class FeishuBotClient:
                 },
             )
         except (
+            httpx.TimeoutException,
             httpx.ReadError,
             httpx.WriteError,
             httpx.RemoteProtocolError,
@@ -673,6 +685,10 @@ class FeishuBotClient:
             raise FeishuDeliveryUncertainError(
                 f"Feishu message reply transport failed after submit ({type(exc).__name__}); delivery may have occurred"
             ) from exc
+        if response.status_code in {500, 502, 503, 504}:
+            raise FeishuDeliveryUncertainError(
+                f"Feishu message submission returned HTTP {response.status_code}; delivery may have occurred"
+            )
         try:
             payload = response.json()
         except ValueError:

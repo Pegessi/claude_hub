@@ -924,7 +924,10 @@ class _Wire:
             info = self.chats.get(chat_id)
             if info is None:
                 return httpx.Response(404, json={"code": 230002, "msg": "no chat"})
-            return httpx.Response(200, json={"code": 0, "data": info})
+            # The single-chat endpoint does not echo the requested chat_id.
+            return httpx.Response(
+                200, json={"code": 0, "data": {k: v for k, v in info.items() if k != "chat_id"}}
+            )
         if request.method == "GET" and "/resources/" in request.url.path:
             message_id, image_key = (
                 request.url.path.split("/")[-3],
@@ -1051,6 +1054,24 @@ def test_a_push_goes_only_to_the_chat_bound_to_the_tab(api) -> None:
     assert not asyncio.run(bot_api.push_to_tab("tab-1", "Task done")), "unbound"
     assert not bot_api.feishu_bound_to_tab("tab-1")
     assert len(api.wire.pushes) == 1
+
+
+def test_push_skips_stale_binding_for_same_tab(api, monkeypatch: pytest.MonkeyPatch) -> None:
+    from types import SimpleNamespace
+
+    bot_id = api.pool.create_bot(name="One", config=_config("app-1"), environ={})
+    _pair(api.pool, bot_id, owner=LOCAL, tab_id="tab-1", chat_id="oc-1", environ={})
+    original_snapshot = api.pool.snapshot
+    entry = original_snapshot({}).get(bot_id)
+    valid = entry.bindings[0]
+    from dataclasses import replace
+
+    stale = replace(valid, pairing_id="old")
+    fake = SimpleNamespace(enabled=True, configured=True, bot_id=bot_id, bindings=[stale, valid])
+    monkeypatch.setattr(api.pool, "snapshot", lambda *args, **kwargs: SimpleNamespace(bots=[fake]))
+    assert bot_api.feishu_bound_to_tab("tab-1")
+    assert asyncio.run(bot_api.push_to_tab("tab-1", "notice"))
+    assert api.wire.pushes[-1][0] == "oc-1"
 
 
 def test_pairing_code_reply_carries_the_confirmation_word(api, clock: Clock) -> None:
@@ -3473,6 +3494,14 @@ def test_chat_list_endpoint_maps_scope_failures_to_502(api, clock: Clock) -> Non
     assert response.json()["detail"] == "bot_chats_unavailable"
 
 
+def test_chat_list_does_not_invent_identity_for_items(api, clock: Clock) -> None:
+    api.wire.chats["missing"] = {"name": "Incomplete", "chat_mode": "group"}
+    bot_id = api.pool.create_bot(name="One", config=_config("app-1"), environ={})
+    response = api.client.get(f"/api/feishu/bot/bots/{bot_id}/chats")
+    assert response.status_code == 200
+    assert response.json()["chats"] == []
+
+
 def test_group_bind_endpoint_reports_partial_chat_info_as_not_visible(api, clock: Clock) -> None:
     """Feishu answers without form information when the Bot is not in the group."""
 
@@ -3524,11 +3553,12 @@ def test_group_bind_endpoint_refuses_an_unreadable_chat(api, clock: Clock) -> No
     assert response.json()["detail"] == "chat_not_visible"
 
 
-def test_group_bind_endpoint_binds_a_visible_group(api, clock: Clock) -> None:
+@pytest.mark.parametrize("chat_mode", ["group", "topic"])
+def test_group_bind_endpoint_binds_a_visible_group(api, clock: Clock, chat_mode: str) -> None:
     api.wire.chats["oc-group"] = {
         "chat_id": "oc-group",
         "name": "Team",
-        "chat_mode": "topic",
+        "chat_mode": chat_mode,
         "chat_type": "group",
     }
     bot_id = api.pool.create_bot(

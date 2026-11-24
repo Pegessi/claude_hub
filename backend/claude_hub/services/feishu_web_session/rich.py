@@ -56,6 +56,7 @@ CARD_CHAT = 1
 CARD_BOX = 5
 
 # Rich-text element tags
+TAG_IMAGE = 2
 TAG_TEXT = 1
 TAG_P = 3
 TAG_AT = 5
@@ -175,6 +176,7 @@ class WebMessage:
     create_time_s: int = 0
     content: bytes = b""
     recalled: bool = False
+    topic_position: int | None = None
 
     @property
     def create_time_ms(self) -> int:
@@ -261,6 +263,7 @@ def message_of(x: Mapping[str, Any]) -> WebMessage:
         thread_id=_zero(_str(x.get("threadId"))),
         type=_num(x.get("type")),
         position=_num(x.get("position")),
+        topic_position=_num(x["threadPosition"]) if "threadPosition" in x else None,
         create_time_s=sec,
         content=content,
         recalled=(_num(x.get("status")) == MESSAGE_RECALLED) or removed,
@@ -727,6 +730,67 @@ def _rich_plain(v: Any, skip_user: str = "") -> str:
     if joined:
         return joined
     return _str(v.get("innerText"))
+
+
+def image_keys(typ: int, content: bytes) -> tuple[str, ...]:
+    """Extract reachable resources in display order, preserving their message ownership."""
+    if not content:
+        return ()
+    keys: list[str] = []
+    if typ == TYPE_IMAGE:
+        image = decode("lark_entities_ImageContent", content)
+        v1 = image.get("image", {})
+        key = (
+            image.get("imageV2", {}).get("imageKey")
+            or v1.get("origin", {}).get("key")
+            or v1.get("imageKey")
+            or v1.get("key")
+        )
+        return (key,) if isinstance(key, str) and key else ()
+    if typ != TYPE_POST:
+        return ()
+    rich = decode("lark_entities_PostContent", content).get("richText", {})
+    nodes = rich.get("elements", {}).get("dictionary", {})
+    pending = list(reversed(rich.get("elementIds", [])))
+    visited: set[str] = set()
+    while pending:
+        key = pending.pop()
+        if key in visited:
+            continue
+        visited.add(key)
+        node = nodes.get(key, {})
+        if _num(node.get("tag")) == TAG_IMAGE:
+            prop = base64.b64decode(node.get("property") or "", validate=True)
+            resource = decode("lark_entities_RichTextElement_ImageProperty", prop).get("imageKey")
+            if resource:
+                keys.append(resource)
+        pending.extend(reversed(node.get("childIds", [])))
+    return tuple(dict.fromkeys(keys))
+
+
+def has_images(typ: int, content: bytes) -> bool:
+    """Detect image nodes reachable from the post roots without retaining resource keys."""
+    if typ == TYPE_IMAGE:
+        return True
+    if typ != TYPE_POST or not content:
+        return False
+    try:
+        rich = decode("lark_entities_PostContent", content).get("richText", {})
+        elements = rich.get("elements", {}).get("dictionary", {})
+        pending = list(rich.get("elementIds", []))
+        visited: set[str] = set()
+        while pending:
+            key = pending.pop()
+            if key in visited:
+                continue
+            visited.add(key)
+            node = elements.get(key, {})
+            if _num(node.get("tag")) == TAG_IMAGE:
+                return True
+            pending.extend(node.get("childIds", []))
+    except (ValueError, TypeError, AttributeError):
+        return False
+    return False
 
 
 def text_without(typ: int, content: bytes, user: str = "") -> str:

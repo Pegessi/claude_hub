@@ -5,6 +5,7 @@ import base64
 import json
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -26,6 +27,7 @@ from claude_hub.services.agent_stream.maso_events import MasoEventAdapter
 from claude_hub.services.agent_stream.maso_http import MasoHttpSession
 from claude_hub.services.agent_stream.native import create_native_session
 from claude_hub.services.agent_stream.registry import get_adapter_for_session
+from claude_hub.services.agent_stream.store import AgentStreamStore
 from claude_hub.services.agent_stream.tailer import (
     SessionTailer,
     TailerManager,
@@ -108,6 +110,7 @@ class MasoServer:
         self.fail_runtime_options = False
         self.ignore_cron_policy = False
         self.fail_status = False
+        self.fail_pending_get = False
         self.malformed_status = False
         self.children: list[dict[str, Any]] = []
         self.indicator: dict[str, Any] = {"running": [], "condensing": {}}
@@ -142,7 +145,8 @@ class MasoServer:
             mime = "image/png" if image.startswith(b"\x89PNG") else "image/gif"
             metadata = {"ref": ref, "media_type": mime, "bytes": len(image)}
             return httpx.Response(
-                200, json=self.image_metadata if self.image_metadata is not None else metadata
+                200,
+                json=(self.image_metadata if self.image_metadata is not None else metadata),
             )
         body = json.loads(request.content) if request.content else {}
         self.calls.append((request.method, path, body))
@@ -220,6 +224,19 @@ class MasoServer:
                 await self.abort_release.wait()
             self.running = bool(self.pending)
             return httpx.Response(200, json={"result": "aborting"})
+        if request.method == "GET" and "/messages/pending/" in path:
+            if self.fail_pending_get:
+                return httpx.Response(503, json={"error": "pending lookup unavailable"})
+            message_id = path.rsplit("/", 1)[-1]
+            if message_id in self.pending:
+                return httpx.Response(
+                    200,
+                    json={"id": message_id, "content": self.pending[message_id]},
+                )
+            return httpx.Response(
+                404,
+                json={"detail": "This message has already been received or removed."},
+            )
         if request.method == "DELETE" and "/messages/pending/" in path:
             self.pending.pop(path.rsplit("/", 1)[-1], None)
             return httpx.Response(204)
@@ -265,7 +282,8 @@ class MasoServer:
             self.running = True
             self.streams[-1].emit("agent_start", {"agent_id": "main"})
             self.streams[-1].emit(
-                "message_injected", {"agent_id": "main", "injected": [{"id": body["message_id"]}]}
+                "message_injected",
+                {"agent_id": "main", "injected": [{"id": body["message_id"]}]},
             )
             self.streams[-1].emit("turn_start", {"agent_id": "main", "turn": 0})
             return httpx.Response(
@@ -291,7 +309,8 @@ def raw(kind: str, **data: Any) -> dict:
 async def test_automatic_admission_revoked_while_stream_opens_posts_no_message() -> None:
     server = MasoServer()
     provider = transport(
-        server, session(agent_session_id="original-session", agent_session_id_verified=True)
+        server,
+        session(agent_session_id="original-session", agent_session_id_verified=True),
     )
     revoked = False
     original = server.handle
@@ -306,7 +325,9 @@ async def test_automatic_admission_revoked_while_stream_opens_posts_no_message()
     assert provider._client is not None
     await provider._client.aclose()
     provider._client = httpx.AsyncClient(
-        base_url="http://maso.test", transport=httpx.MockTransport(handle), trust_env=False
+        base_url="http://maso.test",
+        transport=httpx.MockTransport(handle),
+        trust_env=False,
     )
 
     def admit() -> None:
@@ -331,7 +352,12 @@ async def test_automatic_admission_revoked_while_stream_opens_posts_no_message()
 async def test_remote_images_are_uploaded_in_order_before_atomic_multimodal_message() -> None:
     server = MasoServer()
     provider = MasoHttpSession(
-        session(env={"MASO_BASE_URL": "https://remote-maso.example", "MASO_MODEL": "seed-high"})
+        session(
+            env={
+                "MASO_BASE_URL": "https://remote-maso.example",
+                "MASO_MODEL": "seed-high",
+            }
+        )
     )
     provider._client = httpx.AsyncClient(
         base_url="https://remote-maso.example",
@@ -345,7 +371,12 @@ async def test_remote_images_are_uploaded_in_order_before_atomic_multimodal_mess
         await provider.send_message("Inspect both images", [original, PNG_IMAGE])
         assert server.uploaded_images == [original, PNG_IMAGE]
         assert [chunk["seq"] for chunk in server.image_uploads] == ["0", "1", "2", "0"]
-        assert [chunk["final"] for chunk in server.image_uploads] == ["0", "0", "1", "1"]
+        assert [chunk["final"] for chunk in server.image_uploads] == [
+            "0",
+            "0",
+            "1",
+            "1",
+        ]
         assert all(len(chunk["content"]) <= 512 * 1024 for chunk in server.image_uploads)
         assert all(
             chunk["host"] == "remote-maso.example" and chunk["mime"] == "application/octet-stream"
@@ -420,7 +451,9 @@ async def test_all_images_are_validated_before_any_provider_request(bad_image, e
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("failure", ["first_chunk", "second_image", "metadata", "wrong_ref"])
-async def test_upload_failure_does_not_quarantine_or_deliver_a_partial_turn(failure) -> None:
+async def test_upload_failure_does_not_quarantine_or_deliver_a_partial_turn(
+    failure,
+) -> None:
     server = MasoServer()
     if failure in {"metadata", "wrong_ref"}:
         server.image_metadata = {
@@ -524,7 +557,10 @@ async def test_maso_tailer_retains_preview_and_sends_original_without_echo_dupli
         serialized = json.dumps([event.model_dump(mode="json") for event in page.events])
         assert "data:image/" not in serialized and "image_ref" not in serialized
         ctx = NormalizeContext(
-            session_id=record.id, tab_id=record.tab_id, agent_type=AgentType.MASO, run_epoch=1
+            session_id=record.id,
+            tab_id=record.tab_id,
+            agent_type=AgentType.MASO,
+            run_epoch=1,
         )
         assert (
             MasoEventAdapter().normalize_line(
@@ -542,7 +578,9 @@ async def test_maso_tailer_retains_preview_and_sends_original_without_echo_dupli
 
 
 @pytest.mark.parametrize("response_event", ["post_llm_response", "turn_end"])
-def test_offsets_snapshots_and_compression_are_not_new_turns(response_event: str) -> None:
+def test_offsets_snapshots_and_compression_are_not_new_turns(
+    response_event: str,
+) -> None:
     adapter = MasoEventAdapter()
     ctx = NormalizeContext(
         session_id="s",
@@ -610,18 +648,27 @@ async def test_authoritative_response_reaches_history_before_root_completion(
         stream.emit("tool_use", {"agent_id": "main", "tool_call_id": "read", "tool": "Read"})
         stream.emit(
             "tool_result",
-            {"agent_id": "main", "tool_call_id": "read", "tool": "Read", "output": "source"},
+            {
+                "agent_id": "main",
+                "tool_call_id": "read",
+                "tool": "Read",
+                "output": "source",
+            },
         )
         stream.emit("turn_end", {"agent_id": "main", "turn": 1, "outcome": "tool_calls"})
         stream.emit("agent_start", {"agent_id": "child"})
         stream.emit("turn_start", {"agent_id": "child", "turn": 1})
         stream.emit(
-            "post_llm_response", {"agent_id": "child", "content": "Child result.", "id": "c1"}
+            "post_llm_response",
+            {"agent_id": "child", "content": "Child result.", "id": "c1"},
         )
         stream.emit("agent_end", {"agent_id": "child", "stop_reason": "completed"})
         stream.emit("turn_start", {"agent_id": "main", "turn": 2})
         if prefix:
-            stream.emit("llm_token", {"agent_id": "main", "content": prefix, "content_offset": 0})
+            stream.emit(
+                "llm_token",
+                {"agent_id": "main", "content": prefix, "content_offset": 0},
+            )
         response = {
             "agent_id": "main",
             "id": "answer",
@@ -747,7 +794,10 @@ async def test_goal_waits_for_root_agent_end_and_hides_protocol(tmp_path, monkey
             turn_metadata={"origin": "goal", "protocol": "goal-continuation-v1"},
         )
         stream = server.streams[-1]
-        stream.emit("post_llm_response", {"agent_id": "main", "id": "answer", "content": response})
+        stream.emit(
+            "post_llm_response",
+            {"agent_id": "main", "id": "answer", "content": response},
+        )
         stream.emit("turn_end", {"agent_id": "main", "turn": 1, "outcome": "completed"})
         stream.emit("agent_start", {"agent_id": "child"})
         stream.emit("agent_end", {"agent_id": "child", "stop_reason": "completed"})
@@ -895,7 +945,8 @@ async def test_cancel_rejects_late_notifications_and_resumes_same_session() -> N
 async def test_rotation_adopts_only_maso_assigned_session_id() -> None:
     server = MasoServer()
     provider = transport(
-        server, session(agent_session_id="old-provider-session", agent_session_id_verified=True)
+        server,
+        session(agent_session_id="old-provider-session", agent_session_id_verified=True),
     )
     persisted: list[str] = []
     provider._conversation_id_persist = persisted.append
@@ -918,7 +969,8 @@ async def test_rotation_adopts_only_maso_assigned_session_id() -> None:
 async def test_rejected_maso_rotation_discards_candidate_without_persisting() -> None:
     server = MasoServer()
     provider = transport(
-        server, session(agent_session_id="old-provider-session", agent_session_id_verified=True)
+        server,
+        session(agent_session_id="old-provider-session", agent_session_id_verified=True),
     )
     persisted: list[str] = []
     provider._conversation_id_persist = persisted.append
@@ -1061,7 +1113,8 @@ async def test_failed_maso_rotation_preserves_old_identity() -> None:
     server = MasoServer()
     server.fail_exit = True
     provider = transport(
-        server, session(agent_session_id="old-provider-session", agent_session_id_verified=True)
+        server,
+        session(agent_session_id="old-provider-session", agent_session_id_verified=True),
     )
     try:
         with pytest.raises(RuntimeError, match="MASO POST .*exit returned HTTP 503"):
@@ -1109,8 +1162,9 @@ async def test_stop_fences_late_events_before_abort_is_confirmed(tmp_path, monke
     try:
         await tailer.send_message("stop me", [], "stopped")
         generation = provider._stdout_generation
-        assert await tailer.cancel_turn("stopped")
+        stopping = asyncio.create_task(tailer.cancel_turn("stopped"))
         await asyncio.wait_for(server.abort_entered.wait(), 2)
+        assert not stopping.done()  # MASO Stop confirms teardown before returning.
         assert server.streams[-1].closed
         late_events: list[tuple[str, dict[str, Any]]] = [
             ("llm_token", {"content": "late output", "content_offset": 0}),
@@ -1121,7 +1175,7 @@ async def test_stop_fences_late_events_before_abort_is_confirmed(tmp_path, monke
             assert not provider.accepts_notification(late)
             await provider._stdout_queue.put((generation, late))
         server.abort_release.set()
-        await tailer._await_turn_teardown()
+        assert await asyncio.wait_for(stopping, 2)
         page = await tailer._store.read_since(0, 100)
         assert all(e.turn_id == "stopped" for e in page.events)
         assert not any(e.type == AgentStreamEventType.TEXT_DELTA for e in page.events)
@@ -1150,14 +1204,16 @@ async def test_next_turn_waits_for_cancel_finalizers_after_registry_is_idle() ->
     second = None
     try:
         await tailer.send_message("first", [], "first")
-        assert await tailer.cancel_turn("first")
+        stopping = asyncio.create_task(tailer.cancel_turn("first"))
         await asyncio.wait_for(server.exit_entered.wait(), 2)
+        assert not stopping.done()
         assert not server.running  # idle is observable before old agent_end
         second = asyncio.create_task(tailer.send_message("second", [], "second"))
         await asyncio.sleep(0)
         assert not second.done()
         assert len(server.streams) == 1
         server.exit_release.set()
+        assert await asyncio.wait_for(stopping, 2)
         await asyncio.wait_for(second, 2)
         assert len(server.streams) == 2
         await asyncio.sleep(0)
@@ -1341,7 +1397,8 @@ async def test_maso_creation_pins_endpoint_across_backend_default_change(
         return [], "seed"
 
     monkeypatch.setattr(
-        "claude_hub.services.agent_stream.maso_http.check_maso_service", available_service
+        "claude_hub.services.agent_stream.maso_http.check_maso_service",
+        available_service,
     )
     monkeypatch.setenv("MASO_BASE_URL", "http://maso-a.test:9796")
     manager = TTYDManager()
@@ -1357,7 +1414,10 @@ async def test_maso_creation_pins_endpoint_across_backend_default_change(
     monkeypatch.setenv("MASO_BASE_URL", "http://maso-b.test:9796")
     restored = TTYDManager().processes[tab.id]
     await restored.switch_env({"MASO_MODEL": "seed-high", "MASO_BASE_URL": ""})
-    assert restored.env == {"MASO_BASE_URL": "http://maso-a.test:9796", "MASO_MODEL": "seed-high"}
+    assert restored.env == {
+        "MASO_BASE_URL": "http://maso-a.test:9796",
+        "MASO_MODEL": "seed-high",
+    }
     provider = transport(
         MasoServer(),
         session(
@@ -1586,7 +1646,10 @@ async def test_post_enqueued_after_timeout_keeps_chat_blocked_across_restart() -
         resumed = transport(
             server,
             record.model_copy(
-                update={"agent_session_id": "opaque-sid", "agent_session_id_verified": True}
+                update={
+                    "agent_session_id": "opaque-sid",
+                    "agent_session_id_verified": True,
+                }
             ),
         )
         try:
@@ -1673,7 +1736,10 @@ async def test_resume_disables_native_cron_before_delivery_and_preserves_other_o
         )
         assert server.calls.index(patch) < message_index
         assert server.session_creations == 0
-        assert server.runtime_overrides == {"session_memory.extend": True, "cron.enabled": False}
+        assert server.runtime_overrides == {
+            "session_memory.extend": True,
+            "cron.enabled": False,
+        }
     finally:
         await provider.stop()
 
@@ -1682,7 +1748,9 @@ async def test_resume_disables_native_cron_before_delivery_and_preserves_other_o
     "failure", ["unsupported", "ignored"], ids=["no-api", "policy-not-applied"]
 )
 @pytest.mark.asyncio
-async def test_native_cron_policy_failure_is_fail_closed_and_retryable(failure: str) -> None:
+async def test_native_cron_policy_failure_is_fail_closed_and_retryable(
+    failure: str,
+) -> None:
     server = MasoServer()
     server.fail_runtime_options = failure == "unsupported"
     server.ignore_cron_policy = failure == "ignored"
@@ -1744,7 +1812,8 @@ async def test_native_children_keep_one_hub_turn_through_multiple_root_wakeups()
             stream.emit("turn_start", {"agent_id": "main", "turn": 0})
             stream.emit("agent_end", {"agent_id": child, "stop_reason": "completed"})
             stream.emit(
-                "tool_use", {"agent_id": "main", "tool_call_id": f"read-{index}", "tool": "Read"}
+                "tool_use",
+                {"agent_id": "main", "tool_call_id": f"read-{index}", "tool": "Read"},
             )
             stream.emit(
                 "tool_result",
@@ -1850,10 +1919,18 @@ async def test_late_root_wakeup_after_quiescence_is_live_persisted_and_headless_
         # Reattach while still running: no message POST or provider reconnect.
         completion = await tailer.subscribe_completion()
         live = await tailer.subscribe()
-        stream.emit("tool_use", {"agent_id": "main", "tool_call_id": "wake-tool", "tool": "Read"})
+        stream.emit(
+            "tool_use",
+            {"agent_id": "main", "tool_call_id": "wake-tool", "tool": "Read"},
+        )
         stream.emit(
             "tool_result",
-            {"agent_id": "main", "tool_call_id": "wake-tool", "tool": "Read", "output": "ok"},
+            {
+                "agent_id": "main",
+                "tool_call_id": "wake-tool",
+                "tool": "Read",
+                "output": "ok",
+            },
         )
         stream.emit("turn_start", {"agent_id": "main", "turn": 1})
         stream.emit("post_llm_response", {"agent_id": "main", "content": "Wake finished."})
@@ -1879,7 +1956,8 @@ async def test_late_root_wakeup_after_quiescence_is_live_persisted_and_headless_
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "activity", ["nested-running", "nested-waiting", "paused", "condensing", "root-finalizer"]
+    "activity",
+    ["nested-running", "nested-waiting", "paused", "condensing", "root-finalizer"],
 )
 async def test_root_end_waits_for_authoritative_tree_activity(activity: str) -> None:
     server = MasoServer()
@@ -1890,7 +1968,10 @@ async def test_root_end_waits_for_authoritative_tree_activity(activity: str) -> 
         server.running = activity == "root-finalizer"
         if activity.startswith("nested"):
             server.children = [
-                {"status": "idle", "children": [{"status": activity.split("-")[1], "children": []}]}
+                {
+                    "status": "idle",
+                    "children": [{"status": activity.split("-")[1], "children": []}],
+                }
             ]
         elif activity == "paused":
             server.indicator["running"] = ["paused-child"]
@@ -1968,7 +2049,9 @@ async def test_status_monitor_failure_cannot_hang_or_abort_children() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("blocked_phase", ["preparation", "post"])
-async def test_native_wake_cannot_retire_a_new_user_submission(blocked_phase: str) -> None:
+async def test_native_wake_cannot_retire_a_new_user_submission(
+    blocked_phase: str,
+) -> None:
     server = MasoServer()
     record = session()
     provider = transport(server, record)
@@ -2007,7 +2090,8 @@ async def test_native_wake_cannot_retire_a_new_user_submission(blocked_phase: st
         stream.emit("agent_start", {"agent_id": "main"})
         stream.emit("turn_start", {"agent_id": "main", "turn": 0})
         stream.emit(
-            "post_llm_response", {"agent_id": "main", "content": "Native report, not user response"}
+            "post_llm_response",
+            {"agent_id": "main", "content": "Native report, not user response"},
         )
         stream.emit("agent_end", {"agent_id": "main", "stop_reason": "completed"})
         await asyncio.sleep(0.8)
@@ -2057,7 +2141,10 @@ async def test_late_child_only_wake_has_owned_stoppable_turn(stop: bool) -> None
         await asyncio.wait_for(completion.get(), 2)
         stream.emit("agent_start", {"agent_id": "child"})
         stream.emit("turn_start", {"agent_id": "child", "turn": 0})
-        stream.emit("tool_use", {"agent_id": "child", "tool_call_id": "child-task", "tool": "Bash"})
+        stream.emit(
+            "tool_use",
+            {"agent_id": "child", "tool_call_id": "child-task", "tool": "Bash"},
+        )
         stream.emit("post_llm_response", {"agent_id": "child", "content": "Child woke."})
         for _ in range(100):
             page = await tailer._store.read_since(-1, 100)
@@ -2101,7 +2188,8 @@ async def test_input_retained_before_agent_start_can_finish_failed_turn() -> Non
             body = json.loads(request.content)
             stream = server.streams[-1]
             stream.emit(
-                "message_injected", {"agent_id": "main", "injected": [{"id": body["message_id"]}]}
+                "message_injected",
+                {"agent_id": "main", "injected": [{"id": body["message_id"]}]},
             )
             stream.emit("agent_error", {"agent_id": "main", "error": "before_input failed"})
             stream.emit("agent_end", {"agent_id": "main", "stop_reason": "error"})
@@ -2132,4 +2220,917 @@ async def test_input_retained_before_agent_start_can_finish_failed_turn() -> Non
         assert not any(path.endswith(("/control", "/exit")) for _, path, _ in server.calls)
     finally:
         tailer.unsubscribe_completion(completion)
+        await tailer.stop()
+
+
+@pytest.mark.asyncio
+async def test_uncertain_delivery_reconciles_only_when_remote_idle_and_pending_absent() -> None:
+    server = MasoServer()
+    record = session()
+    provider = transport(server, record)
+    try:
+        await provider.send_message("first prompt", [])
+        first_message_id = provider._message_id
+        assert first_message_id is not None
+        server.streams[-1].queue.put_nowait(None)
+        while True:
+            event = await asyncio.wait_for(provider.read_line(), 2)
+            assert event is not None
+            if event["type"] == "hub_transport_error":
+                break
+        provider.acknowledge_turn_complete()
+        assert provider._delivery_uncertain and provider._delivery_path.exists()
+
+        # Remote still running: must stay fail-closed.
+        assert server.running
+        with pytest.raises(RuntimeError, match="Further sends are refused"):
+            await provider.send_message("blocked while running", [])
+        assert provider._delivery_uncertain and provider._delivery_path.exists()
+
+        # Remote idle, but status endpoint returns 503: must stay fail-closed.
+        server.running = False
+        server.fail_status = True
+        with pytest.raises(RuntimeError, match="Further sends are refused"):
+            await provider.send_message("blocked when status 503", [])
+        assert provider._delivery_uncertain and provider._delivery_path.exists()
+        server.fail_status = False
+
+        # Remote idle, but pending lookup returns 503: must stay fail-closed.
+        server.fail_pending_get = True
+        with pytest.raises(RuntimeError, match="Further sends are refused"):
+            await provider.send_message("blocked when pending 503", [])
+        assert provider._delivery_uncertain and provider._delivery_path.exists()
+        server.fail_pending_get = False
+
+        # Remote idle, but message is still in pending broker queue (200): must stay fail-closed.
+        server.pending[first_message_id] = "first prompt"
+        with pytest.raises(RuntimeError, match="Further sends are refused"):
+            await provider.send_message("blocked while pending queued", [])
+        assert provider._delivery_uncertain and provider._delivery_path.exists()
+
+        # Remote child still active: must stay fail-closed even when pending is absent (404).
+        server.pending.clear()
+        server.children = [{"status": "running", "children": []}]
+        with pytest.raises(RuntimeError, match="Further sends are refused"):
+            await provider.send_message("blocked while child active", [])
+        assert provider._delivery_uncertain and provider._delivery_path.exists()
+        server.children = []
+
+        # Remote confirmed idle and pending/{message_id} returns 404: reconcile and send new prompt.
+        await provider.send_message("second prompt", [])
+        assert not provider._delivery_uncertain
+        assert provider._last_error is None
+        posted = [body for method, path, body in server.calls if path.endswith("/messages")]
+        assert len(posted) == 2
+        assert posted[1]["content"] == "second prompt"
+        assert posted[1]["message_id"] != first_message_id
+        assert (
+            "GET",
+            f"/api/sessions/opaque-sid/messages/pending/{first_message_id}",
+            {},
+        ) in server.calls
+    finally:
+        await provider.stop()
+
+
+@pytest.mark.asyncio
+async def test_stop_clears_uncertain_delivery_when_turn_not_in_flight() -> None:
+    server = MasoServer()
+    server.fail_send = True
+    record = session()
+    provider = transport(server, record)
+    try:
+        with pytest.raises(RuntimeError, match="acceptance is uncertain"):
+            await provider.send_message("ambiguous prompt", [])
+        quarantined_id = provider._message_id
+        assert quarantined_id is not None
+        assert not provider.turn_in_flight
+        assert provider._delivery_uncertain and provider._delivery_path.exists()
+        assert quarantined_id in server.pending
+
+        # If abort fails during Stop, quarantine remains fail-closed.
+        server.fail_abort = True
+        with pytest.raises(RuntimeError, match="HTTP 503"):
+            await provider.cancel_active_turn()
+        assert provider._delivery_uncertain and provider._delivery_path.exists()
+        assert provider._needs_abort
+        server.fail_abort = False
+
+        # Explicit Stop with turn_in_flight=False deletes pending, aborts, exits, confirms idle, and clears sidecar.
+        await provider.cancel_active_turn()
+        assert not provider._delivery_uncertain
+        assert not provider._needs_abort
+        assert not provider._delivery_path.exists()
+        assert quarantined_id not in server.pending
+        assert (
+            "DELETE",
+            f"/api/sessions/opaque-sid/messages/pending/{quarantined_id}",
+            {},
+        ) in server.calls
+        assert (
+            "POST",
+            "/api/sessions/opaque-sid/control",
+            {"action": "abort"},
+        ) in server.calls
+        assert ("POST", "/api/sessions/opaque-sid/exit", {}) in server.calls
+        assert provider._conversation_id == "opaque-sid-2"
+
+        server.fail_send = False
+        await provider.send_message("fresh prompt after stop", [])
+        posted = [body for _, path, body in server.calls if path.endswith("/messages")]
+        assert len(posted) == 2
+        assert posted[-1]["content"].endswith("fresh prompt after stop")
+        assert (
+            "POST",
+            "/api/sessions/opaque-sid-2/messages",
+            posted[-1],
+        ) in server.calls
+    finally:
+        await provider.stop()
+
+
+@pytest.mark.asyncio
+async def test_unacknowledged_post_quarantine_blocks_auto_reconcile_and_stop_fences_delayed_enqueue() -> (
+    None
+):
+    server = MasoServer()
+    server.fail_send = True
+    server.delayed_enqueue = True
+    record = session()
+    persisted_ids: list[str] = []
+    provider = MasoHttpSession(record, conversation_id_persist=persisted_ids.append)
+    provider._client = httpx.AsyncClient(
+        base_url="http://127.0.0.1:9796", transport=httpx.MockTransport(server.handle)
+    )
+    try:
+        with pytest.raises(RuntimeError, match="acceptance is uncertain"):
+            await provider.send_message("delayed prompt", [])
+        assert provider._delivery_uncertain and not provider._post_acknowledged
+        assert not server.running and not server.pending
+
+        # Auto-reconciliation must NOT clear an unacknowledged POST even when
+        # remote status is idle and pending returns 404, because the delayed
+        # handler can still enqueue onto opaque-sid later.
+        with pytest.raises(RuntimeError, match="Further sends are refused"):
+            await provider.send_message("must stay blocked before stop", [])
+        assert provider._delivery_uncertain and provider._delivery_path.exists()
+
+        # Explicit Stop rotates to a fresh MASO session so any late enqueue on
+        # opaque-sid cannot be woken by subsequent prompts.
+        await provider.cancel_active_turn()
+        assert not provider._delivery_uncertain and not provider._delivery_path.exists()
+        assert provider._conversation_id == "opaque-sid-2"
+        assert persisted_ids[-1] == "opaque-sid-2"
+
+        # Now the delayed handler finally enqueues onto the old session.
+        assert server.delayed_message is not None
+        server.pending[server.delayed_message["message_id"]] = "delayed prompt"
+
+        server.fail_send = False
+        server.delayed_enqueue = False
+        await provider.send_message("clean prompt on rotated session", [])
+        message_Calls = [
+            (path, body) for _, path, body in server.calls if path.endswith("/messages")
+        ]
+        assert message_Calls[-1][0] == "/api/sessions/opaque-sid-2/messages"
+        assert message_Calls[-1][1]["content"].endswith("clean prompt on rotated session")
+    finally:
+        await provider.stop()
+
+
+@pytest.mark.asyncio
+async def test_reconcile_uncertain_delivery_fences_pending_consumed_between_status_and_pending_get() -> (
+    None
+):
+    server = MasoServer()
+    record = session()
+    provider = transport(server, record)
+    try:
+        await provider.send_message("first prompt", [])
+        first_message_id = provider._message_id
+        assert first_message_id is not None
+        server.streams[-1].queue.put_nowait(None)
+        while True:
+            event = await asyncio.wait_for(provider.read_line(), 2)
+            assert event is not None
+            if event["type"] == "hub_transport_error":
+                break
+        provider.acknowledge_turn_complete()
+        assert provider._delivery_uncertain and provider._post_acknowledged
+
+        # Simulate the race where the first GET /status sees idle while the
+        # message is still queued in pending, and MASO dequeues + starts running
+        # just before GET /messages/pending/{id} returns 404.
+        server.running = False
+        server.pending[first_message_id] = "first prompt"
+        original_handle = server.handle
+
+        async def racing_handle(request: httpx.Request) -> httpx.Response:
+            if request.method == "GET" and "/messages/pending/" in request.url.path:
+                server.pending.pop(first_message_id, None)
+                server.running = True
+            return await original_handle(request)
+
+        provider._client = httpx.AsyncClient(
+            base_url="http://127.0.0.1:9796",
+            transport=httpx.MockTransport(racing_handle),
+        )
+        with pytest.raises(RuntimeError, match="Further sends are refused"):
+            await provider.send_message("must not bypass active execution", [])
+        assert provider._delivery_uncertain and provider._delivery_path.exists()
+    finally:
+        await provider.stop()
+
+
+@pytest.mark.asyncio
+async def test_cold_manager_targeted_stop_and_attention_status_for_persisted_quarantine(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from claude_hub.models import AgentRuntimeStatus
+    from claude_hub.services import managed_chat
+    from claude_hub.services.agent_stream import tailer as tailer_module
+    from claude_hub.services.agent_stream.tailer import get_native_runtime_snapshot
+
+    server = MasoServer()
+    server.fail_send = True
+    record = session()
+    current_record = record
+
+    def fake_create_native_session(
+        sess: ManagedSession,
+        conversation_id_persist: Any = None,
+        seed_history: Any = None,
+        on_seed_consumed: Any = None,
+    ) -> MasoHttpSession:
+        inst = MasoHttpSession(
+            sess,
+            conversation_id_persist=conversation_id_persist,
+            seed_history=seed_history,
+            on_seed_consumed=on_seed_consumed,
+        )
+        inst._client = httpx.AsyncClient(
+            base_url="http://127.0.0.1:9796",
+            transport=httpx.MockTransport(server.handle),
+        )
+        return inst
+
+    monkeypatch.setattr(tailer_module, "create_native_session", fake_create_native_session)
+
+    def persist_cid(_sid: str, cid: str) -> None:
+        nonlocal current_record
+        current_record = current_record.model_copy(
+            update={"agent_session_id": cid, "agent_session_id_verified": True}
+        )
+
+    manager1 = TailerManager(lambda _id: current_record, persist_session_id=persist_cid)
+    try:
+        with pytest.raises(RuntimeError, match="acceptance is uncertain"):
+            await manager1.send_message(
+                current_record, "quarantined prompt", [], "turn-quarantined"
+            )
+    finally:
+        await manager1.stop_all()
+
+    cold_record = current_record
+    manager2 = TailerManager(lambda _id: current_record, persist_session_id=persist_cid)
+    monkeypatch.setattr(managed_chat, "_manager", lambda: manager2)
+    try:
+        # Even before a tailer is hydrated, managed_chat.runtime_status reports ATTENTION.
+        assert managed_chat.runtime_status(cold_record) == AgentRuntimeStatus.ATTENTION
+
+        # Start the cold tailer via subscribe: it terminalizes the unfinished
+        # turn-quarantined orphan in the store while preserving the persisted
+        # MASO delivery sidecar.
+        sub = await manager2.subscribe(cold_record)
+        tailer2 = manager2.get_tailer(cold_record.id)
+        assert tailer2 is not None
+        tailer2.unsubscribe(sub)
+        assert await tailer2._store.latest_unfinished_turn() is None
+        assert getattr(tailer2.native_transport, "_delivery_uncertain", False) is True
+        assert getattr(tailer2.native_transport, "_quarantined_turn_id", None) == "turn-quarantined"
+
+        # Both direct-tab snapshot and managed_chat status report ATTENTION, not IDLE/Ready.
+        snap = get_native_runtime_snapshot(cold_record.id)
+        assert snap is not None
+        assert snap.status == AgentRuntimeStatus.ATTENTION
+        assert snap.detail != "Ready"
+        assert managed_chat.runtime_status(cold_record) == AgentRuntimeStatus.ATTENTION
+
+        # A subsequent local rejection under quarantine must not overwrite _quarantined_turn_id.
+        with pytest.raises(RuntimeError, match="Further sends are refused"):
+            await manager2.send_message(cold_record, "rejected follow-up", [], "turn-rejected")
+        assert getattr(tailer2.native_transport, "_quarantined_turn_id", None) == "turn-quarantined"
+
+        # Stale expected_turn_id is still rejected, preserving stale-target protection.
+        assert await manager2.cancel_turn(cold_record, expected_turn_id="stale-turn-id") is False
+        assert getattr(tailer2.native_transport, "_delivery_uncertain", False) is True
+
+        # Targeted Stop with the quarantined turn_id succeeds and clears quarantine.
+        assert await manager2.cancel_turn(cold_record, expected_turn_id="turn-quarantined") is True
+        await tailer2._await_turn_teardown()
+        assert getattr(tailer2.native_transport, "_delivery_uncertain", False) is False
+        snap_after = get_native_runtime_snapshot(cold_record.id)
+        assert snap_after is not None and snap_after.status == AgentRuntimeStatus.IDLE
+        assert managed_chat.runtime_status(cold_record) == AgentRuntimeStatus.IDLE
+    finally:
+        await manager2.stop_all()
+
+
+@pytest.mark.asyncio
+async def test_local_rejection_under_existing_uncertain_quarantine_closes_user_and_scheduled_turns() -> (
+    None
+):
+    server = MasoServer()
+    record = session()
+    provider = transport(server, record)
+    tailer = SessionTailer(
+        workspace_id=record.workspace_id,
+        session_id=record.id,
+        adapter=MasoEventAdapter(),
+        session_getter=lambda: record,
+        native_transport=provider,
+    )
+    completion = await tailer.subscribe_completion()
+    try:
+        await tailer.send_message("first", [], "turn-1")
+        server.streams[-1].queue.put_nowait(None)
+        while True:
+            terminal = await asyncio.wait_for(completion.get(), 2)
+            if terminal.type == AgentStreamEventType.TURN_COMPLETED:
+                break
+        assert terminal.turn_id == "turn-1" and terminal.payload["status"] == "failed"
+        assert provider._delivery_uncertain and provider._delivery_path.exists()
+        assert server.running
+
+        # User retry rejected locally before reaching provider must close turn-2 immediately.
+        with pytest.raises(RuntimeError, match="Further sends are refused"):
+            await tailer.send_message("user retry", [], "turn-2")
+        assert tailer._active_turn_id is None
+        assert await tailer._store.latest_unfinished_turn() is None
+
+        # Scheduled patrol turn rejected locally before reaching provider must also close immediately
+        # without marking before_delivery or leaving an open ghost turn.
+        delivery_markers: list[str] = []
+        with pytest.raises(RuntimeError, match="Further sends are refused"):
+            await tailer.send_message(
+                "scheduled patrol",
+                [],
+                "scheduled-turn-3",
+                turn_metadata={
+                    "origin": "scheduled_task",
+                    "scheduled_task_id": "sched-1",
+                    "yields_to_user": True,
+                },
+                before_delivery=lambda: delivery_markers.append("submitted"),
+                allow_question_answer=False,
+            )
+        assert delivery_markers == []
+        assert tailer._active_turn_id is None
+        assert await tailer._store.latest_unfinished_turn() is None
+
+        page = await tailer._store.read_since(-1, 100)
+        by_turn: dict[str, list] = {}
+        for event in page.events:
+            if event.turn_id is not None:
+                by_turn.setdefault(event.turn_id, []).append(event)
+        for rejected_id in ("turn-2", "scheduled-turn-3"):
+            events = by_turn[rejected_id]
+            assert [e.type for e in events] == [
+                AgentStreamEventType.TURN_STARTED,
+                AgentStreamEventType.ERROR,
+                AgentStreamEventType.TURN_COMPLETED,
+            ]
+            assert events[-1].payload == {
+                "status": "failed",
+                "delivery_rejected": True,
+                "delivery_uncertain": True,
+                "quarantined_turn_id": "turn-1",
+            }
+
+        # Cold tailer startup must not find any orphan or emit runtime_interrupted.
+        before_count = len(page.events)
+        restarted_record = record.model_copy(
+            update={"agent_session_id": "opaque-sid", "agent_session_id_verified": True}
+        )
+        restarted_provider = transport(server, restarted_record)
+        restarted = SessionTailer(
+            workspace_id=record.workspace_id,
+            session_id=record.id,
+            adapter=MasoEventAdapter(),
+            session_getter=lambda: restarted_record,
+            native_transport=restarted_provider,
+        )
+        try:
+            assert restarted_provider._delivery_uncertain
+            await restarted.start()
+            after_page = await restarted._store.read_since(-1, 100)
+            assert len(after_page.events) == before_count
+            assert not any(e.payload.get("runtime_interrupted") is True for e in after_page.events)
+        finally:
+            await restarted.stop()
+
+        # Stop via tailer when turn_in_flight=False clears the uncertain quarantine so the next turn succeeds.
+        assert await tailer.cancel_turn()
+        await tailer._await_turn_teardown()
+        assert not provider._delivery_uncertain and not provider._delivery_path.exists()
+        await tailer.send_message("recovered after stop", [], "turn-4")
+        server.streams[-1].emit("post_llm_response", {"agent_id": "main", "content": "ok"})
+        server.running = False
+        server.streams[-1].emit("agent_end", {"agent_id": "main", "stop_reason": "completed"})
+        while True:
+            done = await asyncio.wait_for(completion.get(), 2)
+            if done.turn_id == "turn-4" and done.type == AgentStreamEventType.TURN_COMPLETED:
+                assert done.payload["status"] == "completed"
+                break
+    finally:
+        tailer.unsubscribe_completion(completion)
+        await tailer.stop()
+
+
+@pytest.mark.asyncio
+async def test_stop_rotation_after_unacknowledged_followup_reinjects_guidance_and_seeds_prior_turns() -> (
+    None
+):
+    server = MasoServer()
+    record = session()
+    provider = transport(server, record)
+    tailer = SessionTailer(
+        workspace_id=record.workspace_id,
+        session_id=record.id,
+        adapter=MasoEventAdapter(),
+        session_getter=lambda: record,
+        native_transport=provider,
+    )
+    completion = await tailer.subscribe_completion()
+    try:
+        await tailer.send_message("Remember token ALPHA-42", [], "turn-1")
+        server.streams[-1].emit(
+            "post_llm_response",
+            {"agent_id": "main", "content": "Acknowledged ALPHA-42."},
+        )
+        server.running = False
+        server.streams[-1].emit("agent_end", {"agent_id": "main", "stop_reason": "completed"})
+        while True:
+            done = await asyncio.wait_for(completion.get(), 2)
+            if done.turn_id == "turn-1" and done.type == AgentStreamEventType.TURN_COMPLETED:
+                break
+        assert provider._hub_runtime_guidance_injected is True
+
+        # Second turn fails during POST /messages (post_acknowledged=False).
+        server.fail_send = True
+        with pytest.raises(RuntimeError, match="acceptance is uncertain"):
+            await tailer.send_message("ambiguous follow-up", [], "turn-2")
+        assert provider._delivery_uncertain and not provider._post_acknowledged
+
+        # Explicit Stop rotates to a fresh MASO session, resets guidance flags,
+        # and seeds the completed turn-1 Q/A transcript into the new session.
+        assert await tailer.cancel_turn("turn-2") is True
+        assert provider._conversation_id == "opaque-sid-2"
+        assert provider._hub_runtime_guidance_injected is False
+        assert provider._seed_history is not None
+        assert "Remember token ALPHA-42" in provider._seed_history
+        assert "Acknowledged ALPHA-42." in provider._seed_history
+        assert "ambiguous follow-up" not in provider._seed_history
+
+        server.fail_send = False
+        await tailer.send_message("continue", [], "turn-3")
+        message_calls = [
+            body
+            for method, path, body in server.calls
+            if method == "POST" and path == "/api/sessions/opaque-sid-2/messages"
+        ]
+        assert len(message_calls) == 1
+        sent_content = message_calls[0]["content"]
+        assert "CLAUDE_HUB_TAB_ID=" in sent_content
+        assert "<claude_hub_instructions>" in sent_content
+        assert "<<<FORK_SEED_HISTORY_V1>>>" in sent_content
+        assert "Remember token ALPHA-42" in sent_content
+        assert "Acknowledged ALPHA-42." in sent_content
+        assert sent_content.endswith("continue")
+        assert provider._hub_runtime_guidance_injected is True
+        assert provider._seed_history is None
+        from claude_hub.services.agent_stream.fork_seed import read_seed_sidecar
+
+        assert read_seed_sidecar(record.workspace_id, record.id) is None
+        # Consumption callbacks are one-shot, but this live transport can
+        # recover again. The second durable seed must also be consumed.
+        assert await tailer.cancel_turn("turn-3")
+        server.fail_send = True
+        with pytest.raises(RuntimeError, match="acceptance is uncertain"):
+            await tailer.send_message("another ambiguous action", [], "turn-4")
+        assert await tailer.cancel_turn("turn-4")
+        server.fail_send = False
+        await tailer.send_message("continue again", [], "turn-5")
+        assert read_seed_sidecar(record.workspace_id, record.id) is None
+    finally:
+        tailer.unsubscribe_completion(completion)
+        await tailer.stop()
+
+
+@pytest.mark.asyncio
+async def test_stop_rotation_adoption_is_crash_safe_when_sidecar_unlink_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    server = MasoServer()
+    server.fail_send = True
+    record = session()
+    persisted_ids: list[str] = []
+
+    def persist_cid(cid: str) -> None:
+        persisted_ids.append(cid)
+
+    provider = MasoHttpSession(record, conversation_id_persist=persist_cid)
+    provider._client = httpx.AsyncClient(
+        base_url="http://127.0.0.1:9796",
+        transport=httpx.MockTransport(server.handle),
+    )
+    try:
+        with pytest.raises(RuntimeError, match="acceptance is uncertain"):
+            await provider.send_message("uncertain post", [])
+        assert provider._delivery_uncertain and not provider._post_acknowledged
+
+        original_unlink = Path.unlink
+
+        def failing_unlink(self_path: Path, *args: Any, **kwargs: Any) -> None:
+            if self_path == provider._delivery_path:
+                raise OSError("simulated unlink failure after adoption")
+            original_unlink(self_path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "unlink", failing_unlink)
+        with pytest.raises(OSError, match="simulated unlink failure"):
+            await provider.cancel_active_turn()
+        monkeypatch.setattr(Path, "unlink", original_unlink)
+
+        assert persisted_ids[-1] == "opaque-sid-2"
+        assert provider._delivery_path.exists()
+        journal = json.loads(provider._delivery_path.read_text())
+        assert journal.get("adopted_session_id") == "opaque-sid-2"
+
+        # A cold restart after a crash before sidecar unlink must reconcile
+        # cleanly onto opaque-sid-2 and remove the journal sidecar instead of
+        # raising "MASO pending delivery identity could not be verified".
+        cold_record = record.model_copy(
+            update={"agent_session_id": "opaque-sid", "agent_session_id_verified": True}
+        )
+        cold_provider = MasoHttpSession(cold_record, conversation_id_persist=persist_cid)
+        try:
+            assert cold_provider._conversation_id == "opaque-sid-2"
+            assert not cold_provider._delivery_uncertain
+            assert not cold_provider._needs_abort
+            assert not cold_provider._delivery_path.exists()
+        finally:
+            await cold_provider.stop()
+    finally:
+        await provider.stop()
+
+
+@pytest.mark.asyncio
+async def test_legacy_sidecar_cold_targeted_stop_and_failed_stop_teardown_contract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from claude_hub.models import AgentRuntimeStatus
+    from claude_hub.services import managed_chat
+    from claude_hub.services.agent_stream import tailer as tailer_module
+    from claude_hub.services.agent_stream.tailer import get_native_runtime_snapshot
+
+    server = MasoServer()
+    server.fail_send = True
+    record = session()
+    current_record = record
+
+    def fake_create_native_session(
+        sess: ManagedSession,
+        conversation_id_persist: Any = None,
+        seed_history: Any = None,
+        on_seed_consumed: Any = None,
+    ) -> MasoHttpSession:
+        inst = MasoHttpSession(
+            sess,
+            conversation_id_persist=conversation_id_persist,
+            seed_history=seed_history,
+            on_seed_consumed=on_seed_consumed,
+        )
+        inst._client = httpx.AsyncClient(
+            base_url="http://127.0.0.1:9796",
+            transport=httpx.MockTransport(server.handle),
+        )
+        return inst
+
+    monkeypatch.setattr(tailer_module, "create_native_session", fake_create_native_session)
+
+    def persist_cid(_sid: str, cid: str) -> None:
+        nonlocal current_record
+        current_record = current_record.model_copy(
+            update={"agent_session_id": cid, "agent_session_id_verified": True}
+        )
+
+    manager1 = TailerManager(lambda _id: current_record, persist_session_id=persist_cid)
+    try:
+        with pytest.raises(RuntimeError, match="acceptance is uncertain"):
+            await manager1.send_message(
+                current_record, "legacy uncertain prompt", [], "turn-legacy"
+            )
+    finally:
+        await manager1.stop_all()
+
+    # Rewrite sidecar to the legacy pre-fix schema (no turn_id, no post_acknowledged).
+    sidecar_path = AgentStreamStore(
+        current_record.workspace_id, current_record.id
+    ).path.with_suffix(".maso-delivery.json")
+    legacy_payload = json.loads(sidecar_path.read_text())
+    legacy_payload.pop("turn_id", None)
+    legacy_payload.pop("post_acknowledged", None)
+    sidecar_path.write_text(json.dumps(legacy_payload))
+
+    manager2 = TailerManager(lambda _id: current_record, persist_session_id=persist_cid)
+    monkeypatch.setattr(managed_chat, "_manager", lambda: manager2)
+    try:
+        sub = await manager2.subscribe(current_record)
+        tailer2 = manager2.get_tailer(current_record.id)
+        assert tailer2 is not None
+        tailer2.unsubscribe(sub)
+        assert getattr(tailer2.native_transport, "_quarantined_turn_id", None) == "turn-legacy"
+        assert tailer2.native_transport is not None
+        caps = tailer2.native_transport.capabilities()
+        assert caps.recovery_required is True
+        assert caps.quarantined_turn_id == "turn-legacy"
+
+        # If provider abort fails (HTTP 503), targeted Stop propagates RuntimeError
+        # instead of returning True while quarantine remains active.
+        server.fail_abort = True
+        with pytest.raises(RuntimeError, match="native provider turn cancellation failed"):
+            await manager2.cancel_turn(current_record, expected_turn_id="turn-legacy")
+        assert getattr(tailer2.native_transport, "_delivery_uncertain", False) is True
+        assert getattr(tailer2.native_transport, "_needs_abort", False) is True
+
+        # Stale turn ID is still rejected.
+        assert await manager2.cancel_turn(current_record, expected_turn_id="other-turn") is False
+
+        # Once abort succeeds, targeted Stop on legacy sidecar completes and rotates.
+        server.fail_abort = False
+        assert await manager2.cancel_turn(current_record, expected_turn_id="turn-legacy") is True
+        assert getattr(tailer2.native_transport, "_delivery_uncertain", False) is False
+        assert getattr(tailer2.native_transport, "_needs_abort", False) is False
+    finally:
+        await manager2.stop_all()
+
+    # Also verify C2-5: accepted POST -> Stop abort 503 -> cold restart with
+    # uncertain=False, abort_required=True reports ATTENTION both before and
+    # after tailer hydration.
+    server3 = MasoServer()
+    record3 = session()
+    current_record3 = record3
+
+    def persist_cid3(_sid: str, cid: str) -> None:
+        nonlocal current_record3
+        current_record3 = current_record3.model_copy(
+            update={"agent_session_id": cid, "agent_session_id_verified": True}
+        )
+
+    def fake_create_native_session3(
+        sess: ManagedSession,
+        conversation_id_persist: Any = None,
+        seed_history: Any = None,
+        on_seed_consumed: Any = None,
+    ) -> MasoHttpSession:
+        inst = MasoHttpSession(
+            sess,
+            conversation_id_persist=conversation_id_persist,
+            seed_history=seed_history,
+            on_seed_consumed=on_seed_consumed,
+        )
+        inst._client = httpx.AsyncClient(
+            base_url="http://127.0.0.1:9796",
+            transport=httpx.MockTransport(server3.handle),
+        )
+        return inst
+
+    monkeypatch.setattr(tailer_module, "create_native_session", fake_create_native_session3)
+    manager3 = TailerManager(lambda _id: current_record3, persist_session_id=persist_cid3)
+    try:
+        await manager3.send_message(current_record3, "accepted prompt", [], "turn-abort-503")
+        server3.fail_abort = True
+        with pytest.raises(RuntimeError, match="native provider turn cancellation failed"):
+            await manager3.cancel_turn(current_record3, expected_turn_id="turn-abort-503")
+        tailer3 = manager3.get_tailer(current_record3.id)
+        assert tailer3 is not None
+        await tailer3._await_turn_teardown()
+        assert getattr(tailer3.native_transport, "_delivery_uncertain", False) is False
+        assert getattr(tailer3.native_transport, "_needs_abort", False) is True
+    finally:
+        await manager3.stop_all()
+
+    manager4 = TailerManager(lambda _id: current_record3, persist_session_id=persist_cid3)
+    monkeypatch.setattr(managed_chat, "_manager", lambda: manager4)
+    try:
+        assert managed_chat.runtime_status(current_record3) == AgentRuntimeStatus.ATTENTION
+        sub4 = await manager4.subscribe(current_record3)
+        tailer4 = manager4.get_tailer(current_record3.id)
+        assert tailer4 is not None
+        tailer4.unsubscribe(sub4)
+        snap4 = get_native_runtime_snapshot(current_record3.id)
+        assert snap4 is not None
+        assert snap4.status == AgentRuntimeStatus.ATTENTION
+        assert snap4.detail != "Ready"
+        assert managed_chat.runtime_status(current_record3) == AgentRuntimeStatus.ATTENTION
+        assert tailer4.native_transport is not None
+        assert tailer4.native_transport.capabilities().recovery_required is True
+
+        server3.fail_abort = False
+        assert (
+            await manager4.cancel_turn(current_record3, expected_turn_id="turn-abort-503") is True
+        )
+        snap4_after = get_native_runtime_snapshot(current_record3.id)
+        assert snap4_after is not None and snap4_after.status == AgentRuntimeStatus.IDLE
+        assert managed_chat.runtime_status(current_record3) == AgentRuntimeStatus.IDLE
+    finally:
+        await manager4.stop_all()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "boundary",
+    ["identity_before", "identity_after", "seed_before", "seed_after", "unlink"],
+)
+async def test_recovery_adoption_restarts_at_each_durable_boundary(
+    monkeypatch: pytest.MonkeyPatch, boundary: str
+) -> None:
+    from claude_hub.services.agent_stream import maso_http
+    from claude_hub.services.agent_stream import tailer as tailer_module
+    from claude_hub.services.agent_stream.fork_seed import read_seed_sidecar
+
+    server = MasoServer()
+    server.fail_send = True
+    record = session()
+    persisted: dict[str, str] = {}
+    fail = False
+
+    def persist(cid: str) -> None:
+        if fail and boundary == "identity_before":
+            raise OSError("identity write interrupted")
+        persisted["id"] = cid
+        if fail and boundary == "identity_after":
+            raise OSError("identity receipt interrupted")
+
+    provider = MasoHttpSession(record, conversation_id_persist=persist)
+    provider._client = httpx.AsyncClient(
+        base_url="http://127.0.0.1:9796", transport=httpx.MockTransport(server.handle)
+    )
+    store = AgentStreamStore(record.workspace_id, record.id)
+    ctx = NormalizeContext(
+        session_id=record.id,
+        tab_id=record.tab_id,
+        agent_type=record.agent_type,
+        run_epoch=1,
+        turn_id="prior-completed",
+    )
+    for kind, payload in [
+        (AgentStreamEventType.TURN_STARTED, {"summary": "Remember the blue marker"}),
+        (AgentStreamEventType.TEXT_DELTA, {"text": "The marker is blue."}),
+        (AgentStreamEventType.TURN_COMPLETED, {"status": "completed"}),
+    ]:
+        await store.append(ctx.event(kind, payload))
+    with pytest.raises(RuntimeError, match="acceptance is uncertain"):
+        await provider.send_message("ambiguous action must not be replayed", [])
+
+    original_seed = maso_http.write_seed_sidecar
+    original_unlink = Path.unlink
+
+    def write_seed(workspace_id: str, session_id: str, body: str) -> None:
+        if boundary == "seed_before":
+            raise OSError("seed write interrupted")
+        original_seed(workspace_id, session_id, body)
+        if boundary == "seed_after":
+            raise OSError("seed receipt interrupted")
+
+    def unlink(path: Path, *args: Any, **kwargs: Any) -> None:
+        if boundary == "unlink" and path == provider._delivery_path:
+            raise OSError("journal cleanup interrupted")
+        original_unlink(path, *args, **kwargs)
+
+    fail = True
+    with monkeypatch.context() as faults:
+        faults.setattr(maso_http, "write_seed_sidecar", write_seed)
+        faults.setattr(Path, "unlink", unlink)
+        with pytest.raises(OSError, match="interrupted"):
+            await provider.cancel_active_turn()
+        assert provider.capabilities().recovery_required
+        assert provider._delivery_path.exists()
+        assert not any(path == "/api/sessions/opaque-sid-2/exit" for _, path, _ in server.calls)
+    fail = False
+    await provider.stop()
+    assert not any(path == "/api/sessions/opaque-sid-2/exit" for _, path, _ in server.calls)
+
+    # Restart with whichever identity actually reached storage. Both old and
+    # adopted identities are covered; the old message UUID is never rebound.
+    cold_record = record.model_copy(
+        update={
+            "agent_session_id": persisted["id"],
+            "agent_session_id_verified": True,
+        }
+    )
+    cold = MasoHttpSession(cold_record, conversation_id_persist=persist)
+    assert cold.active_thread_id == "opaque-sid-2"
+    assert not cold.capabilities().recovery_required
+    assert not cold._delivery_path.exists()
+    assert "marker is blue" in (read_seed_sidecar(record.workspace_id, record.id) or "")
+    await cold.stop()
+
+    # Another restart after journal cleanup must still preserve the one-shot
+    # text seed through the real manager/factory lifecycle.
+    current = cold_record.model_copy(update={"agent_session_id": persisted["id"]})
+
+    def factory(sess: ManagedSession, **kwargs: Any) -> MasoHttpSession:
+        instance = MasoHttpSession(sess, **kwargs)
+        instance._client = httpx.AsyncClient(
+            base_url="http://127.0.0.1:9796",
+            transport=httpx.MockTransport(server.handle),
+        )
+        return instance
+
+    monkeypatch.setattr(tailer_module, "create_native_session", factory)
+    manager = TailerManager(lambda _id: current)
+    server.fail_send = False
+    try:
+        await manager.send_message(current, "continue", [], "next-turn")
+        posts = [
+            (path, body)
+            for method, path, body in server.calls
+            if method == "POST" and path.endswith("/messages")
+        ]
+        assert len(posts) == 2
+        path, body = posts[-1]
+        assert path == "/api/sessions/opaque-sid-2/messages"
+        assert "marker is blue" in body["content"]
+        assert "<claude_hub_instructions>" in body["content"]
+        assert "ambiguous action must not be replayed" not in body["content"]
+        assert read_seed_sidecar(record.workspace_id, record.id) is None
+    finally:
+        await manager.stop_all()
+
+
+@pytest.mark.asyncio
+async def test_legacy_target_ignores_rejected_turns_and_never_accepts_arbitrary_terminal() -> None:
+    server = MasoServer()
+    server.fail_send = True
+    record = session()
+    provider = transport(server, record)
+    with pytest.raises(RuntimeError, match="acceptance is uncertain"):
+        await provider.send_message("ambiguous", [])
+    store = AgentStreamStore(record.workspace_id, record.id)
+    for turn_id, rejected in [("uncertain-turn", False), ("rejected-retry", True)]:
+        ctx = NormalizeContext(
+            session_id=record.id,
+            tab_id=record.tab_id,
+            agent_type=record.agent_type,
+            run_epoch=1,
+            turn_id=turn_id,
+        )
+        await store.append(ctx.event(AgentStreamEventType.TURN_STARTED, {"summary": turn_id}))
+        await store.append(
+            ctx.event(
+                AgentStreamEventType.TURN_COMPLETED,
+                {"status": "failed", "delivery_rejected": rejected},
+            )
+        )
+    await provider.stop()
+    cold = transport(
+        server,
+        record.model_copy(
+            update={"agent_session_id": "opaque-sid", "agent_session_id_verified": True}
+        ),
+    )
+    tailer = SessionTailer(
+        workspace_id=record.workspace_id,
+        session_id=record.id,
+        adapter=MasoEventAdapter(),
+        session_getter=lambda: record,
+        native_transport=cold,
+    )
+    try:
+        assert cold.capabilities().quarantined_turn_id == "uncertain-turn"
+        before = len(server.calls)
+        assert not await tailer.cancel_turn("rejected-retry")
+        assert len(server.calls) == before
+        # Original versions left locally rejected ghost starts without the
+        # delivery_rejected marker, then cold recovery marked them cancelled.
+        ghost = NormalizeContext(
+            session_id=record.id,
+            tab_id=record.tab_id,
+            agent_type=record.agent_type,
+            run_epoch=2,
+            turn_id="old-ghost",
+        )
+        await store.append(
+            ghost.event(AgentStreamEventType.TURN_STARTED, {"summary": "refused locally"})
+        )
+        await store.append(
+            ghost.event(AgentStreamEventType.TURN_COMPLETED, {"status": "cancelled"})
+        )
+        assert cold._recover_legacy_quarantined_turn_id() is None
+        cold._quarantined_turn_id = None  # Uncorrelated legacy recovery stays untargeted.
+        assert not await tailer.cancel_turn("uncertain-turn")
+        assert len(server.calls) == before
+        assert await tailer.cancel_turn()
+    finally:
         await tailer.stop()
