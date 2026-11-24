@@ -2873,3 +2873,58 @@ async def test_unresolved_dm_does_not_starve_journal_or_cross_chat_catchup(tmp_p
         unresolved_history.message.id,
     ]
     await poller.quiesce()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("realtime_enabled", [True, False], ids=["confirmed-bot", "disabled"])
+async def test_live_retransmission_clears_replay_backlog(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, realtime_enabled: bool
+) -> None:
+    from claude_hub.services.feishu_realtime_settings import write_realtime_enabled
+    from claude_hub.services.feishu_web_session.rich import FeedPage
+
+    monkeypatch.setenv("CLAUDE_HUB_HOME", str(tmp_path))
+    monkeypatch.delenv("CLAUDE_HUB_FEISHU_REALTIME_EVENTS_ENABLED", raising=False)
+    monkeypatch.delenv("enabled", raising=False)
+    write_realtime_enabled(True)
+    sink = AsyncMock(return_value=True)
+    poller, _, client = _setup_poller(tmp_path, event_sink=sink)
+    transport = client._get_web_transport()
+    assert transport is not None
+    poller._active_web_transport = transport
+    poller._frontier_connected = True
+    transport._web.feed_cards = AsyncMock(return_value=FeedPage())
+    transport._web.chatters = AsyncMock(return_value={})
+    sender = "7200000000000000099"
+    pushed = _build_pushed_via_wire(
+        msg_id="740000000000009950",
+        from_id=sender,
+        chat_id=P2P_CHAT_WEB_ID,
+        chat_type=CHAT_P2P,
+        nodes=[T("Here is the result")],
+        position=1,
+    )
+
+    await poller._handle_frontier_pushed_web_message(pushed)
+    assert poller._realtime_queue_worker is not None
+    await poller._realtime_queue_worker
+    assert poller._replay_task is not None
+    await poller._replay_task
+    assert poller._web_journal.pending() == [pushed]
+    assert poller.realtime_router.needs_patrol_fallback
+    assert not poller._replay_ready
+
+    transport._web.chatters.return_value = {sender: WebChatter(id=sender, type=2)}
+    write_realtime_enabled(realtime_enabled)
+    accepted = await poller._handle_frontier_pushed_web_message(pushed)
+    assert accepted is realtime_enabled
+    if accepted:
+        assert poller._realtime_queue_worker is not None
+        await poller._realtime_queue_worker
+    assert not poller._web_journal.pending()
+    assert not poller.realtime_router.needs_patrol_fallback
+    sink.assert_not_awaited()
+
+    await poller._run_web_replay()
+    assert poller._replay_ready
+    await poller.quiesce()

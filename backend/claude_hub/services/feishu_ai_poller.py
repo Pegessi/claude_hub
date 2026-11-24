@@ -63,13 +63,6 @@ def _journal_add_guarded(
         journal.add(pushed)
 
 
-def _journal_remove_guarded(
-    journal: WebPushJournal, message_id: str, wt: Any, generation: int | None
-) -> None:
-    with _session_guard(wt, generation):
-        journal.remove(message_id)
-
-
 # On the first poll of a chat with no persisted watermark, look back up to 5 minutes
 # so a command sent right before enabling the poller is caught without replaying old history.
 _INITIAL_WATERMARK_LOOKBACK_MS = 5 * 60 * 1000
@@ -248,6 +241,22 @@ class FeishuAiPoller:
 
             task.add_done_callback(retry_if_requested)
 
+    def _settle_web_message(
+        self,
+        journal: WebPushJournal,
+        replay: WebPositionReplay,
+        message: Any,
+        wt: Any,
+        session_generation: int | None,
+    ) -> None:
+        with _session_guard(wt, session_generation):
+            fallback_generation = self._realtime_router.fallback_generation
+            replay.mark_handled(message)
+            journal.remove(message.id)
+            self._realtime_router.acknowledge_patrol_fallback(
+                recovered_ids=[message.id], max_generation=fallback_generation
+            )
+
     async def _run_web_replay(self) -> None:
         wt = self._active_web_transport
         replay = self._web_replay
@@ -287,10 +296,13 @@ class FeishuAiPoller:
                     return
                 if fallback is not None:
                     raise RuntimeError("Feishu Web replay event delivery failed")
-                self._realtime_router.acknowledge_patrol_fallback(recovered_ids=[message_id])
-                await asyncio.to_thread(replay.mark_handled, pushed.message)
                 await asyncio.to_thread(
-                    _journal_remove_guarded, journal, pushed.message.id, wt, generation_at_start
+                    self._settle_web_message,
+                    journal,
+                    replay,
+                    pushed.message,
+                    wt,
+                    generation_at_start,
                 )
 
             async def drain_journal() -> None:
@@ -466,11 +478,11 @@ class FeishuAiPoller:
                     self._replay_ready = False
                     self._schedule_web_replay()
                 else:
-                    await asyncio.to_thread(replay.mark_handled, pushed.message)
                     await asyncio.to_thread(
-                        _journal_remove_guarded,
+                        self._settle_web_message,
                         journal,
-                        user_msg.message_id,
+                        replay,
+                        pushed.message,
                         wt,
                         generation_at_start,
                     )
@@ -516,9 +528,8 @@ class FeishuAiPoller:
             expected_session=(wt, generation_at_start),
         )
         if pushed.message.id not in delegated:
-            await asyncio.to_thread(replay.mark_handled, pushed.message)
             await asyncio.to_thread(
-                _journal_remove_guarded, journal, pushed.message.id, wt, generation_at_start
+                self._settle_web_message, journal, replay, pushed.message, wt, generation_at_start
             )
         return accepted
 
