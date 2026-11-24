@@ -920,3 +920,21 @@ def test_sdk_message_rejects_untrusted_or_unsupported_payloads(field: str, value
 
     with pytest.raises(ValueError):
         message_event_from_sdk(data, expected_app_id="cli-a")
+
+
+@pytest.mark.asyncio
+async def test_personal_web_replay_starts_when_ai_commands_disabled(monkeypatch) -> None:
+    from unittest.mock import AsyncMock
+
+    import claude_hub.api.feishu_bot as api
+
+    supervisor = SimpleNamespace(start=AsyncMock())
+    poller = SimpleNamespace(web_replay_configured=lambda: True, start=AsyncMock())
+    monkeypatch.setattr(api, "_ws_supervisor", supervisor)
+    monkeypatch.setattr(api, "get_feishu_ai_poller", lambda: poller)
+    monkeypatch.setattr(
+        api, "get_feishu_ai_command_service", lambda: SimpleNamespace(is_enabled=lambda: False)
+    )
+    await api.start_feishu_websockets()
+    supervisor.start.assert_awaited_once()
+    poller.start.assert_awaited_once()

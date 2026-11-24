@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -43,6 +44,53 @@ from claude_hub.services.demand_patrol.models import (
 )
 
 NOW = datetime(2026, 11, 14, 3, 0, tzinfo=timezone.utc)
+
+
+def test_top_level_answer_can_resolve_a_threaded_question() -> None:
+    question = FeishuCandidate(
+        message_id="question",
+        chat_id="chat",
+        thread_id="thread",
+        chat_type="group",
+        sender_id="sender",
+        sender_name="",
+        chat_name="",
+        created_at=NOW - timedelta(minutes=1),
+        text="question",
+        permalink="",
+        mentioned_ids=("owner",),
+    )
+    own = replace(
+        question,
+        message_id="answer",
+        thread_id="",
+        sender_id="owner",
+        created_at=NOW,
+        mentioned_ids=("sender",),
+    )
+    assert triage_module._is_answered_by(question, own)
+    assert triage_module._is_answered_by(replace(question, chat_type="p2p"), own)
+    assert not triage_module._is_answered_by(question, replace(own, thread_id="other"))
+
+
+def test_irrelevant_automated_messages_do_not_fill_processed_ledger() -> None:
+    irrelevant = FeishuCandidate(
+        message_id="bot-noise",
+        chat_id="chat",
+        thread_id="",
+        chat_type="group",
+        sender_id="bot",
+        sender_name="",
+        chat_name="",
+        created_at=NOW,
+        text="routine update",
+        permalink="",
+        mentioned_ids=(),
+        is_bot_sender=True,
+    )
+    assert triage_module.filter_unanswered([irrelevant], "owner", []) == ([], [])
+
+
 ME = "ou_current_user"
 KEY_PATH = "/home/tiger/.local/state/infowall/api-key"
 
@@ -262,7 +310,8 @@ async def capabilities(_base_url: str) -> dict[str, Any]:
 def isolated_environment(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setenv("CLAUDE_HUB_HOME", str(tmp_path / "hub"))
     monkeypatch.setenv(
-        "CLAUDE_HUB_PATROL_ACTIONABLE_HOSTS", "compute.example.invalid,git.example.invalid"
+        "CLAUDE_HUB_PATROL_ACTIONABLE_HOSTS",
+        "compute.example.invalid,git.example.invalid",
     )
     monkeypatch.setenv("INFOWALL_URL", "http://127.0.0.1:18899")
     monkeypatch.setenv("INFOWALL_API_KEY_FILE", KEY_PATH)
@@ -388,14 +437,23 @@ async def test_mention_and_participated_thread_apply_and_notify() -> None:
             mentions=[{"id": {"open_id": ME}, "name": "本人"}],
         ),
         message(
-            "own-thread", chat_type="group", sender=ME, thread="omt_participated", minutes_ago=20
+            "own-thread",
+            chat_type="group",
+            sender=ME,
+            thread="omt_participated",
+            minutes_ago=20,
         ),
         message("followup", chat_type="group", thread="omt_participated", minutes_ago=5),
     ]
     state, runner, dot = PatrolState(), FakeRunner(rows), FakeDot()
     callback = AsyncMock(return_value=diagnosis())
     result = await run_feishu_triage(
-        state, now=NOW, dot=dot, runner=runner, triage=callback, capabilities=capabilities
+        state,
+        now=NOW,
+        dot=dot,
+        runner=runner,
+        triage=callback,
+        capabilities=capabilities,
     )
     assert not result.errors
     assert (result.candidates, result.llm_invoked, result.notified) == (2, 2, 2)
@@ -414,7 +472,12 @@ async def test_mention_and_participated_thread_apply_and_notify() -> None:
     assert "已同步" in markdown and "claude-hub task register --help" in markdown
     assert "https://applink.feishu.cn/client/message/mention" in markdown
     result_again = await run_feishu_triage(
-        state, now=NOW, dot=dot, runner=runner, triage=callback, capabilities=capabilities
+        state,
+        now=NOW,
+        dot=dot,
+        runner=runner,
+        triage=callback,
+        capabilities=capabilities,
     )
     assert result_again.llm_invoked == 0 and callback.await_count == 2
 
@@ -424,7 +487,11 @@ async def test_ordinary_group_participation_does_not_admit_unrelated_chatter() -
         [
             message("prior", sender=ME, chat_type="group", minutes_ago=20),
             message("unrelated", chat_type="group", minutes_ago=5),
-            message("name-only", chat_type="group", mentions=[{"id": "ou_else", "name": "本人"}]),
+            message(
+                "name-only",
+                chat_type="group",
+                mentions=[{"id": "ou_else", "name": "本人"}],
+            ),
         ]
     )
     result = await run_feishu_triage(PatrolState(), now=NOW, dot=FakeDot(), runner=runner)
@@ -769,7 +836,9 @@ async def test_workspace_chat_adapter_falls_back_workspace_and_cancellation_arch
         AsyncMock(side_effect=triage_module.MasoServiceUnavailable("absent")),
     )
     monkeypatch.setattr(
-        triage_module.shutil, "which", lambda value: "/fake/codex" if value == "codex" else None
+        triage_module.shutil,
+        "which",
+        lambda value: "/fake/codex" if value == "codex" else None,
     )
     task = asyncio.create_task(
         diagnose_message(candidate_for_adapter(), workspace_id="nonexistent-workspace")
@@ -1320,7 +1389,9 @@ async def test_rc5_rc6_maso_effort_model_discovery_and_prompt_metadata(
     monkeypatch.setattr(triage_module, "discover_maso_service", discovery)
     row = {
         **message(
-            "om_reply_mention", thread="omt_thread_123", text="@Example Person 同事，帮忙看看这个"
+            "om_reply_mention",
+            thread="omt_thread_123",
+            text="@Example Person 同事，帮忙看看这个",
         ),
         "reply_to": "om_parent_456",
     }
@@ -1450,7 +1521,12 @@ async def test_bot_and_automated_system_notifications_are_filtered_out(
     assert result.details["candidate_ids"] == ["om_human_question"]
     assert len(runner.applied) == 1
     assert runner.applied[0]["demands"][0]["sources"][0]["external_id"] == "om_human_question"
-    for bot_id in ("om_codebase_mr", "om_kani_recycle", "om_merlin_bot", "om_bpm_weekly"):
+    for bot_id in (
+        "om_codebase_mr",
+        "om_kani_recycle",
+        "om_merlin_bot",
+        "om_bpm_weekly",
+    ):
         assert bot_id in state.processed_feishu_ids
 
 
@@ -1582,7 +1658,9 @@ async def test_workspace_delivery_and_archive_failures_are_isolated_per_candidat
         AsyncMock(side_effect=triage_module.MasoServiceUnavailable("absent")),
     )
     monkeypatch.setattr(
-        triage_module.shutil, "which", lambda value: "/fake/codex" if value == "codex" else None
+        triage_module.shutil,
+        "which",
+        lambda value: "/fake/codex" if value == "codex" else None,
     )
 
     call_count = 0
@@ -1634,7 +1712,9 @@ async def test_combined_primary_and_archive_failure_preserves_evidence_and_recov
         AsyncMock(side_effect=triage_module.MasoServiceUnavailable("absent")),
     )
     monkeypatch.setattr(
-        triage_module.shutil, "which", lambda value: "/fake/codex" if value == "codex" else None
+        triage_module.shutil,
+        "which",
+        lambda value: "/fake/codex" if value == "codex" else None,
     )
     monkeypatch.setattr(triage_module, "fence_session_stream", AsyncMock(return_value=True))
 
@@ -1767,3 +1847,79 @@ async def test_patrol_keeps_original_fallback_when_configured_model_unavailable(
     monkeypatch.setattr(triage_module, "_run_workspace_triage_turn", fake_run_turn)
     await diagnose_message(candidate_for_adapter())
     assert wm.ensure_calls[0][1].agent_type == AgentType.CODEX
+
+
+async def test_courtesy_closings_thread_root_replies_and_realtime_dedup_are_suppressed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from claude_hub.services.feishu_realtime_events import FeishuRealtimeEventRouter
+
+    router = FeishuRealtimeEventRouter()
+    router._record_handled(
+        "7400000000000000999",
+        alias_id="om_realtime_handled",
+        chat_keys={"oc_chat"},
+        text="@Example Person 实时通道已处理的故障 https://compute.example.invalid/job/999",
+        created_at_ms=int((NOW.timestamp() - 15 * 60) * 1000),
+    )
+    monkeypatch.setattr(triage_module, "get_feishu_realtime_event_router", lambda: router)
+
+    rows = [
+        # 1. Courtesy closing with @me and question-like punctuation -> suppressed
+        message(
+            "om_courtesy_1",
+            chat_type="group",
+            mentions=[{"id": ME}],
+            minutes_ago=25,
+            text="@Example Person 收到，谢谢！",
+        ),
+        message(
+            "om_courtesy_2",
+            chat_type="p2p",
+            minutes_ago=22,
+            text="好的，已经恢复了，不用看了，多谢！",
+        ),
+        # 2. Thread reply where user replied anchored to root_id ("om_root") rather than followup ("om_thread_q")
+        {
+            **message(
+                "om_thread_q",
+                chat_type="group",
+                thread="omt_thread_root",
+                minutes_ago=20,
+                mentions=[{"id": ME}],
+                text="@Example Person 这里还是报错 OOM",
+            ),
+            "reply_to": "om_earlier_msg",
+        },
+        {
+            **message(
+                "om_own_thread_reply",
+                chat_type="group",
+                sender=ME,
+                thread="omt_thread_root",
+                minutes_ago=10,
+                text="已经定位并修复了",
+            ),
+            "reply_to": "om_thread_root",
+        },
+        # 3. Already handled by real-time WebSocket stream -> suppressed
+        message(
+            "om_realtime_handled",
+            chat_type="group",
+            thread="omt_rt",
+            minutes_ago=15,
+            mentions=[{"id": ME}],
+            text="@Example Person 实时通道已处理的故障 https://compute.example.invalid/job/999",
+        ),
+    ]
+    state = PatrolState()
+    result = await run_feishu_triage(state, now=NOW, dot=FakeDot(), runner=FakeRunner(rows))
+    assert (result.candidates, result.llm_invoked, result.notified) == (0, 0, 0)
+    assert result.details["answered_skipped"] == 4
+    for suppressed_id in (
+        "om_courtesy_1",
+        "om_courtesy_2",
+        "om_thread_q",
+        "om_realtime_handled",
+    ):
+        assert suppressed_id in state.processed_feishu_ids

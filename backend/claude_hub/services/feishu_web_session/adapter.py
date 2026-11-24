@@ -44,6 +44,7 @@ from claude_hub.services.feishu_web_session.rich import (
     CHAT_P2P,
     FEED_INBOX,
     WebChat,
+    WebChatter,
     WebMessage,
     WebOut,
     describe,
@@ -158,6 +159,14 @@ async def normalize_and_claim_ai_command_message(
         if converted is None:
             return effective_msg, "", [], False
         wt.bind_message_alias(orig_mid, converted.message_id)
+        if (
+            message.thread_id
+            and converted.thread_id
+            and message.thread_id.strip() != converted.thread_id.strip()
+        ):
+            wt.bind_message_alias(message.thread_id, converted.thread_id)
+        if message.sender_open_id.startswith("ou_") and is_web_entity_id(resolved_web.from_id):
+            wt.bind_sender_alias(message.sender_open_id, resolved_web.from_id)
         alias_mids.append(orig_mid)
         effective_msg = converted
 
@@ -472,6 +481,9 @@ class FeishuWebUserTransport:
         self._web_to_open_chat: dict[str, str] = {}
         self._open_to_web_msg: dict[str, str] = {}
         self._web_to_open_msg: dict[str, str] = {}
+        self._open_to_web_user: dict[str, str] = {}
+        self._web_to_open_user: dict[str, str] = {}
+        self._chatter_cache: dict[str, WebChatter] = {}
         self._last_msg_cache: dict[str, WebMessage] = {}
         self._msg_cache: OrderedDict[str, WebMessage] = OrderedDict()
 
@@ -531,8 +543,34 @@ class FeishuWebUserTransport:
         om = (openapi_message_id or "").strip()
         wm = (web_message_id or "").strip()
         if om and wm and om != wm:
-            self._open_to_web_msg[om] = wm
-            self._web_to_open_msg[wm] = om
+            if om.startswith("ou_") or wm.startswith("ou_"):
+                self.bind_sender_alias(
+                    om if om.startswith("ou_") else wm,
+                    wm if om.startswith("ou_") else om,
+                )
+            else:
+                self._open_to_web_msg[om] = wm
+                self._web_to_open_msg[wm] = om
+
+    def bind_topic_alias(self, openapi_topic_id: str, web_topic_id: str) -> None:
+        self.bind_message_alias(openapi_topic_id, web_topic_id)
+
+    def bind_sender_alias(self, openapi_sender_id: str, web_user_id: str) -> None:
+        ou = (openapi_sender_id or "").strip()
+        wu = (web_user_id or "").strip()
+        if ou and wu and ou != wu:
+            self._open_to_web_user[ou] = wu
+            self._web_to_open_user[wu] = ou
+
+    def get_sender_alias(self, sender_id: str) -> str | None:
+        clean = (sender_id or "").strip()
+        if not clean:
+            return None
+        return self._open_to_web_user.get(clean) or self._web_to_open_user.get(clean)
+
+    def _remember_chatter(self, chatter: WebChatter) -> None:
+        if chatter.id:
+            self._chatter_cache[chatter.id] = chatter
 
     def get_message_alias(self, message_id: str) -> str | None:
         clean = (message_id or "").strip()
@@ -853,10 +891,19 @@ class FeishuWebUserTransport:
         parsed_msgs = [
             um for m in raw_msgs for um in (self.to_user_message(m, session=s),) if um is not None
         ]
+
+        def _msg_order_key(item: FeishuUserMessage) -> tuple[int, int, int]:
+            wm = self._msg_cache.get(item.message_id)
+            return (
+                item.create_time_ms,
+                wm.position if wm is not None else 0,
+                int(getattr(wm, "topic_position", None) or 0) if wm is not None else 0,
+            )
+
         if sort_type == "ByCreateTimeDesc":
-            parsed_msgs.sort(key=lambda item: item.create_time_ms, reverse=True)
+            parsed_msgs.sort(key=_msg_order_key, reverse=True)
         else:
-            parsed_msgs.sort(key=lambda item: item.create_time_ms)
+            parsed_msgs.sort(key=_msg_order_key)
         has_more = start_pos > 0
         next_tok = str(start_pos - 1) if has_more else ""
         return FeishuMessagePage(items=tuple(parsed_msgs), has_more=has_more, page_token=next_tok)

@@ -11,12 +11,28 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Literal
 from zoneinfo import ZoneInfo
 
-from ...models import AgentReport, AgentReportState, TaskLifecycle, TaskPhase, WorkspaceTask
+from ...models import (
+    AgentReport,
+    AgentReportState,
+    TaskLifecycle,
+    TaskPhase,
+    WorkspaceTask,
+)
+from ..feishu_realtime_events import (
+    get_feishu_realtime_event_router,
+    is_feishu_realtime_stream_healthy,
+)
 from .commands import CommandRunner, run_command
 from .daily_digest import DecisionModel, build_daily_digest
 from .digest_provider import recommend_daily_decisions
 from .feishu_triage import TriageCallback, run_feishu_triage
-from .models import PatrolChannel, PatrolConfig, PatrolNotifier, PatrolRunRecord, PatrolState
+from .models import (
+    PatrolChannel,
+    PatrolConfig,
+    PatrolNotifier,
+    PatrolRunRecord,
+    PatrolState,
+)
 from .state import PatrolStateStore
 
 logger = logging.getLogger(__name__)
@@ -84,9 +100,32 @@ def due_daily_slots(state: PatrolState, now: datetime) -> list[str]:
     return due
 
 
-def feishu_due(state: PatrolState, now: datetime) -> bool:
+def feishu_due(
+    state: PatrolState,
+    now: datetime,
+    *,
+    realtime_healthy: bool | None = None,
+    web_replay_configured: bool | None = None,
+) -> bool:
     config = state.config
     if not config.enabled or not config.feishu_enabled:
+        return False
+    from ..feishu_ai_poller import get_feishu_ai_poller
+
+    if web_replay_configured is None:
+        web_replay_configured = get_feishu_ai_poller().web_replay_configured()
+    if web_replay_configured:
+        return False
+    router = get_feishu_realtime_event_router()
+    rt_cfg = router.resolve_config()
+    if realtime_healthy is None:
+        if (
+            rt_cfg.suppress_patrol_when_healthy
+            and is_feishu_realtime_stream_healthy()
+            and not router.needs_patrol_fallback
+        ):
+            return False
+    elif realtime_healthy and not router.needs_patrol_fallback:
         return False
     local = now.astimezone(ZoneInfo(config.timezone))
     clock = local.strftime("%H:%M")
@@ -276,10 +315,18 @@ class DemandPatrolService:
             for key in due_daily_slots(state, now):
                 records.append(
                     await self._run_channel(
-                        state, "daily", now=now, dry_run=False, notify=True, slot_key=key
+                        state,
+                        "daily",
+                        now=now,
+                        dry_run=False,
+                        notify=True,
+                        slot_key=key,
                     )
                 )
-            if feishu_due(state, now):
+            from ..feishu_ai_poller import get_feishu_ai_poller
+
+            web_configured = await asyncio.to_thread(get_feishu_ai_poller().web_replay_configured)
+            if feishu_due(state, now, web_replay_configured=web_configured):
                 records.append(
                     await self._run_channel(state, "feishu", now=now, dry_run=False, notify=True)
                 )

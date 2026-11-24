@@ -7,6 +7,11 @@
 
 ## Released
 
+### feat(feishu): route Dot events through Web position replay
+
+- Evaluate personal-account WebSocket messages and recover missed messages by Web-native positions; keep CLI patrol separate when a Web session is configured.
+- Preserve numeric message identity across real-time delivery and replay, including P2P and participated topics.
+
 ### fix(feishu): protect reply delivery and context
 
 - Reject replies when the group mode is unknown, distinguish uncertain sends from read failures, and disclose missing quoted context.

@@ -1213,15 +1213,15 @@ class FeishuWebFrontierListener:
         self, raw: bytes, send_binary: Callable[[bytes], Awaitable[None]]
     ) -> None:
         ack_bytes, _cmd, pushed_list = parse_frontier_frame(raw)
+        for pushed in pushed_list:
+            res = self._deliver(pushed)
+            if asyncio.iscoroutine(res):
+                await res
         if ack_bytes is not None:
             try:
                 await send_binary(ack_bytes)
             except Exception:
                 pass
-        for pushed in pushed_list:
-            res = self._deliver(pushed)
-            if asyncio.iscoroutine(res):
-                await res
 
     async def _once(self, stop_event: asyncio.Event) -> None:
         import websockets

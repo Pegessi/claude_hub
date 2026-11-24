@@ -1233,8 +1233,11 @@ _ws_supervisor = FeishuBotWebSocketSupervisor(_pool, _handle_sdk_event)
 
 async def start_feishu_websockets() -> None:
     await _ws_supervisor.start()
-    if get_feishu_ai_command_service().is_enabled():
-        await get_feishu_ai_poller().start()
+    poller = get_feishu_ai_poller()
+    if get_feishu_ai_command_service().is_enabled() or await asyncio.to_thread(
+        poller.web_replay_configured
+    ):
+        await poller.start()
 
 
 async def quiesce_feishu_websockets() -> None:

@@ -12,10 +12,13 @@ and executes turns asynchronously so a slow turn never blocks intake across chat
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import time
 from collections import OrderedDict
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager, nullcontext
+from dataclasses import replace
 from typing import Any
 
 from claude_hub.services.feishu_ai_command import (
@@ -24,13 +27,47 @@ from claude_hub.services.feishu_ai_command import (
     get_feishu_ai_command_service,
     parse_ai_command,
 )
+from claude_hub.services.feishu_realtime_events import (
+    FeishuRealtimeEventRouter,
+    get_feishu_realtime_event_router,
+)
 from claude_hub.services.feishu_user_client import (
     FeishuMessageSearchPage,
     FeishuUserClient,
     FeishuUserMessage,
 )
+from claude_hub.services.feishu_web_journal import WebPushJournal
+from claude_hub.services.feishu_web_replay import WebPositionReplay
 
 logger = logging.getLogger(__name__)
+
+
+@contextmanager
+def _session_guard(wt: Any, generation: int | None) -> Iterator[None]:
+    if generation is None:
+        with nullcontext():
+            yield
+        return
+    store = wt._web.store
+    with store._lock:
+        if store.generation != generation:
+            raise RuntimeError("Feishu Web session changed during intake or replay")
+        yield
+
+
+def _journal_add_guarded(
+    journal: WebPushJournal, pushed: Any, wt: Any, generation: int | None
+) -> None:
+    with _session_guard(wt, generation):
+        journal.add(pushed)
+
+
+def _journal_remove_guarded(
+    journal: WebPushJournal, message_id: str, wt: Any, generation: int | None
+) -> None:
+    with _session_guard(wt, generation):
+        journal.remove(message_id)
+
 
 # On the first poll of a chat with no persisted watermark, look back up to 5 minutes
 # so a command sent right before enabling the poller is caught without replaying old history.
@@ -87,17 +124,50 @@ class FeishuAiPoller:
         self,
         service: FeishuAiCommandService | None = None,
         *,
+        realtime_router: FeishuRealtimeEventRouter | None = None,
         initial_lookback_ms: int = _INITIAL_WATERMARK_LOOKBACK_MS,
         max_pages_per_chat: int = _MAX_POLL_PAGES_PER_CHAT,
         max_concurrent_dispatches: int = _MAX_CONCURRENT_DISPATCHES,
     ) -> None:
         self._service = service or get_feishu_ai_command_service()
+        self._realtime_router = realtime_router or get_feishu_realtime_event_router()
         self._initial_lookback_ms = initial_lookback_ms
         self._max_pages_per_chat = max(1, max_pages_per_chat)
         self._dispatch_sem = asyncio.Semaphore(max(1, max_concurrent_dispatches))
         self._task: asyncio.Task[None] | None = None
         self._frontier_task: asyncio.Task[None] | None = None
         self._frontier_stop = asyncio.Event()
+        self._frontier_connected = False
+        self._replay_ready = False
+        self._replay_task: asyncio.Task[None] | None = None
+        self._replay_request_seq = 0
+        self._replay_lock = asyncio.Lock()
+        self._realtime_delivery_lock = asyncio.Lock()
+        self._active_web_transport: Any = None
+        self._active_session_generation: int | None = None
+        self._web_replay = WebPositionReplay(
+            self._service._state_path.with_name("feishu_web_replay.json")
+        )
+        self._web_journal = WebPushJournal(self._web_replay.path.with_suffix(".sqlite3"))
+        self._last_frontier_connected_at: float | None = None
+        self._last_frontier_error: str | None = None
+        self._realtime_event_queue: OrderedDict[
+            str,
+            tuple[
+                Any,
+                FeishuUserMessage,
+                Any,
+                Any,
+                set[str],
+                bool,
+                WebPushJournal,
+                int | None,
+                WebPositionReplay,
+            ],
+        ] = OrderedDict()
+        self._realtime_queue_worker: asyncio.Task[None] | None = None
+        self._cached_user_client: Any = None
+        self._cached_client_key: tuple[str, str, str] | None = None
         self._worker_tasks: set[asyncio.Task[None]] = set()
         self._in_flight_ids: set[str] = set()
         self._search_msg_cache: OrderedDict[str, FeishuUserMessage | None] = OrderedDict()
@@ -112,6 +182,10 @@ class FeishuAiPoller:
         self._skipped_count = 0
 
     @property
+    def realtime_router(self) -> FeishuRealtimeEventRouter:
+        return self._realtime_router
+
+    @property
     def running(self) -> bool:
         return self._task is not None and not self._task.done() and not self._stopping
 
@@ -123,11 +197,153 @@ class FeishuAiPoller:
             and not self._stopping
         )
 
+    def web_replay_configured(self) -> bool:
+        """Keep CLI patrol disabled while an authorized Web session is configured."""
+        if not self._realtime_router.resolve_config().enabled:
+            return False
+        store = self._service._web_session_store
+        return store.load(auto_import_larkx=False) is not None or store.path.exists()
+
+    @property
+    def realtime_stream_healthy(self) -> bool:
+        return (
+            self.frontier_running
+            and self._frontier_connected
+            and self._last_frontier_error is None
+            and self._replay_ready
+            and self._realtime_router.resolve_config().enabled
+            and not self._realtime_router.needs_patrol_fallback
+        )
+
+    def _on_frontier_state(self, exc: Exception | None) -> None:
+        if exc is None:
+            self._frontier_connected = True
+            self._last_frontier_connected_at = time.time()
+            self._last_frontier_error = None
+            self._schedule_web_replay()
+        else:
+            self._frontier_connected = False
+            self._replay_ready = False
+            if self._replay_task is not None:
+                self._replay_task.cancel()
+            self._last_frontier_error = str(exc) or type(exc).__name__
+
+    def _schedule_web_replay(self) -> None:
+        if self._active_web_transport is None or self._stopping:
+            return
+        self._replay_request_seq += 1
+        self._replay_ready = False
+        if self._replay_task is None or self._replay_task.done():
+            request_seq = self._replay_request_seq
+            task = asyncio.create_task(self._run_web_replay())
+            self._replay_task = task
+
+            def retry_if_requested(done: asyncio.Task[None]) -> None:
+                if (
+                    self._replay_task is done
+                    and not done.cancelled()
+                    and self._frontier_connected
+                    and self._replay_request_seq != request_seq
+                ):
+                    self._schedule_web_replay()
+
+            task.add_done_callback(retry_if_requested)
+
+    async def _run_web_replay(self) -> None:
+        wt = self._active_web_transport
+        replay = self._web_replay
+        journal = self._web_journal
+        generation_at_start = self._active_session_generation
+        request_seq = self._replay_request_seq
+        if wt is None:
+            return
+        async with self._replay_lock:
+
+            async def deliver(pushed: Any) -> None:
+                with _session_guard(wt, generation_at_start):
+                    pass
+                cfg = await self._service.aget_config(auto_import_lark_cli=False)
+                with _session_guard(wt, generation_at_start):
+                    pass
+                client = self._get_or_build_user_client(replace(cfg, send_mode="web_session"))
+                if client._get_web_transport() is not wt:
+                    raise RuntimeError("Feishu Web replay identity or session changed")
+                generation = self._realtime_router.fallback_generation
+                await self.handle_pushed_web_message(
+                    pushed, expected_session=(wt, generation_at_start)
+                )
+                if self._realtime_router.fallback_generation != generation:
+                    raise RuntimeError("Feishu Web replay event delivery failed")
+                self._realtime_router.acknowledge_patrol_fallback(recovered_ids=[pushed.message.id])
+                await asyncio.to_thread(replay.mark_handled, pushed.message)
+                await asyncio.to_thread(
+                    _journal_remove_guarded, journal, pushed.message.id, wt, generation_at_start
+                )
+
+            async def drain_journal() -> None:
+                while pending_batch := await asyncio.to_thread(journal.pending):
+                    for pending in pending_batch:
+                        await deliver(pending)
+
+            try:
+                await drain_journal()
+                await replay.catch_up(
+                    wt._web, deliver, self._realtime_router.resolve_config().watch_chat_ids
+                )
+                await replay.catch_up_topics(wt._web, deliver)
+                # Pushes arriving during the snapshot must be processed before
+                # the baseline can be advertised as healthy.
+                await drain_journal()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                self._replay_ready = False
+                self._last_frontier_error = str(exc) or type(exc).__name__
+                logger.warning("Feishu Web replay failed: %s", type(exc).__name__)
+                return
+            if (
+                self._frontier_connected
+                and request_seq == self._replay_request_seq
+                and not self._realtime_router.needs_patrol_fallback
+            ):
+                self._last_frontier_error = None
+                self._replay_ready = True
+            else:
+                self._replay_ready = False
+
+    def _resolve_owner_ids(self, cfg: FeishuAiCommandConfig, wt: Any) -> set[str]:
+        ids: set[str] = set()
+        if cfg.owner_open_id and cfg.owner_open_id.strip():
+            ids.add(cfg.owner_open_id.strip())
+        if wt is not None and hasattr(wt, "resolve_owner_identity"):
+            try:
+                resolved = wt.resolve_owner_identity()
+                if isinstance(resolved, str) and resolved.strip():
+                    ids.add(resolved.strip())
+            except Exception:
+                pass
+        web_store = getattr(self._service, "web_session_store", None)
+        if web_store is not None and hasattr(web_store, "load"):
+            try:
+                sess = web_store.load(auto_import_larkx=False)
+                if sess is not None:
+                    for attr in ("user_id", "open_id"):
+                        val = getattr(sess, attr, "")
+                        if isinstance(val, str) and val.strip():
+                            ids.add(val.strip())
+            except Exception:
+                pass
+        return ids
+
     def status_dict(self) -> dict[str, Any]:
         watermarks = self._service.get_watermarks()
         return {
             "running": self.running,
             "frontier_running": self.frontier_running,
+            "frontier_connected": self._frontier_connected,
+            "realtime_stream_healthy": self.realtime_stream_healthy,
+            "realtime_events_emitted": self._realtime_router.emitted_count,
+            "realtime_events_suppressed": self._realtime_router.suppressed_count,
             "poll_count": self._poll_count,
             "last_poll_at": self._last_poll_at,
             "last_error": self._last_error,
@@ -141,66 +357,331 @@ class FeishuAiPoller:
             "recent_runs": self._service.get_recent_runs(),
         }
 
-    async def handle_pushed_web_message(self, pushed: Any) -> bool:
+    def _enqueue_realtime_event(
+        self,
+        pushed: Any,
+        user_msg: FeishuUserMessage,
+        *,
+        web_transport: Any,
+        user_client: Any,
+        owner_ids: set[str],
+        is_owner_sender: bool,
+    ) -> None:
+        msg_id = (
+            user_msg.message_id or getattr(getattr(pushed, "message", None), "id", "") or ""
+        ).strip()
+        if not msg_id:
+            return
+        self._realtime_event_queue[msg_id] = (
+            pushed,
+            user_msg,
+            web_transport,
+            user_client,
+            owner_ids,
+            is_owner_sender,
+            self._web_journal,
+            self._active_session_generation,
+            self._web_replay,
+        )
+        self._realtime_event_queue.move_to_end(msg_id)
+        while len(self._realtime_event_queue) > 256:
+            dropped_id, (_, dropped_um, _, _, _, _, _, _, _) = self._realtime_event_queue.popitem(
+                last=False
+            )
+            self._replay_ready = False
+            self._schedule_web_replay()
+            self._realtime_router._add_fallback_record(
+                dropped_id,
+                dropped_id,
+                "uncovered_message",
+                "",
+                self._realtime_router._chat_keys(dropped_um.chat_id, web_transport),
+                dropped_um.thread_id or "",
+                dropped_um.sender_open_id,
+                dropped_um.text,
+                dropped_um.create_time_ms,
+            )
+        if self._realtime_queue_worker is None or self._realtime_queue_worker.done():
+            task = asyncio.create_task(
+                self._drain_realtime_event_queue(),
+                name="feishu-realtime-event-worker",
+            )
+            self._realtime_queue_worker = task
+            self._worker_tasks.add(task)
+            task.add_done_callback(self._worker_tasks.discard)
+
+    async def _drain_realtime_event_queue(self) -> None:
+        while self._realtime_event_queue and not self._stopping:
+            _mid, (
+                pushed,
+                user_msg,
+                wt,
+                uc,
+                owner_ids,
+                is_owner,
+                journal,
+                generation_at_start,
+                replay,
+            ) = self._realtime_event_queue.popitem(last=False)
+            try:
+                with _session_guard(wt, generation_at_start):
+                    pass
+                generation = self._realtime_router.fallback_generation
+                async with self._realtime_delivery_lock:
+                    await self._realtime_router.handle_pushed_message(
+                        pushed,
+                        user_msg,
+                        web_transport=wt,
+                        user_client=uc,
+                        owner_ids=owner_ids,
+                        is_owner_sender=is_owner,
+                    )
+                if self._realtime_router.fallback_generation != generation:
+                    self._replay_ready = False
+                    self._schedule_web_replay()
+                else:
+                    await asyncio.to_thread(replay.mark_handled, pushed.message)
+                    await asyncio.to_thread(
+                        _journal_remove_guarded,
+                        journal,
+                        user_msg.message_id,
+                        wt,
+                        generation_at_start,
+                    )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                self._replay_ready = False
+                self._schedule_web_replay()
+                logger.warning(
+                    "Feishu real-time event background worker failed for %s",
+                    user_msg.message_id,
+                    exc_info=True,
+                )
+
+    def _get_or_build_user_client(self, cfg: FeishuAiCommandConfig) -> Any:
+        if getattr(self._service, "_user_client_factory", None) is not None:
+            return self._service.build_user_client(cfg)
+        key = (cfg.owner_open_id or "", cfg.app_id or "", cfg.send_mode or "auto")
+        if self._cached_user_client is None or self._cached_client_key != key:
+            self._cached_user_client = self._service.build_user_client(cfg)
+            self._cached_client_key = key
+        return self._cached_user_client
+
+    async def _handle_frontier_pushed_web_message(self, pushed: Any) -> bool:
+        if self._stopping or self._active_web_transport is None:
+            raise RuntimeError("Feishu Web intake is not ready")
+        journal = self._web_journal
+        replay = self._web_replay
+        wt = self._active_web_transport
+        generation_at_start = self._active_session_generation
+        await asyncio.to_thread(_journal_add_guarded, journal, pushed, wt, generation_at_start)
+        cfg = await self._service.aget_config(auto_import_lark_cli=False)
+        with _session_guard(wt, generation_at_start):
+            pass
+        client = self._get_or_build_user_client(replace(cfg, send_mode="web_session"))
+        if client._get_web_transport() is not self._active_web_transport:
+            raise RuntimeError("Feishu Web intake identity or session changed")
+        delegated: set[str] = set()
+        accepted = await self.handle_pushed_web_message(
+            pushed,
+            background_realtime=True,
+            delegated_ids=delegated,
+            expected_session=(wt, generation_at_start),
+        )
+        if pushed.message.id not in delegated:
+            await asyncio.to_thread(replay.mark_handled, pushed.message)
+            await asyncio.to_thread(
+                _journal_remove_guarded, journal, pushed.message.id, wt, generation_at_start
+            )
+        return accepted
+
+    async def handle_pushed_web_message(
+        self,
+        pushed: Any,
+        *,
+        background_realtime: bool = False,
+        delegated_ids: set[str] | None = None,
+        expected_session: tuple[Any, int | None] | None = None,
+    ) -> bool:
         """Process a ``PushedMessage`` delivered over ``FeishuWebFrontierListener``."""
         cfg = await self._service.aget_config()
-        if not cfg.enabled or cfg.send_mode == "openapi":
+        if expected_session is not None:
+            with _session_guard(*expected_session):
+                pass
+        rt_cfg = self._realtime_router.resolve_config()
+        if not cfg.enabled and not rt_cfg.enabled:
             return False
-        user_client = self._service.build_user_client(cfg)
-        if (
-            hasattr(user_client, "should_use_web_session")
-            and not user_client.should_use_web_session()
-        ):
-            return False
+        user_client = self._get_or_build_user_client(replace(cfg, send_mode="web_session"))
         wt = (
             user_client._get_web_transport() if hasattr(user_client, "_get_web_transport") else None
         )
         if wt is None:
             return False
+        if expected_session is not None and wt is not expected_session[0]:
+            raise RuntimeError("Feishu Web intake transport changed")
+        if self.frontier_running:
+            self._frontier_connected = True
+            self._last_frontier_error = None
         user_msg = wt.ingest_pushed_message(pushed)
+        topic_pos = getattr(pushed.message, "topic_position", None)
+        topic_id = pushed.message.thread_id or pushed.message.root_id
+        if topic_pos is not None and topic_id and pushed.message.chat_id:
+            is_new = await asyncio.to_thread(
+                self._web_replay.remember_topic,
+                topic_id,
+                pushed.message.chat_id,
+                -1,
+                pushed.chat_type,
+            )
+            if is_new:
+                self._replay_ready = False
+                self._schedule_web_replay()
+        if expected_session is not None:
+            with _session_guard(*expected_session):
+                pass
         if user_msg is None:
             return False
-        if not self._service.is_owner_ai_command_candidate(
+        is_owner = bool(
+            user_msg.sender_type == "user"
+            and self._service._matches_owner_sender(user_msg.sender_open_id, cfg)
+        )
+        if cfg.enabled and self._service.is_owner_ai_command_candidate(
             sender_open_id=user_msg.sender_open_id,
             sender_type=user_msg.sender_type,
             text=user_msg.text,
             config=cfg,
         ):
+            command_client = self._service.build_user_client(cfg)
+            if cfg.send_mode != "openapi" and await asyncio.to_thread(
+                command_client.should_use_web_session
+            ):
+                if expected_session is not None:
+                    with _session_guard(*expected_session):
+                        pass
+                self._commands_detected += 1
+                self._service.enqueue_pending_command(user_msg, source="web_frontier")
+                self._schedule_durable_pending_queue()
+                return True
             return False
-        self._commands_detected += 1
-        self._service.enqueue_pending_command(user_msg, source="web_frontier")
-        self._schedule_durable_pending_queue()
-        return True
 
-    def _ensure_frontier_task(self, cfg: Any) -> None:
-        if self._stopping or not cfg.enabled or cfg.send_mode == "openapi":
-            if self._frontier_task is not None and not self._frontier_task.done():
-                self._frontier_stop.set()
-                self._frontier_task.cancel()
-            return
-        user_client = self._service.build_user_client(cfg)
+        owner_ids = self._resolve_owner_ids(cfg, wt)
         if (
-            hasattr(user_client, "should_use_web_session")
-            and not user_client.should_use_web_session()
+            is_owner
+            or user_msg.sender_open_id in owner_ids
+            or getattr(pushed.message, "from_id", "") in owner_ids
         ):
+            self._realtime_router.record_owner_pushed_message(
+                pushed,
+                user_msg,
+                web_transport=wt,
+            )
+            return False
+
+        if background_realtime:
+            if delegated_ids is not None:
+                delegated_ids.add(pushed.message.id)
+            self._enqueue_realtime_event(
+                pushed,
+                user_msg,
+                web_transport=wt,
+                user_client=user_client,
+                owner_ids=owner_ids,
+                is_owner_sender=False,
+            )
+            return True
+
+        async with self._realtime_delivery_lock:
+            return await self._realtime_router.handle_pushed_message(
+                pushed,
+                user_msg,
+                web_transport=wt,
+                user_client=user_client,
+                owner_ids=owner_ids,
+                is_owner_sender=False,
+            )
+
+    def _ensure_frontier_task(self, cfg: Any, *, web_configured: bool) -> None:
+        def stop_frontier() -> None:
             if self._frontier_task is not None and not self._frontier_task.done():
                 self._frontier_stop.set()
                 self._frontier_task.cancel()
+            if self._replay_task is not None and not self._replay_task.done():
+                self._replay_task.cancel()
+            if self._realtime_queue_worker is not None and not self._realtime_queue_worker.done():
+                self._realtime_queue_worker.cancel()
+            self._frontier_task = None
+            self._replay_task = None
+            self._realtime_queue_worker = None
+            self._active_web_transport = None
+            self._realtime_event_queue.clear()
+            self._frontier_connected = False
+            self._replay_ready = False
+
+        if self._stopping or not (web_configured or (cfg.enabled and cfg.send_mode != "openapi")):
+            stop_frontier()
             return
+        user_client = self._get_or_build_user_client(replace(cfg, send_mode="web_session"))
         wt = (
             user_client._get_web_transport() if hasattr(user_client, "_get_web_transport") else None
         )
         if wt is None:
+            stop_frontier()
+            return
+        with wt._web.store._lock:
+            session = wt._web.session(auto_import_larkx=False)
+            session_generation = wt._web.store.generation
+        if session is None or not session.user_id:
+            stop_frontier()
+            return
+        identity = hashlib.sha256(f"{session.region}:{session.user_id}".encode()).hexdigest()[:20]
+        replay_path = self._service._state_path.with_name(f"feishu_web_replay_{identity}.json")
+        if (
+            self._web_replay.path != replay_path
+            or self._active_session_generation != session_generation
+        ):
+            if self._realtime_queue_worker is not None and not self._realtime_queue_worker.done():
+                self._realtime_queue_worker.cancel()
+            self._realtime_event_queue.clear()
+            self._realtime_queue_worker = None
             if self._frontier_task is not None and not self._frontier_task.done():
                 self._frontier_stop.set()
                 self._frontier_task.cancel()
-            return
+                self._frontier_task = None
+            if self._replay_task is not None and not self._replay_task.done():
+                self._replay_task.cancel()
+                self._replay_task = None
+            if self._active_session_generation is not None and self._web_replay.path != replay_path:
+                # Old journals remain on disk under their account-specific path.
+                self._realtime_router.reset_account_state()
+                if hasattr(user_client, "_web_transport"):
+                    user_client._web_transport = None
+                    wt = user_client._get_web_transport()
+                    if wt is None:
+                        self._frontier_connected = False
+                        return
+            self._frontier_connected = False
+            self._web_replay = WebPositionReplay(
+                replay_path, guard=lambda: _session_guard(wt, session_generation)
+            )
+            self._active_session_generation = session_generation
+            self._web_journal = WebPushJournal(replay_path.with_suffix(".sqlite3"))
+            self._replay_ready = False
+        self._active_web_transport = wt
+        if self._frontier_connected and not self._replay_ready:
+            self._schedule_web_replay()
         if self._frontier_task is None or self._frontier_task.done():
             self._frontier_stop = asyncio.Event()
-            listener = wt.create_frontier_listener(self.handle_pushed_web_message)
+            try:
+                listener = wt.create_frontier_listener(
+                    self._handle_frontier_pushed_web_message,
+                    on_state=self._on_frontier_state,
+                )
+            except TypeError:
+                listener = wt.create_frontier_listener(self._handle_frontier_pushed_web_message)
+
             self._frontier_task = asyncio.create_task(
-                listener.run(stop_event=self._frontier_stop),
-                name="feishu-web-frontier",
+                listener.run(stop_event=self._frontier_stop), name="feishu-web-frontier"
             )
 
     async def start(self) -> None:
@@ -211,10 +692,15 @@ class FeishuAiPoller:
 
     async def reconcile(self) -> None:
         """Wake the poller loop immediately after a configuration or token change."""
-        cfg = self._service.get_config(auto_import_lark_cli=False)
-        if cfg.enabled and not self.running and not self._stopping:
+        cfg = await asyncio.to_thread(self._service.get_config, auto_import_lark_cli=False)
+        web_configured = (
+            await asyncio.to_thread(self.web_replay_configured)
+            if not cfg.enabled or cfg.send_mode == "openapi"
+            else False
+        )
+        if (cfg.enabled or web_configured) and not self.running and not self._stopping:
             await self.start()
-        self._ensure_frontier_task(cfg)
+        self._ensure_frontier_task(cfg, web_configured=web_configured)
         self._wake_event.set()
 
     async def wait_for_inflight(self, timeout: float = 5.0) -> None:
@@ -226,8 +712,14 @@ class FeishuAiPoller:
 
     async def quiesce(self) -> None:
         self._stopping = True
+        self._frontier_connected = False
         self._wake_event.set()
         self._frontier_stop.set()
+        if self._replay_task is not None:
+            self._replay_task.cancel()
+            await asyncio.gather(self._replay_task, return_exceptions=True)
+            self._replay_task = None
+        self._replay_ready = False
         if self._frontier_task is not None and not self._frontier_task.done():
             self._frontier_task.cancel()
             try:
@@ -246,6 +738,10 @@ class FeishuAiPoller:
             await asyncio.gather(*list(self._worker_tasks), return_exceptions=True)
             self._worker_tasks.clear()
             self._in_flight_ids.clear()
+        self._realtime_event_queue.clear()
+        self._realtime_queue_worker = None
+        self._cached_user_client = None
+        self._cached_client_key = None
 
     async def stop(self) -> None:
         await self.quiesce()
@@ -258,7 +754,12 @@ class FeishuAiPoller:
             try:
                 cfg = await self._service.aget_config()
                 interval = max(2.0, cfg.poll_interval_seconds)
-                self._ensure_frontier_task(cfg)
+                web_configured = (
+                    await asyncio.to_thread(self.web_replay_configured)
+                    if not cfg.enabled or cfg.send_mode == "openapi"
+                    else False
+                )
+                self._ensure_frontier_task(cfg, web_configured=web_configured)
                 if cfg.enabled:
                     await self.poll_once()
             except asyncio.CancelledError:

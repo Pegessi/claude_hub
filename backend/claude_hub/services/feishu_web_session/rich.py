@@ -177,6 +177,7 @@ class WebMessage:
     content: bytes = b""
     recalled: bool = False
     topic_position: int | None = None
+    at_user_ids: tuple[str, ...] = ()
 
     @property
     def create_time_ms(self) -> int:
@@ -264,6 +265,11 @@ def message_of(x: Mapping[str, Any]) -> WebMessage:
         type=_num(x.get("type")),
         position=_num(x.get("position")),
         topic_position=_num(x["threadPosition"]) if "threadPosition" in x else None,
+        at_user_ids=(
+            tuple(_str(uid) for uid in x.get("atUserIdList", []) if _str(uid))
+            if isinstance(x.get("atUserIdList"), list)
+            else ()
+        ),
         create_time_s=sec,
         content=content,
         recalled=(_num(x.get("status")) == MESSAGE_RECALLED) or removed,

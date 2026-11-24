@@ -43,6 +43,12 @@ from claude_hub.services.demand_patrol.models import (
     PatrolRunRecord,
     PatrolState,
 )
+from claude_hub.services.feishu_realtime_events import (
+    get_feishu_realtime_event_router,
+    is_courtesy_or_ack_only,
+    is_feishu_realtime_stream_healthy,
+    matches_watch_group_url,
+)
 from claude_hub.services.local_runtime_settings import local_setting
 from claude_hub.services.maso_discovery import discover_maso_service
 from claude_hub.services.subagents import SubagentError
@@ -62,6 +68,8 @@ _ACTIONABLE = re.compile(
 
 
 def _is_actionable(text: str) -> bool:
+    if is_courtesy_or_ack_only(text):
+        return False
     if _ACTIONABLE.search(text):
         return True
     return any(
@@ -419,45 +427,102 @@ def _is_answered_by(message: FeishuCandidate, own: FeishuCandidate) -> bool:
             return own.created_at >= message.created_at
         if message.reply_to and own.reply_to == message.reply_to:
             return own.created_at > message.created_at
+        if (
+            bool(message.thread_id)
+            and own.thread_id == message.thread_id
+            and own.created_at > message.created_at
+        ):
+            return True
+        if own.thread_id and own.thread_id == message.message_id:
+            return own.created_at >= message.created_at
         return False
     if own.created_at <= message.created_at:
         return False
-    if message.thread_id or own.thread_id:
+    if own.thread_id:
+        if own.thread_id == message.message_id:
+            return True
         return bool(message.thread_id) and own.thread_id == message.thread_id
+    if (
+        message.chat_type == "group"
+        and message.sender_id
+        and message.sender_id in own.mentioned_ids
+    ):
+        return True
     return message.chat_type == "p2p"
 
 
 def filter_unanswered(
-    messages: Sequence[FeishuCandidate], user_open_id: str, processed_ids: Sequence[str]
+    messages: Sequence[FeishuCandidate],
+    user_open_id: str,
+    processed_ids: Sequence[str],
+    *,
+    realtime_healthy: bool = False,
 ) -> tuple[list[FeishuCandidate], list[str]]:
-    """Admit only direct, explicitly mentioned, or participated-thread human questions."""
+    """Admit only direct, explicitly mentioned, watch-group URL, or participated-thread human questions."""
+    _ = realtime_healthy
     own_messages = [message for message in messages if message.sender_id == user_open_id]
     seen = set(processed_ids)
+    realtime_router = get_feishu_realtime_event_router()
+    realtime_router.note_candidate_batch(messages)
+    rt_cfg = realtime_router.resolve_config()
     candidates, answered = [], []
     for message in sorted(messages, key=lambda item: item.created_at):
         if message.message_id in seen or message.sender_id == user_open_id:
             continue
         seen.add(message.message_id)
+        watch_urls = matches_watch_group_url(
+            message.chat_id,
+            message.chat_name,
+            message.text,
+            rt_cfg,
+            message_id=message.message_id,
+        )
+        is_mention = user_open_id in message.mentioned_ids
+        is_watch_url = bool(watch_urls) or realtime_router.is_pending_failed_watch_candidate(
+            message
+        )
+        is_participated_thread = bool(message.thread_id) and any(
+            own.chat_id == message.chat_id
+            and own.thread_id == message.thread_id
+            and own.created_at < message.created_at
+            for own in own_messages
+        )
+        relevant = (
+            message.chat_type == "p2p" or is_mention or is_watch_url or is_participated_thread
+        )
+        if not relevant:
+            continue
         if _is_automated_candidate(message):
+            answered.append(message.message_id)
+            continue
+        created_ms = int(message.created_at.timestamp() * 1000)
+        if realtime_router.is_message_handled(
+            message.message_id,
+            chat_id=message.chat_id,
+            chat_name=message.chat_name,
+            thread_id=message.thread_id,
+            reply_to=message.reply_to,
+            sender_id=message.sender_id,
+            sender_name=message.sender_name,
+            text=message.text,
+            created_at_ms=created_ms,
+        ) or realtime_router.has_owner_replied(
+            chat_id=message.chat_id,
+            thread_id=message.thread_id,
+            reply_to=message.reply_to,
+            message_id=message.message_id,
+            created_at_ms=created_ms,
+            owner_ids={user_open_id.strip()} if user_open_id and user_open_id.strip() else None,
+        ):
             answered.append(message.message_id)
             continue
         if any(_is_answered_by(message, own) for own in own_messages):
             answered.append(message.message_id)
             continue
-        relevant = (
-            message.chat_type == "p2p"
-            or user_open_id in message.mentioned_ids
-            or (
-                bool(message.thread_id)
-                and any(
-                    own.chat_id == message.chat_id
-                    and own.thread_id == message.thread_id
-                    and own.created_at < message.created_at
-                    for own in own_messages
-                )
-            )
-        )
-        if relevant and _is_actionable(message.text):
+        if is_courtesy_or_ack_only(message.text):
+            answered.append(message.message_id)
+            continue
+        if is_watch_url or _is_actionable(message.text):
             candidates.append(message)
     return candidates, answered
 
@@ -665,6 +730,49 @@ async def _thread_window_messages(
         seen_tokens.add(next_token)
         page_token = next_token
 
+    raise CommandError("Feishu search is incomplete; watermark retained")
+
+
+async def _watched_chat_window_messages(
+    runner: CommandRunner,
+    chat_id: str,
+    *,
+    start_iso: str,
+    end_iso: str,
+    start: datetime,
+    now: datetime,
+    tz: str | ZoneInfo | timezone = "Asia/Shanghai",
+) -> list[FeishuCandidate]:
+    defaults = {"chat_id": chat_id, "chat_type": "group"}
+    collected: list[FeishuCandidate] = []
+    seen_ids: set[str] = set()
+    seen_tokens: set[str] = set()
+    page_token: str | None = None
+    for _ in range(_MAX_THREAD_PAGES):
+        extra = ("--chat-id", chat_id, *(("--page-token", page_token) if page_token else ()))
+        payload = await runner(_search_command(start_iso, end_iso, *extra), timeout=60)
+        data = _object(payload)
+        if data.get("truncated") is True or data.get("errors"):
+            raise CommandError("Feishu search is incomplete; watermark retained")
+        rows = data.get("messages", data.get("items"))
+        if not isinstance(rows, list) or len(rows) > _MAX_SEARCH_ROWS:
+            raise CommandError("Feishu search did not return a bounded message list")
+        for row in rows:
+            if not isinstance(row, dict):
+                raise CommandError("Feishu search returned a malformed message")
+            if row.get("deleted"):
+                continue
+            item = _candidate(row, tz=tz, defaults=defaults)
+            if start <= item.created_at <= now and item.message_id not in seen_ids:
+                seen_ids.add(item.message_id)
+                collected.append(item)
+        next_token = _next_page_token(payload, data)
+        if not _page_has_more(payload, data, next_token):
+            return collected
+        if not rows or not next_token or next_token in seen_tokens:
+            raise CommandError("Feishu search is incomplete; watermark retained")
+        seen_tokens.add(next_token)
+        page_token = next_token
     raise CommandError("Feishu search is incomplete; watermark retained")
 
 
@@ -904,7 +1012,11 @@ async def patrol_provider_env(
             else next((name for name in advertised if name.endswith("_reasoning_high")), None)
         )
         if selected:
-            agent_type, model, env = AgentType.MASO, selected, {"MASO_BASE_URL": base_url}
+            agent_type, model, env = (
+                AgentType.MASO,
+                selected,
+                {"MASO_BASE_URL": base_url},
+            )
     except MasoServiceUnavailable:
         pass
     if agent_type != AgentType.MASO:
@@ -950,7 +1062,12 @@ async def diagnose_message(
             ),
             bootstrap=False,
         )
-    except (WorkspaceAgentInitializationError, RuntimeError, ValueError, KeyError) as exc:
+    except (
+        WorkspaceAgentInitializationError,
+        RuntimeError,
+        ValueError,
+        KeyError,
+    ) as exc:
         raise CommandError(f"Failed to provision patrol triage workspace session: {exc}") from exc
     primary_exc: BaseException | None = None
     try:
@@ -1018,7 +1135,11 @@ def _infowall_base(env: Mapping[str, str]) -> str:
     if not _http_url(base):
         raise CommandError("InfoWall requires a controlled HTTP(S) endpoint")
     parsed = urlsplit(base)
-    if parsed.scheme == "http" and parsed.hostname not in {"127.0.0.1", "localhost", "::1"}:
+    if parsed.scheme == "http" and parsed.hostname not in {
+        "127.0.0.1",
+        "localhost",
+        "::1",
+    }:
         raise CommandError("InfoWall plain HTTP is restricted to loopback")
     if parsed.query or parsed.fragment:
         raise CommandError("InfoWall endpoint must not contain query or fragment")
@@ -1026,7 +1147,9 @@ def _infowall_base(env: Mapping[str, str]) -> str:
 
 
 def _apply_payload(
-    candidate: FeishuCandidate, diagnosis: TriageDiagnosis, existing: Sequence[Mapping[str, Any]]
+    candidate: FeishuCandidate,
+    diagnosis: TriageDiagnosis,
+    existing: Sequence[Mapping[str, Any]],
 ) -> dict[str, Any]:
     key = f"feishu-im:{candidate.message_id}:0"
     source: dict[str, Any] = {
@@ -1067,7 +1190,11 @@ def _apply_payload(
         ):
             if not known.get("id"):
                 raise CommandError("InfoWall matching demand has no ID")
-            demand = {"id": known["id"], "sources": [source], "progress": demand["progress"]}
+            demand = {
+                "id": known["id"],
+                "sources": [source],
+                "progress": demand["progress"],
+            }
             break
     return {"demands": [demand]}
 
@@ -1181,6 +1308,11 @@ async def run_feishu_triage(
     if now.tzinfo is None:
         raise ValueError("Patrol now must have a timezone")
     result = PatrolRunRecord(channel="feishu", started_at=now.isoformat(), dry_run=dry_run)
+    from ..feishu_ai_poller import get_feishu_ai_poller
+
+    if await asyncio.to_thread(get_feishu_ai_poller().web_replay_configured):
+        result.markdown = "飞书个人号 Web 事件与位点重放已接管；CLI 巡检已跳过。"
+        return result
     try:
         identity = _object(await runner(["lark-cli", "auth", "status", "--json"], timeout=15))
         identities = identity.get("identities", {})
@@ -1198,12 +1330,16 @@ async def run_feishu_triage(
         start = _search_start(state, now)
         start_iso = start.astimezone(tz).isoformat(timespec="seconds")
         end_iso = now.astimezone(tz).isoformat(timespec="seconds")
-        by_id: dict[str, FeishuCandidate] = {}
-        for extra_flags in (
+        realtime_router = get_feishu_realtime_event_router()
+        rt_cfg = realtime_router.resolve_config()
+        fallback_gen = realtime_router.fallback_generation
+        search_flags: list[tuple[str, ...]] = [
             ("--is-at-me",),
             ("--chat-type", "p2p"),
             ("--sender", uid),
-        ):
+        ]
+        by_id: dict[str, FeishuCandidate] = {}
+        for extra_flags in search_flags:
             payload = await runner(
                 _search_command(start_iso, end_iso, *extra_flags),
                 timeout=60,
@@ -1211,6 +1347,17 @@ async def run_feishu_triage(
             for item in _search_messages(payload, tz=tz):
                 if start <= item.created_at <= now:
                     by_id.setdefault(item.message_id, item)
+        for watch_chat_id in realtime_router.watched_openapi_chat_ids(rt_cfg):
+            for item in await _watched_chat_window_messages(
+                runner,
+                watch_chat_id,
+                start_iso=start_iso,
+                end_iso=end_iso,
+                start=start,
+                now=now,
+                tz=tz,
+            ):
+                by_id.setdefault(item.message_id, item)
         participated_threads: dict[str, FeishuCandidate] = {}
         for item in by_id.values():
             if item.sender_id == uid and item.thread_id and item.chat_type != "p2p":
@@ -1229,7 +1376,12 @@ async def run_feishu_triage(
             ):
                 by_id.setdefault(item.message_id, item)
         messages = list(by_id.values())
-        candidates, answered = filter_unanswered(messages, uid, state.processed_feishu_ids)
+        candidates, answered = filter_unanswered(
+            messages,
+            uid,
+            state.processed_feishu_ids,
+            realtime_healthy=is_feishu_realtime_stream_healthy(),
+        )
     except (CommandError, ValueError, OSError) as exc:
         result.errors.append(str(exc))
         result.markdown = "飞书巡检未完成；未推进水位。"
@@ -1307,7 +1459,9 @@ async def run_feishu_triage(
         if notify:
             try:
                 delivery = await dot.notify(
-                    card, title=f"🔍 飞书未回排障草稿 · {candidate.source_label}", tone="decision"
+                    card,
+                    title=f"🔍 飞书未回排障草稿 · {candidate.source_label}",
+                    tone="decision",
                 )
             except (ValueError, OSError, httpx.HTTPError):
                 delivery = "failed"
@@ -1324,6 +1478,17 @@ async def run_feishu_triage(
     pending = [item for item in candidates if item.message_id not in completed]
     # A per-run diagnosis cap must not silently discard the rest of a successful search.
     state.feishu_watermark_iso = min((item.created_at for item in pending), default=now).isoformat()
+    completed_set = set(completed)
+    realtime_router.acknowledge_patrol_fallback(
+        recovered_ids=completed,
+        recovered_candidates=[item for item in candidates if item.message_id in completed_set],
+        seen_ids=[item.message_id for item in messages],
+        seen_candidates=messages,
+        window_start_ms=int(start.timestamp() * 1000),
+        window_end_ms=int(now.timestamp() * 1000),
+        max_generation=fallback_gen,
+        all_candidates_completed=(not pending),
+    )
     result.details["remaining"] = len(pending)
     result.markdown = "\n\n---\n\n".join(cards) if cards else "飞书巡检：没有新的排障草稿可发送。"
     return result
