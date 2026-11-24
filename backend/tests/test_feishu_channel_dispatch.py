@@ -1049,3 +1049,60 @@ def test_feishu_v3_rejects_incomplete_stored_context(invalid):
                 "feishu": {**_SOURCE, **invalid},
             },
         )
+
+
+def test_feishu_v3_quote_ids_round_trip():
+    result = format_feishu_provider_text_v3(
+        "hello",
+        **_SOURCE,
+        chat_type="p2p",
+        thread_id=None,
+        parent_id="parent",
+        root_id="root",
+    )
+    context = json.loads(result.splitlines()[0].split(": ", 1)[1])
+    assert context["parent_id"] == "parent" and context["root_id"] == "root"
+    assert (
+        provider_text_for_stored_turn(
+            "hello", {"origin": "feishu", "provider_text_format": "feishu-v3", "feishu": context}
+        )
+        == result
+    )
+
+
+async def test_quote_incident_survives_real_interrupt_dispatch(dispatch):
+    parent = "om-parent-card"
+    first_id = "om-quoted-request"
+    next_id = "om-interrupt"
+    dispatch.client.fetch_merged_forward_messages.return_value = [
+        {
+            "message_id": parent,
+            "msg_type": "interactive",
+            "body": {
+                "content": json.dumps(
+                    {
+                        "header": {"title": {"content": "Card title"}},
+                        "elements": [{"tag": "markdown", "content": "Card body"}],
+                    }
+                )
+            },
+        }
+    ]
+    dispatch.blocked.add(first_id)
+    first = dispatch.reserve(first_id, event_chat_type="p2p", thread=None)
+    first.event = replace(
+        first.event, text="这个我没看懂.. 说清楚点", parent_id=parent, root_id=parent
+    )
+    queue = bot_api._tab_dispatch_queues["tab"]
+    running = asyncio.create_task(dispatch.run(first, queue))
+    await dispatch.wait_started(first_id)
+    source = dispatch.submitted[0]
+    assert source["metadata"]["feishu"]["parent_id"] == parent
+    assert source["metadata"]["feishu"]["root_id"] == parent
+    assert parent in source["text"] and "Card title" in source["text"]
+    second = dispatch.reserve(next_id, event_chat_type="p2p", thread=None)
+    assert await running == "superseded"
+    assert await dispatch.run(second, queue) == "completed"
+    merged = dispatch.submitted[1]["visible"]
+    assert "[上一条]" in merged and "[新消息 1]" in merged
+    assert parent in merged and "Card body" in merged and next_id in merged

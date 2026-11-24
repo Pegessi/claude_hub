@@ -92,6 +92,8 @@ def format_feishu_provider_text_v3(
     chat_type: str,
     thread_id: str | None,
     chat_name: str | None = None,
+    parent_id: str | None = None,
+    root_id: str | None = None,
 ) -> str:
     """Build immutable v3 text with the resolved room, topic and sender context.
 
@@ -111,6 +113,10 @@ def format_feishu_provider_text_v3(
     }
     if chat_name is not None:
         fields["chat_name"] = chat_name
+    if parent_id is not None:
+        fields["parent_id"] = parent_id
+    if root_id is not None:
+        fields["root_id"] = root_id
     source = json.dumps(fields, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
     return f"{_FEISHU_PROVIDER_INTRO_V3}{source}\n{_FEISHU_OUTPUT_GUIDANCE_V2}\n\n{text}"
 
@@ -145,6 +151,10 @@ def provider_text_for_stored_turn(
             or "thread_id" not in feishu
             or (thread_id is not None and not isinstance(thread_id, str))
             or (chat_name is not None and not isinstance(chat_name, str))
+            or any(
+                feishu.get(key) is not None and not isinstance(feishu.get(key), str)
+                for key in ("parent_id", "root_id")
+            )
         ):
             raise ValueError("stored Feishu turn channel metadata is incomplete")
         return format_feishu_provider_text_v3(
@@ -156,6 +166,8 @@ def provider_text_for_stored_turn(
             chat_type=str(chat_type),
             thread_id=thread_id,
             chat_name=chat_name,
+            parent_id=feishu.get("parent_id"),
+            root_id=feishu.get("root_id"),
         )
     formatter = (
         format_feishu_provider_text_v1

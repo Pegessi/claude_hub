@@ -11,6 +11,9 @@
 
 - Reject replies when the group mode is unknown, distinguish uncertain sends from read failures, and disclose missing quoted context.
 - Page mention searches without stalling and split user-client models to keep the module maintainable.
+### fix(feishu): preserve quoted message context
+
+- Include reply identifiers and the referenced message text or card summary in Bot Chat turns, including interrupted turns.
 
 ### fix(feishu): distinguish topic-group replies and verify Bot chat mappings
 
