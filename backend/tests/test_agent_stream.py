@@ -228,6 +228,7 @@ def test_verified_flag_survives_get_tab_to_native_resume(
     )
 
     manager = TTYDManager.__new__(TTYDManager)
+    manager._maso_archive_source = None
     manager.processes = {"tab-resume": process}
 
     tab = manager.get_tab("tab-resume")
@@ -272,6 +273,7 @@ def test_unverified_flag_uses_session_id_not_resume(
     )
 
     manager = TTYDManager.__new__(TTYDManager)
+    manager._maso_archive_source = None
     manager.processes = {"tab-constructive": process}
 
     tab = manager.get_tab("tab-constructive")
@@ -315,6 +317,7 @@ def test_cursor_native_build_command_forwards_model_flag(
     )
 
     manager = TTYDManager.__new__(TTYDManager)
+    manager._maso_archive_source = None
     manager.processes = {"tab-cursor-model": process}
 
     tab = manager.get_tab("tab-cursor-model")
@@ -350,6 +353,7 @@ def test_cursor_native_build_command_omits_model_flag_without_env(
     )
 
     manager = TTYDManager.__new__(TTYDManager)
+    manager._maso_archive_source = None
     manager.processes = {"tab-cursor-no-model": process}
 
     tab = manager.get_tab("tab-cursor-no-model")
@@ -2961,6 +2965,7 @@ async def test_direct_tab_route_reuses_durable_tab_incarnation_and_rejects_repla
         session_kind=SessionKind.CHAT,
     )
     tabs = TTYDManager.__new__(TTYDManager)
+    tabs._maso_archive_source = None
     tabs.processes = {process.tab_id: process}
     monkeypatch.setattr(agent_stream_api.ttyd_manager, "get_tab", tabs.get_tab)
     goal_manager = SimpleNamespace(

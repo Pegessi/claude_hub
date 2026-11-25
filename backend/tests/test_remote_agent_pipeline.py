@@ -367,6 +367,7 @@ async def test_auto_reviewer_reuse_path_unaffected_by_worker_env_preset(
 @pytest.mark.asyncio
 async def test_create_tab_rejects_chat_remote() -> None:
     manager = TTYDManager.__new__(TTYDManager)
+    manager._maso_archive_source = None
     manager.processes = {}
     manager._tab_order = []
 

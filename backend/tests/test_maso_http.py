@@ -1331,6 +1331,7 @@ async def test_chat_only_and_unsupported_edit_are_rejected_before_mutation() -> 
     assert TerminalTabCreate(name="good", agent_type=AgentType.MASO, session_kind=SessionKind.CHAT)
     process = TTYDProcess("id", 12345, "unchanged", agent_type=AgentType.TERMINAL)
     manager = TTYDManager.__new__(TTYDManager)
+    manager._maso_archive_source = None
     manager.processes = {"id": process}
     manager._start_locks = {}
     with pytest.raises(ValueError, match="MASO provider"):
@@ -1360,6 +1361,7 @@ async def test_maso_cwd_and_plan_rejected_before_remote_execution() -> None:
         session_kind=SessionKind.CHAT,
     )
     manager = TTYDManager.__new__(TTYDManager)
+    manager._maso_archive_source = None
     manager.processes = {"id": process}
     manager._start_locks = {}
     with pytest.raises(ValueError, match="working directory"):

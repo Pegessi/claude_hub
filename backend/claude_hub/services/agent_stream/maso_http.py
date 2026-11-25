@@ -20,6 +20,10 @@ from urllib.parse import quote, urlsplit
 
 import httpx
 
+from claude_hub.services.maso_session_archive import (
+    retire_adopted_session,
+    retire_unowned_allocation,
+)
 from claude_hub.services.runtime_isolation import resolve_runtime_home
 
 from ...config import settings
@@ -604,9 +608,16 @@ class MasoHttpSession(ProviderSession):
         if rotation:
             self._pending_rotation = (conversation_id, None)
         else:
-            # The provider has allocated this identity even when its first status
-            # read fails. Retain it so an ordinary Chat retries the same session.
-            self._persist_conversation_id(conversation_id)
+            # No prompt may reach an allocation whose local ownership failed
+            # to persist. Reuse the adoption journal for retry/cold recovery.
+            try:
+                self._commit_rotated_conversation(
+                    conversation_id, seed_prior_history=False, initial_allocation=True
+                )
+            except BaseException:
+                if self._adoption_journal is None and not self._delivery_path.exists():
+                    retire_unowned_allocation(self._base, conversation_id)
+                raise
         try:
             status: Any = await self._request("GET", self._path_for(conversation_id, "status"))
             if not isinstance(status, dict) or not isinstance(status.get("agent_id"), str):
@@ -647,12 +658,18 @@ class MasoHttpSession(ProviderSession):
         self._pending_rotation = None
 
     def _commit_rotated_conversation(
-        self, conversation_id: str, *, seed_prior_history: bool = True
+        self,
+        conversation_id: str,
+        *,
+        seed_prior_history: bool = True,
+        initial_allocation: bool = False,
     ) -> None:
         journal: Dict[str, Any] = {
             "base_url": self._base,
             "session_id": self._conversation_id or conversation_id,
             "adopted_session_id": conversation_id,
+            "session_id_verified": self._conversation_id_verified,
+            "initial_allocation": initial_allocation,
             "seed_history": (self._rotated_conversation_seed() if seed_prior_history else None),
             "uncertain": False,
             "post_acknowledged": True,
@@ -664,6 +681,17 @@ class MasoHttpSession(ProviderSession):
         temporary.replace(self._delivery_path)
         self._adoption_journal = journal
         self._finish_conversation_adoption()
+
+    def _adopt_rotated_conversation_id(self, conversation_id: str) -> None:
+        # The journal owns ambiguous persistence: unlike generic providers,
+        # never write the previous (possibly unverified) ID back as confirmed.
+        if self._conversation_id_persist is not None:
+            self._conversation_id_persist(conversation_id)
+        self._conversation_id = conversation_id
+        self._conversation_id_verified = True
+        if not (self._adoption_journal or {}).get("initial_allocation"):
+            self._hub_runtime_guidance_injected = False
+            self._dot_hidden_system_pack_delivered = False
 
     def _finish_conversation_adoption(self) -> None:
         journal = self._adoption_journal
@@ -684,6 +712,7 @@ class MasoHttpSession(ProviderSession):
             if self._on_seed_consumed is None:
                 self._on_seed_consumed = self._discard_recovery_seed
         self._delivery_path.unlink(missing_ok=True)
+        retire_adopted_session(journal)
         self._adoption_journal = None
         self._message_id = None
         self._delivery_uncertain = False

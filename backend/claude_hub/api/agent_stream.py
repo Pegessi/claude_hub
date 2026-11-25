@@ -156,7 +156,8 @@ _TAB_STREAM_SESSION_PREFIX = "terminal-tab-"
 def _persist_workspace_agent_session_id(session_id: str, conversation_id: str) -> None:
     """Persist a provider-owned conversation id for a managed Agent session."""
 
-    workspace_manager.set_session_agent_session_id(session_id, conversation_id)
+    if not workspace_manager.set_session_agent_session_id(session_id, conversation_id):
+        raise RuntimeError("Managed provider identity owner was removed")
 
 
 def _persist_workspace_chat_mode(session_id: str, mode: str) -> None:
@@ -168,9 +169,10 @@ def _persist_workspace_chat_mode(session_id: str, mode: str) -> None:
 def _persist_tab_agent_session_id(stream_session_id: str, conversation_id: str) -> None:
     """Persist a provider-owned conversation id for an Agent tab."""
 
-    ttyd_manager.set_tab_agent_session_id(
+    if not ttyd_manager.set_tab_agent_session_id(
         stream_session_id.removeprefix(_TAB_STREAM_SESSION_PREFIX), conversation_id
-    )
+    ):
+        raise RuntimeError("Tab provider identity owner was removed")
 
 
 def _persist_tab_chat_mode(stream_session_id: str, mode: str) -> None:

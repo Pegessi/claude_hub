@@ -7,6 +7,20 @@
 
 ## Released
 
+### fix(maso): archive remote sessions with Hub lifecycle
+
+- Synchronize confirmed MASO HTTP identities after Tab and Workspace
+  archive/restore/delete commits, including temporary scouts and reviewers.
+- Serialize best-effort archive requests, protect shared live references and
+  unfinished adoption journals, and retire rotated identities only after
+  durable adoption. First allocation now retains a recoverable adoption journal
+  instead of sending on an identity whose persistence failed.
+- Keep local lifecycle transitions independent of remote outages and retain
+  remote history for restore; no background session sweep is introduced.
+- Restore journal-only allocations without requiring another model turn, and
+  capture verified old-session retirement before permanent deletion removes
+  adoption evidence, while preserving shared-owner and resumable-journal guards.
+
 ### feat(feishu): expose WebSocket event controls and health
 
 - Toggle personal-account Feishu events in Dot, Feishu settings, or the CLI and see connection and replay health.

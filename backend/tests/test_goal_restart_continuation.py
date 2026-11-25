@@ -408,6 +408,7 @@ async def test_archive_records_capture_veto_before_runtime_stop(setup, monkeypat
         yield process
 
     manager = TTYDManager.__new__(TTYDManager)
+    manager._maso_archive_source = None
     monkeypatch.setattr(manager, "_locked_current_tab", locked)
     monkeypatch.setattr(manager, "_save_state", lambda: None)
     monkeypatch.setattr(stream_module, "stop_session_stream", AsyncMock())

@@ -154,6 +154,7 @@ async def test_native_chat_lifecycle_through_status_apis_and_cli(
     queue = await tailer.subscribe()
 
     manager = TTYDManager.__new__(TTYDManager)
+    manager._maso_archive_source = None
     manager._status_cache = {}
     manager._status_snapshots = {}
     process = TTYDProcess(
@@ -309,6 +310,7 @@ async def test_real_terminal_reviewer_screens_through_status_apis_and_cli(
         process, "capture_foreground_command", AsyncMock(return_value=provider.value)
     )
     manager = TTYDManager.__new__(TTYDManager)
+    manager._maso_archive_source = None
     manager.processes = {process.tab_id: process}
     manager._tab_order = [process.tab_id]
     manager._status_cache = {}

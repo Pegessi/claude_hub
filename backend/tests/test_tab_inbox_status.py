@@ -176,6 +176,7 @@ def _chat_manager(
     managed_session_id: str | None = None,
 ) -> TTYDManager:
     manager = TTYDManager.__new__(TTYDManager)
+    manager._maso_archive_source = None
     manager._status_snapshots = {}
     manager._status_cache = {}
     process = TTYDProcess(

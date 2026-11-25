@@ -16,6 +16,7 @@ from ..legacy_state_migration import (
     state_has_legacy_orchestration_keys,
 )
 from ..local_storage import document_exists, write_document
+from ..maso_session_archive import MasoArchiveSource, References, session_reference
 from ..task_lifecycle import TaskNotifier
 from ..task_mailbox import TaskMailbox
 from ._base import _WorkspaceManagerBase
@@ -123,8 +124,17 @@ class _StateMixin(_WorkspaceManagerBase):
         self.task_mailbox = TaskMailbox(self)
         # Schedule loading only parses records; reference resolution and firing
         # happen later. Reject unknown fields before core recovery can save.
+        self._maso_archive_source = None
         self._load_scheduled_tasks()
         self._load_state()
+        self._maso_archive_source = MasoArchiveSource(self._maso_archive_references)
+
+    def _maso_archive_references(self) -> References:
+        return {
+            (session.workspace_id, session.id): reference
+            for session in self.sessions.values()
+            if (reference := session_reference(session)) is not None
+        }
 
     def _workspace_dir(self, workspace_id: str) -> Path:
         return self._runtime_state_root / workspace_id

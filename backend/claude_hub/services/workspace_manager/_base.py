@@ -17,6 +17,7 @@ if TYPE_CHECKING:
     from ...models.schemas import TaskLifecycle
     from ...models.task_mailbox import TaskEvent
     from ..chat_message_inbox import ChatMessageInbox
+    from ..maso_session_archive import MasoArchiveSource
     from ..task_lifecycle import TaskNotifier
     from ..task_mailbox import TaskMailbox
     from ._attachments import _PreparedWorkspaceAttachment
@@ -55,6 +56,7 @@ if TYPE_CHECKING:
 
 
 class _WorkspaceManagerBase(_RuntimeHostContract):
+    _maso_archive_source: MasoArchiveSource | None
     _dispatch_locks: dict[str, asyncio.Lock]
     _task_start_locks: dict[str, asyncio.Lock]
     _feedback_automation_task: asyncio.Task[None] | None

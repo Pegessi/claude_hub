@@ -248,7 +248,13 @@ class _SessionCleanupMixin(_WorkspaceManagerBase):
             return False
         if session.agent_session_id == agent_session_id and session.agent_session_id_verified:
             return True
+        previous = (session.agent_session_id, session.agent_session_id_verified)
         session.agent_session_id = agent_session_id
         session.agent_session_id_verified = True
-        self._save_state()
+        try:
+            self._save_state()
+        except BaseException:
+            if session.agent_type == AgentType.MASO:
+                session.agent_session_id, session.agent_session_id_verified = previous
+            raise
         return True

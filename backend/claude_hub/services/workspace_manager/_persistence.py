@@ -134,6 +134,8 @@ class _PersistenceMixin(_WorkspaceManagerBase):
         payload = self._workspace_state_payload(workspace_id)
         state_text = json.dumps(payload, indent=2)
         self._atomic_save_state_text(self._workspace_state_file(workspace_id), state_text)
+        if self._maso_archive_source is not None:
+            self._maso_archive_source.committed(scope=workspace_id)
         self._refresh_snapshot_best_effort(workspace_id, state_text=state_text)
 
     def _refresh_snapshot_best_effort(
@@ -159,6 +161,8 @@ class _PersistenceMixin(_WorkspaceManagerBase):
             workspace_dir = self._workspace_dir(workspace.id)
             workspace_dir.mkdir(parents=True, exist_ok=True)
             self._save_workspace_state(workspace.id)
+        if self._maso_archive_source is not None:
+            self._maso_archive_source.committed()
 
     def _write_snapshot(self, workspace_id: str, *, state_text: str | None = None) -> None:
         """Render a committed payload; direct/cold-start calls read the authoritative file."""

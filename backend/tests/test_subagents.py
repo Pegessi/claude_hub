@@ -1028,6 +1028,7 @@ def _real_manager(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Any:
     )
     monkeypatch.setattr(TTYDManager, "ensure_tab_running", fake_ensure_tab_running)
     manager = TTYDManager.__new__(TTYDManager)
+    manager._maso_archive_source = None
     manager._next_port = 14000
     manager.processes = {}
     manager._tab_order = []

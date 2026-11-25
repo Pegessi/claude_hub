@@ -95,9 +95,17 @@ class ManagerTabsMixin(ManagerHost):
             return False
         if process.agent_session_id == agent_session_id and process.agent_session_id_verified:
             return True
+        previous = (process.agent_session_id, process.agent_session_id_verified)
         process.agent_session_id = agent_session_id
         process.agent_session_id_verified = True
-        self._save_state()
+        if process.agent_type == AgentType.MASO:
+            try:
+                self._persist_state()
+            except BaseException:
+                process.agent_session_id, process.agent_session_id_verified = previous
+                raise
+        else:
+            self._save_state()
         return True
 
     def set_tab_chat_mode(self, tab_id: str, mode: str) -> bool:

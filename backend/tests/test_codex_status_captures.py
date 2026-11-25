@@ -33,6 +33,7 @@ def classify(manager: TTYDManager, raw: str, provider: AgentType = AgentType.COD
 @pytest.fixture
 def manager() -> TTYDManager:
     result = TTYDManager.__new__(TTYDManager)
+    result._maso_archive_source = None
     result._status_snapshots = {}
     result._status_cache = {}
     return result

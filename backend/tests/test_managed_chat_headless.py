@@ -22,6 +22,7 @@ ttyd_module = import_module("claude_hub.services.ttyd_manager")
 
 def _empty_manager(monkeypatch: pytest.MonkeyPatch) -> TTYDManager:
     manager = TTYDManager.__new__(TTYDManager)
+    manager._maso_archive_source = None
     manager.processes = {}
     manager._next_port = 23000
     manager._tab_order = []

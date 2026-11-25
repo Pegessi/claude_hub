@@ -96,7 +96,9 @@ async def _backend_runtime_ownership() -> AsyncIterator[None]:
             backup_count=settings.backend_log_backup_count,
         ),
     ):
-        async with ttyd_manager.cleanup_task_lifetime():
+        from .services.maso_session_archive import maso_session_archives
+
+        async with ttyd_manager.cleanup_task_lifetime(), maso_session_archives.lifetime():
             yield
 
 

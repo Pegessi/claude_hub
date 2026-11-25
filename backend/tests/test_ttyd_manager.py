@@ -83,6 +83,7 @@ def test_ensure_tab_in_order_prepends_new_tab_and_preserves_existing_order(
     monkeypatch: MonkeyPatch,
 ) -> None:
     manager = TTYDManager.__new__(TTYDManager)
+    manager._maso_archive_source = None
     manager._tab_order = ["manual-b", "manual-a"]
     saved_orders: list[list[str]] = []
     monkeypatch.setattr(
@@ -100,6 +101,7 @@ def test_set_tab_order_preserves_position_of_tab_omitted_by_stale_payload(
     monkeypatch: MonkeyPatch,
 ) -> None:
     manager = TTYDManager.__new__(TTYDManager)
+    manager._maso_archive_source = None
     manager.processes = cast(
         dict[str, TTYDProcess],
         {
@@ -145,6 +147,7 @@ def test_set_tab_order_keeps_full_payload_and_filters_partial_payload(
     expected_order: list[str],
 ) -> None:
     manager = TTYDManager.__new__(TTYDManager)
+    manager._maso_archive_source = None
     manager.processes = cast(dict[str, TTYDProcess], {tab_id: object() for tab_id in process_ids})
     manager._tab_order = current_order
     saved_orders: list[list[str]] = []
@@ -471,6 +474,7 @@ async def test_ensure_tmux_preserves_preexisting_session(monkeypatch: MonkeyPatc
 
 def test_get_next_port_skips_existing_listener(monkeypatch: MonkeyPatch) -> None:
     manager = TTYDManager.__new__(TTYDManager)
+    manager._maso_archive_source = None
     manager._next_port = 12000
     checked: list[int] = []
 
@@ -506,6 +510,7 @@ def test_get_next_port_raises_when_port_range_is_exhausted(
     monkeypatch: MonkeyPatch,
 ) -> None:
     manager = TTYDManager.__new__(TTYDManager)
+    manager._maso_archive_source = None
     manager._next_port = ttyd_manager_module._MAX_TCP_PORT
     monkeypatch.setattr(ttyd_manager_module, "_is_local_port_available", lambda port: False)
 
@@ -517,6 +522,7 @@ def test_get_next_port_raises_when_port_range_is_exhausted(
 
 def test_get_next_port_can_allocate_max_tcp_port(monkeypatch: MonkeyPatch) -> None:
     manager = TTYDManager.__new__(TTYDManager)
+    manager._maso_archive_source = None
     manager._next_port = ttyd_manager_module._MAX_TCP_PORT
     monkeypatch.setattr(ttyd_manager_module, "_is_local_port_available", lambda port: True)
 
@@ -554,6 +560,7 @@ async def test_create_tab_start_failure_stops_unpersisted_process(
     monkeypatch: MonkeyPatch, tmp_path: Path, tmux_created: bool
 ) -> None:
     manager = TTYDManager.__new__(TTYDManager)
+    manager._maso_archive_source = None
     manager._next_port = 12010
     manager.processes = {}
     manager._tab_order = []
@@ -591,6 +598,7 @@ async def test_create_tab_tmux_ensure_timeout_rolls_back_owned_resources(
 ) -> None:
     """A client-independent deadline covers the unregistered tmux create wait."""
     manager = TTYDManager.__new__(TTYDManager)
+    manager._maso_archive_source = None
     manager._next_port = 12014
     manager.processes = {}
     manager._tab_order = []
@@ -636,6 +644,7 @@ async def test_create_tab_ttyd_start_timeout_rolls_back_owned_resources(
 ) -> None:
     """The same deadline covers ttyd startup after tmux has been created."""
     manager = TTYDManager.__new__(TTYDManager)
+    manager._maso_archive_source = None
     manager._next_port = 12015
     manager.processes = {}
     manager._tab_order = []
@@ -897,6 +906,7 @@ async def test_create_tab_cancellation_shields_unpersisted_process_cleanup(
     monkeypatch: MonkeyPatch, tmp_path: Path
 ) -> None:
     manager = TTYDManager.__new__(TTYDManager)
+    manager._maso_archive_source = None
     manager._next_port = 12011
     manager.processes = {}
     manager._tab_order = []
@@ -946,6 +956,7 @@ async def test_create_tab_repeated_cancellation_waits_for_cleanup(
     monkeypatch: MonkeyPatch, tmp_path: Path
 ) -> None:
     manager = TTYDManager.__new__(TTYDManager)
+    manager._maso_archive_source = None
     manager._next_port = 12012
     manager.processes = {}
     manager._tab_order = []
@@ -999,6 +1010,7 @@ async def test_create_tab_cancellation_during_tmux_creation_preserves_ownership(
     monkeypatch: MonkeyPatch, tmp_path: Path
 ) -> None:
     manager = TTYDManager.__new__(TTYDManager)
+    manager._maso_archive_source = None
     manager._next_port = 12013
     manager.processes = {}
     manager._tab_order = []
@@ -1046,6 +1058,7 @@ async def test_create_tab_retries_when_allocated_port_is_claimed(
     monkeypatch: MonkeyPatch, tmp_path: Path
 ) -> None:
     manager = TTYDManager.__new__(TTYDManager)
+    manager._maso_archive_source = None
     manager._next_port = 12020
     manager.processes = {}
     manager._tab_order = []
@@ -1169,6 +1182,7 @@ async def test_direct_cursor_chat_uses_native_transport(
     (not the legacy terminal_transcript mode). The native transport owns the
     Cursor process and produces the structured stream."""
     manager = TTYDManager.__new__(TTYDManager)
+    manager._maso_archive_source = None
     manager._next_port = 12348
     manager.processes = {}
     manager._tab_order = []
@@ -1201,6 +1215,7 @@ async def test_cursor_terminal_session_keeps_native_terminal_transport(
     monkeypatch: MonkeyPatch, tmp_path: Path
 ) -> None:
     manager = TTYDManager.__new__(TTYDManager)
+    manager._maso_archive_source = None
     manager._next_port = 12349
     manager.processes = {}
     manager._tab_order = []
@@ -1242,6 +1257,7 @@ async def test_direct_cursor_chat_without_cwd_uses_native_transport(
     cwd to locate the transcript file — must not gate the promotion.
     """
     manager = TTYDManager.__new__(TTYDManager)
+    manager._maso_archive_source = None
     manager._next_port = 12351
     manager.processes = {}
     manager._tab_order = []
@@ -1355,6 +1371,7 @@ async def test_managed_workspace_tab_defaults_terminal_and_accepts_explicit_chat
 ) -> None:
     """Existing managed callers keep Terminal; explicit Chat uses a headless tab."""
     manager = TTYDManager.__new__(TTYDManager)
+    manager._maso_archive_source = None
     manager._next_port = 12350
     manager.processes = {}
     manager._tab_order = []
@@ -2161,6 +2178,7 @@ async def test_remote_history_falls_back_to_local_tmux_on_capture_failure(
 @pytest.mark.asyncio
 async def test_get_tab_history_requests_remote_preferred_capture(monkeypatch: MonkeyPatch) -> None:
     manager = TTYDManager.__new__(TTYDManager)
+    manager._maso_archive_source = None
     process = TTYDProcess(
         tab_id="tab-1",
         port=12355,
@@ -2184,6 +2202,7 @@ async def test_chat_status_uses_native_turn_in_flight_not_inert_tmux(
     monkeypatch: MonkeyPatch,
 ) -> None:
     manager = TTYDManager.__new__(TTYDManager)
+    manager._maso_archive_source = None
     manager._status_snapshots = {}
     manager._status_cache = {}
     process = TTYDProcess(
@@ -2232,6 +2251,7 @@ async def test_list_statuses_excludes_archived_tabs_by_default(
     """
 
     manager = TTYDManager.__new__(TTYDManager)
+    manager._maso_archive_source = None
     manager._status_snapshots = {}
     manager._status_cache = {}
     active = TTYDProcess(
@@ -2276,6 +2296,7 @@ async def test_list_statuses_excludes_archived_tabs_by_default(
 def test_claude_spinner_status_classifies_as_working(monkeypatch: MonkeyPatch) -> None:
     monkeypatch.setattr(ttyd_manager_module, "_tmux_session_exists", lambda _session: True)
     manager = TTYDManager.__new__(TTYDManager)
+    manager._maso_archive_source = None
     manager._status_snapshots = {}
     process = TTYDProcess(
         tab_id="tab-claude-spinner",
@@ -2311,6 +2332,7 @@ def test_claude_spinner_status_classifies_as_working(monkeypatch: MonkeyPatch) -
 def test_codex_running_tool_status_classifies_as_working(monkeypatch: MonkeyPatch) -> None:
     monkeypatch.setattr(ttyd_manager_module, "_tmux_session_exists", lambda _session: True)
     manager = TTYDManager.__new__(TTYDManager)
+    manager._maso_archive_source = None
     manager._status_snapshots = {}
     process = TTYDProcess(
         tab_id="tab-codex-running",
@@ -2344,6 +2366,7 @@ def test_codex_running_tool_status_classifies_as_working(monkeypatch: MonkeyPatc
 def test_cursor_running_tokens_status_classifies_as_working(monkeypatch: MonkeyPatch) -> None:
     monkeypatch.setattr(ttyd_manager_module, "_tmux_session_exists", lambda _session: True)
     manager = TTYDManager.__new__(TTYDManager)
+    manager._maso_archive_source = None
     manager._status_snapshots = {}
     process = TTYDProcess(
         tab_id="tab-cursor-running",
@@ -2393,6 +2416,7 @@ _FROZEN_WORKING_FRAME = "\n".join(
 def test_frozen_working_frame_classifies_as_stuck(monkeypatch: MonkeyPatch) -> None:
     monkeypatch.setattr(ttyd_manager_module, "_tmux_session_exists", lambda _session: True)
     manager = TTYDManager.__new__(TTYDManager)
+    manager._maso_archive_source = None
     # Simulate a frame first observed well past the staleness window: the agent
     # left a working frame on screen but nothing has changed since.
     first_seen = datetime.now() - timedelta(
@@ -2428,6 +2452,7 @@ def test_ticking_working_frame_stays_working(monkeypatch: MonkeyPatch) -> None:
 
     monkeypatch.setattr(ttyd_manager_module, "_tmux_session_exists", lambda _session: True)
     manager = TTYDManager.__new__(TTYDManager)
+    manager._maso_archive_source = None
     # Previous sample had a different hash and is old; the new (changed) frame
     # resets frame_first_seen_at, so it must not be treated as stale.
     old = datetime.now() - timedelta(seconds=ttyd_manager_module._WORKING_FRAME_STALE_SECONDS + 120)
@@ -2464,6 +2489,7 @@ def test_frozen_working_frame_with_task_panel_classifies_as_stuck(
 
     monkeypatch.setattr(ttyd_manager_module, "_tmux_session_exists", lambda _session: True)
     manager = TTYDManager.__new__(TTYDManager)
+    manager._maso_archive_source = None
     first_seen = datetime.now() - timedelta(
         seconds=ttyd_manager_module._WORKING_FRAME_STALE_SECONDS + 5
     )
@@ -2505,6 +2531,7 @@ def test_frozen_working_frame_with_task_panel_classifies_as_stuck(
 def test_codex_selection_prompt_classifies_as_attention(monkeypatch: MonkeyPatch) -> None:
     monkeypatch.setattr(ttyd_manager_module, "_tmux_session_exists", lambda _session: True)
     manager = TTYDManager.__new__(TTYDManager)
+    manager._maso_archive_source = None
     manager._status_snapshots = {}
     process = TTYDProcess(
         tab_id="tab-codex-selection",
@@ -2604,6 +2631,7 @@ def test_codex_braille_working_above_chrome_classifies_as_working(
 ) -> None:
     monkeypatch.setattr(ttyd_manager_module, "_tmux_session_exists", lambda _session: True)
     manager = TTYDManager.__new__(TTYDManager)
+    manager._maso_archive_source = None
     manager._status_snapshots = {}
     process = TTYDProcess(
         tab_id="tab-codex-braille",
@@ -2629,6 +2657,7 @@ def test_codex_bullet_working_above_chrome_classifies_as_working(
 ) -> None:
     monkeypatch.setattr(ttyd_manager_module, "_tmux_session_exists", lambda _session: True)
     manager = TTYDManager.__new__(TTYDManager)
+    manager._maso_archive_source = None
     manager._status_snapshots = {}
     process = TTYDProcess(
         tab_id="tab-codex-bullet",
@@ -2652,6 +2681,7 @@ def test_codex_bullet_working_above_chrome_classifies_as_working(
 def test_codex_idle_frame_classifies_as_idle(monkeypatch: MonkeyPatch) -> None:
     monkeypatch.setattr(ttyd_manager_module, "_tmux_session_exists", lambda _session: True)
     manager = TTYDManager.__new__(TTYDManager)
+    manager._maso_archive_source = None
     manager._status_snapshots = {}
     process = TTYDProcess(
         tab_id="tab-codex-idle",
@@ -2679,6 +2709,7 @@ def test_codex_working_marker_ignored_for_non_codex_agent(
     # only the agent's own markers (absent here) drive its status.
     monkeypatch.setattr(ttyd_manager_module, "_tmux_session_exists", lambda _session: True)
     manager = TTYDManager.__new__(TTYDManager)
+    manager._maso_archive_source = None
     manager._status_snapshots = {}
     process = TTYDProcess(
         tab_id="tab-claude-not-codex",
@@ -2703,6 +2734,7 @@ def test_codex_frozen_working_frame_classifies_as_stuck(monkeypatch: MonkeyPatch
     # working-forever. Confirms the codex path routes through working_or_stale().
     monkeypatch.setattr(ttyd_manager_module, "_tmux_session_exists", lambda _session: True)
     manager = TTYDManager.__new__(TTYDManager)
+    manager._maso_archive_source = None
     first_seen = datetime.now() - timedelta(
         seconds=ttyd_manager_module._WORKING_FRAME_STALE_SECONDS + 30
     )
@@ -2741,6 +2773,7 @@ def test_shell_prompt_takes_priority_over_working_markers(
 
     monkeypatch.setattr(ttyd_manager_module, "_tmux_session_exists", lambda _session: True)
     manager = TTYDManager.__new__(TTYDManager)
+    manager._maso_archive_source = None
     manager._status_snapshots = {}
     process = TTYDProcess(
         tab_id="tab-prompt-priority",
@@ -2782,6 +2815,7 @@ def test_idle_hints_take_priority_over_working_markers(
 
     monkeypatch.setattr(ttyd_manager_module, "_tmux_session_exists", lambda _session: True)
     manager = TTYDManager.__new__(TTYDManager)
+    manager._maso_archive_source = None
     manager._status_snapshots = {}
     process = TTYDProcess(
         tab_id="tab-idle-hint-priority",
@@ -2823,6 +2857,7 @@ def test_frozen_working_frame_45s_window_classifies_as_stuck(
 
     monkeypatch.setattr(ttyd_manager_module, "_tmux_session_exists", lambda _session: True)
     manager = TTYDManager.__new__(TTYDManager)
+    manager._maso_archive_source = None
     first_seen = datetime.now() - timedelta(
         seconds=ttyd_manager_module._WORKING_FRAME_STALE_SECONDS + 5
     )
@@ -2860,6 +2895,7 @@ def test_working_frame_within_45s_window_stays_working(
 
     monkeypatch.setattr(ttyd_manager_module, "_tmux_session_exists", lambda _session: True)
     manager = TTYDManager.__new__(TTYDManager)
+    manager._maso_archive_source = None
     first_seen = datetime.now() - timedelta(
         seconds=ttyd_manager_module._WORKING_FRAME_STALE_SECONDS - 5
     )
@@ -2892,6 +2928,7 @@ def test_working_frame_within_45s_window_stays_working(
 @pytest.mark.asyncio
 async def test_ensure_tab_running_starts_missing_ttyd_listener(monkeypatch: MonkeyPatch) -> None:
     manager = TTYDManager.__new__(TTYDManager)
+    manager._maso_archive_source = None
     manager._start_locks = {}
     process = TTYDProcess(
         tab_id="tab-missing-ttyd",
@@ -2926,6 +2963,7 @@ async def test_ensure_tab_running_starts_missing_ttyd_listener(monkeypatch: Monk
 @pytest.mark.asyncio
 async def test_ensure_tab_running_reuses_existing_listener(monkeypatch: MonkeyPatch) -> None:
     manager = TTYDManager.__new__(TTYDManager)
+    manager._maso_archive_source = None
     manager._start_locks = {}
     process = TTYDProcess(
         tab_id="tab-existing-ttyd",
@@ -2952,6 +2990,7 @@ async def test_ensure_tab_running_reuses_existing_listener(monkeypatch: MonkeyPa
 async def test_ensure_tab_running_skips_archived_tab(monkeypatch: MonkeyPatch) -> None:
     """Archived tabs must not be silently restarted by terminal access."""
     manager = TTYDManager.__new__(TTYDManager)
+    manager._maso_archive_source = None
     manager._start_locks = {}
     process = TTYDProcess(
         tab_id="tab-archived",
@@ -3398,6 +3437,7 @@ def test_agent_session_id_round_trips_through_state(monkeypatch: MonkeyPatch, tm
     write_document(state_file, [process.to_dict()])
 
     manager = TTYDManager.__new__(TTYDManager)
+    manager._maso_archive_source = None
     manager.processes = {}
     manager._next_port = 10000
     manager._load_state()
@@ -3467,6 +3507,7 @@ def _backfill_manager(monkeypatch: MonkeyPatch, tmp_path, process: TTYDProcess) 
     state_file = tmp_path / "tabs.json"
     monkeypatch.setattr(ttyd_manager_module, "STATE_FILE", state_file)
     manager = TTYDManager.__new__(TTYDManager)
+    manager._maso_archive_source = None
     manager.processes = {process.tab_id: process}
     return manager
 
@@ -3944,6 +3985,7 @@ async def test_switch_env_manager_persists_state(monkeypatch: MonkeyPatch, tmp_p
     monkeypatch.setenv("SHELL", "/bin/zsh")
 
     manager = TTYDManager.__new__(TTYDManager)
+    manager._maso_archive_source = None
     manager.processes = {}
     manager._next_port = 12400
     manager._tab_order = []
@@ -4190,6 +4232,7 @@ async def test_switch_env_manager_missing_tab_raises(monkeypatch: MonkeyPatch, t
     monkeypatch.setattr(ttyd_manager_module, "STATE_FILE", state_file)
     monkeypatch.setattr(ttyd_manager_module, "LAUNCH_ENV_DIR", tmp_path / "launch_env")
     manager = TTYDManager.__new__(TTYDManager)
+    manager._maso_archive_source = None
     manager.processes = {}
     manager._next_port = 12500
     manager._tab_order = []
@@ -4410,6 +4453,7 @@ def test_resume_quarantined_round_trips_through_state(monkeypatch: MonkeyPatch, 
     write_document(state_file, [quarantined.to_dict(), fresh.to_dict()])
 
     manager = TTYDManager.__new__(TTYDManager)
+    manager._maso_archive_source = None
     manager.processes = {}
     manager._next_port = 10000
     manager._load_state()
@@ -4434,6 +4478,7 @@ def test_resume_quarantined_round_trips_through_state(monkeypatch: MonkeyPatch, 
     ]
     write_document(state_file, legacy_state)
     manager2 = TTYDManager.__new__(TTYDManager)
+    manager2._maso_archive_source = None
     manager2.processes = {}
     manager2._next_port = 10000
     manager2._load_state()
@@ -4507,6 +4552,7 @@ def test_legacy_missing_session_kind_reloads_as_terminal(
     write_document(state_file, legacy_state)
 
     manager = TTYDManager.__new__(TTYDManager)
+    manager._maso_archive_source = None
     manager.processes = {}
     manager._next_port = 10000
     manager._load_state()
@@ -4555,6 +4601,7 @@ def test_agent_session_id_verified_round_trips_through_state(
     write_document(state_file, [verified.to_dict(), unverified.to_dict()])
 
     manager = TTYDManager.__new__(TTYDManager)
+    manager._maso_archive_source = None
     manager.processes = {}
     manager._next_port = 10000
     manager._load_state()
@@ -4581,6 +4628,7 @@ def test_agent_session_id_verified_round_trips_through_state(
     ]
     write_document(state_file, legacy_state)
     manager2 = TTYDManager.__new__(TTYDManager)
+    manager2._maso_archive_source = None
     manager2.processes = {}
     manager2._next_port = 10000
     manager2._load_state()
@@ -4634,6 +4682,7 @@ def test_delete_tab_keeps_process_registered_when_teardown_fails(
 ) -> None:
     """A failed tmux teardown must remain visible so reconciliation can retry it."""
     manager = TTYDManager.__new__(TTYDManager)
+    manager._maso_archive_source = None
     manager._start_locks = {}
     process = SimpleNamespace(tmux_session="claude-hub-deadbeef", created_at=datetime.now())
 
@@ -4660,6 +4709,7 @@ def test_delete_tab_discards_structured_stream_via_tailer(
 ) -> None:
     """Delegate artifact removal after fencing/retirement, not directly to the cache."""
     manager = TTYDManager.__new__(TTYDManager)
+    manager._maso_archive_source = None
     manager._start_locks = {}
     process = SimpleNamespace(tmux_session="claude-hub-deadbeef", created_at=datetime.now())
 
@@ -4711,6 +4761,7 @@ def test_startup_prunes_only_old_unpersisted_managed_tmux(
 ) -> None:
     """Cold start removes old managed-prefix tmux sessions with no tabs.json owner."""
     manager = TTYDManager.__new__(TTYDManager)
+    manager._maso_archive_source = None
     manager.processes = {
         "owned-tab": cast(TTYDProcess, SimpleNamespace(tmux_session="claude-hub-a1b2c3d4")),
     }
@@ -4747,6 +4798,7 @@ def test_hot_restart_reattaches_only_tabs_with_surviving_tmux(
 ) -> None:
     """A backend-only reload must not resurrect every historical saved tab."""
     manager = TTYDManager.__new__(TTYDManager)
+    manager._maso_archive_source = None
     started: list[str] = []
     ensured: list[str] = []
 
@@ -4823,6 +4875,7 @@ def test_hot_restart_reattaches_only_tabs_with_surviving_tmux(
 
 def test_codex_backfill_uses_one_fresh_scan_per_startup(monkeypatch, tmp_path):
     manager = TTYDManager.__new__(TTYDManager)
+    manager._maso_archive_source = None
     tabs = [
         SimpleNamespace(
             from_persisted_state=True,
@@ -4856,6 +4909,7 @@ def test_codex_backfill_uses_one_fresh_scan_per_startup(monkeypatch, tmp_path):
 
 def test_codex_backfill_shared_scan_keeps_ambiguous_sessions_unpinned(monkeypatch, tmp_path):
     manager = TTYDManager.__new__(TTYDManager)
+    manager._maso_archive_source = None
     tabs = [
         SimpleNamespace(
             from_persisted_state=True,
@@ -4890,6 +4944,7 @@ def test_codex_backfill_shared_scan_keeps_ambiguous_sessions_unpinned(monkeypatc
 @pytest.mark.asyncio
 async def test_cleanup_stops_ttyd_concurrently_and_preserves_every_tmux():
     manager = TTYDManager.__new__(TTYDManager)
+    manager._maso_archive_source = None
     entered = set()
     all_entered = asyncio.Event()
 
@@ -4913,6 +4968,7 @@ async def test_cleanup_stops_ttyd_concurrently_and_preserves_every_tmux():
 def test_cold_restart_recovers_all_saved_non_codex_tabs(monkeypatch: MonkeyPatch) -> None:
     """With no surviving managed tmux, preserve full machine-restart recovery."""
     manager = TTYDManager.__new__(TTYDManager)
+    manager._maso_archive_source = None
     started: list[str] = []
     ensured: list[str] = []
 
@@ -5004,6 +5060,7 @@ async def test_explicit_cursor_recovery_persists_rotated_sid_across_reload(
     monkeypatch.setattr(process, "start", fake_start)
 
     manager = TTYDManager.__new__(TTYDManager)
+    manager._maso_archive_source = None
     manager.processes = {process.tab_id: process}
     manager._tab_order = [process.tab_id]
     manager._start_locks = {}
@@ -5066,6 +5123,7 @@ async def test_explicit_codex_fallback_is_attributed_and_persisted_across_reload
     monkeypatch.setattr(process, "start", fake_start)
 
     manager = TTYDManager.__new__(TTYDManager)
+    manager._maso_archive_source = None
     manager.processes = {process.tab_id: process}
     manager._tab_order = [process.tab_id]
     manager._start_locks = {}
@@ -5122,6 +5180,7 @@ async def test_explicit_prequarantined_codex_launch_failure_still_kills_writer(
     monkeypatch.setattr(process, "stop", fake_stop)
 
     manager = TTYDManager.__new__(TTYDManager)
+    manager._maso_archive_source = None
     manager.processes = {process.tab_id: process}
     monkeypatch.setattr(manager, "_launch_one_cold_codex_locked", fail_after_create)
     monkeypatch.setattr(manager, "_save_state", lambda: saves.append("saved"))
@@ -5176,6 +5235,7 @@ async def test_explicit_codex_recovery_cancellation_shields_writer_teardown(
     monkeypatch.setattr(process, "stop", fake_stop)
 
     manager = TTYDManager.__new__(TTYDManager)
+    manager._maso_archive_source = None
     manager.processes = {process.tab_id: process}
     monkeypatch.setattr(manager, "_launch_one_cold_codex_locked", wait_after_create)
     monkeypatch.setattr(manager, "_save_state", lambda: saves.append("saved"))
@@ -5217,6 +5277,7 @@ async def test_explicit_codex_cleanup_failure_persists_quarantine_evidence(
     monkeypatch.setattr(process, "stop", failed_stop)
 
     manager = TTYDManager.__new__(TTYDManager)
+    manager._maso_archive_source = None
     manager.processes = {process.tab_id: process}
     monkeypatch.setattr(
         manager,
@@ -5251,6 +5312,7 @@ def test_quarantine_preserves_sid_when_teardown_cannot_be_proven(
 ) -> None:
     """Do not erase the last owner SID when its process may still be writing."""
     manager = TTYDManager.__new__(TTYDManager)
+    manager._maso_archive_source = None
     tab = TTYDProcess(
         tab_id="tab-live-writer",
         port=12407,
@@ -5319,6 +5381,7 @@ def test_legacy_state_without_shell_explicitly_provided_uses_agent_cli(
     write_document(state_file, rows)
 
     manager = TTYDManager.__new__(TTYDManager)
+    manager._maso_archive_source = None
     manager.processes = {}
     manager._next_port = 10000
     manager._load_state()
@@ -5380,6 +5443,7 @@ def test_legacy_state_without_shell_explicitly_provided_uses_agent_cli(
     # Reload from the persisted (migrated) state to prove the representation
     # is stable: the boolean round-trips unchanged through save+load.
     manager2 = TTYDManager.__new__(TTYDManager)
+    manager2._maso_archive_source = None
     manager2.processes = {}
     manager2._next_port = 10000
     manager2._load_state()
@@ -5404,6 +5468,7 @@ async def test_fork_tab_copies_history_up_to_ordinal(
     from claude_hub.services.agent_stream.store import AgentStreamStore
 
     manager = TTYDManager.__new__(TTYDManager)
+    manager._maso_archive_source = None
     manager._next_port = 12020
     manager.processes = {}
     manager._tab_order = []
@@ -5471,6 +5536,7 @@ async def test_duplicate_and_fork_of_subagent_tab_are_ordinary_chats(
     from claude_hub.services.agent_stream.store import AgentStreamStore
 
     manager = TTYDManager.__new__(TTYDManager)
+    manager._maso_archive_source = None
     manager._next_port = 12040
     manager.processes = {}
     manager._tab_order = []
@@ -5531,6 +5597,7 @@ async def test_compute_tab_unread_flags_completed_turn(
     from claude_hub.services.agent_stream.store import AgentStreamStore
 
     manager = TTYDManager.__new__(TTYDManager)
+    manager._maso_archive_source = None
     manager._next_port = 12020
     manager.processes = {}
     manager._tab_order = []
@@ -5598,6 +5665,7 @@ def _make_fork_test_manager(
     monkeypatch.setattr(wm_module, "STATE_ROOT", tmp_path / "state")
 
     manager = TTYDManager.__new__(TTYDManager)
+    manager._maso_archive_source = None
     manager._start_locks = {}
     manager._next_port = start_port
     manager.processes = {}
@@ -5836,6 +5904,7 @@ def _make_archive_test_manager(
 ) -> tuple[TTYDManager, TTYDProcess]:
     """Bare manager + one real chat process, with state file isolated."""
     manager = TTYDManager.__new__(TTYDManager)
+    manager._maso_archive_source = None
     manager._next_port = 14000
     manager.processes = {}
     manager._tab_order = []
@@ -5991,6 +6060,7 @@ def test_list_tabs_does_not_emit_full_state_at_info(
 
 def test_list_archived_tabs_sorted_newest_first(monkeypatch: MonkeyPatch, tmp_path: Path) -> None:
     manager = TTYDManager.__new__(TTYDManager)
+    manager._maso_archive_source = None
     manager._next_port = 14100
     manager.processes = {}
     manager._tab_order = []
@@ -6025,6 +6095,7 @@ async def test_delete_and_listener_recovery_share_tab_lifecycle_lock(
     first_operation: str,
 ) -> None:
     manager = TTYDManager.__new__(TTYDManager)
+    manager._maso_archive_source = None
     manager._start_locks = {}
     process = TTYDProcess(
         tab_id="delete-reconnect-race",
@@ -6132,6 +6203,7 @@ def _make_lifecycle_subject(
     monkeypatch: MonkeyPatch,
 ) -> tuple[TTYDManager, TTYDProcess, list[str]]:
     manager = TTYDManager.__new__(TTYDManager)
+    manager._maso_archive_source = None
     process = TTYDProcess(
         tab_id="lifecycle-current-tab", port=12359, name="Lifecycle", agent_type=AgentType.TERMINAL
     )

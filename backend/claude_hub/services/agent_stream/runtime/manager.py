@@ -435,6 +435,11 @@ class TailerManager(EditResendMixin):
         """
         session = self._session_getter(session_id)
         if session is None:
+            raise RuntimeError("Cannot persist provider identity for a removed session")
+        if session.agent_type == AgentType.MASO and self._persist_session_id_cb is not None:
+            self._persist_session_id_cb(session_id, conversation_id)
+            session.agent_session_id = conversation_id
+            session.agent_session_id_verified = True
             return
         try:
             session.agent_session_id = conversation_id

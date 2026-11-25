@@ -447,3 +447,18 @@ def terminal_tab(backend_server: None) -> Generator[dict, None, None]:
         session.delete(f"{BACKEND_URL}/api/tabs/{tab['id']}", timeout=5)
     except requests.RequestException:
         pass
+
+
+@pytest.fixture(autouse=True)
+def _isolate_maso_archive_http(monkeypatch: pytest.MonkeyPatch) -> None:
+    """New lifecycle side effects must never contact a developer's MASO service."""
+    import httpx
+
+    from claude_hub.services import maso_session_archive
+
+    def client(**kwargs):
+        return httpx.AsyncClient(
+            **kwargs, transport=httpx.MockTransport(lambda _request: httpx.Response(200))
+        )
+
+    monkeypatch.setattr(maso_session_archive, "AsyncClient", client)

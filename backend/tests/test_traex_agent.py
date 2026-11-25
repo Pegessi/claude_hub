@@ -280,6 +280,7 @@ async def test_traex_terminal_switch_env_rejected() -> None:
 def test_traex_working_indicator_classifies_as_working(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(ttyd_manager_module, "_tmux_session_exists", lambda _session: True)
     manager = TTYDManager.__new__(TTYDManager)
+    manager._maso_archive_source = None
     manager._status_snapshots = {}
     process = _traex_process()
 

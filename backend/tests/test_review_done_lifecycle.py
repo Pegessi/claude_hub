@@ -393,6 +393,7 @@ async def test_sqlite_stream_summary_and_mr_cache_drive_tab_review_and_auto_done
             last_viewed_at=None,
         )
         fake_mgr = TTYDManager.__new__(TTYDManager)
+        fake_mgr._maso_archive_source = None
         fake_mgr.processes = {tab_id: proc}  # type: ignore[dict-item]
         fake_mgr._status_cache = {}
         fake_mgr._status_snapshots = {}

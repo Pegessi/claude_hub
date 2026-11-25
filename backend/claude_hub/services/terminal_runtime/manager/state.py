@@ -18,6 +18,7 @@ from ....models import (
     WorkspaceSessionRole,
 )
 from ...local_storage import document_exists, read_document, write_document
+from ...maso_session_archive import MasoArchiveSource, References, session_reference
 from ..defaults import _TABS_STATE_VERSION
 from ..records import (
     TabStateError,
@@ -58,12 +59,22 @@ class ManagerStateMixin(ManagerHost):
         # in FastAPI lifespan before start_all_tabs performs the tmux probe;
         # probing here lets a duplicate backend hang or mutate shared runtime
         # state before the single-instance guard can reject it.
+        self._maso_archive_source: MasoArchiveSource | None = None
         self._load_state()
+        self._maso_archive_source = MasoArchiveSource(self._maso_archive_references)
         self._load_order()
         # Do not rewrite tab snapshot/order files on load. Legacy process
         # construction may still materialize provider launch settings.
         if self._state_error is None:
             self._sync_order_with_processes(persist=False)
+
+    def _maso_archive_references(self) -> References:
+        return {
+            ("terminal-tabs", f"terminal-tab-{process.tab_id}"): reference
+            for process in self.processes.values()
+            if not process.managed_session_id
+            and (reference := session_reference(process)) is not None
+        }
 
     @cached_property
     def _cleanup_tasks(self) -> Dict[Tuple[str, str], asyncio.Task[bool]]:
@@ -230,6 +241,8 @@ class ManagerStateMixin(ManagerHost):
             self._state_confirmed = False
             raise
         self._state_confirmed = True
+        if self._maso_archive_source is not None:
+            self._maso_archive_source.committed()
 
     def _save_state(self) -> None:
         try:

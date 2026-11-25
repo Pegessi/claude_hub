@@ -370,6 +370,7 @@ async def test_fork_tab_seeds_truncated_history_into_new_provider_session(
     from claude_hub.services.ttyd_manager import TTYDManager, TTYDProcess
 
     manager = TTYDManager.__new__(TTYDManager)
+    manager._maso_archive_source = None
     manager._next_port = 14020
     manager.processes = {}
     manager._tab_order = []
@@ -496,6 +497,7 @@ async def test_fork_with_textless_prefix_writes_no_seed_sidecar(
     from claude_hub.services.ttyd_manager import TTYDManager, TTYDProcess
 
     manager = TTYDManager.__new__(TTYDManager)
+    manager._maso_archive_source = None
     manager._next_port = 14120
     manager.processes = {}
     manager._tab_order = []
