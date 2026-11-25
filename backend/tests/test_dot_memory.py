@@ -11,9 +11,11 @@ import pytest
 
 from claude_hub.services.dot import Card, DotService, DotStore
 from claude_hub.services.dot.context import (
+    SESSION_PACK_CHARS,
     TURN_PACK_CHARS,
     build_session_pack,
     build_turn_pack,
+    session_pack_cuts,
 )
 from claude_hub.services.dot.index import DotIndex, query_terms
 from claude_hub.services.dot.prompts import DEFAULT_ROLE, WAKE_MESSAGE
@@ -231,6 +233,121 @@ def test_session_pack_has_role_tools_profile_and_concepts(store: DotStore) -> No
     assert "claude-hub dot recall" in pack
     assert "Prefers simple words" in pack and "Clean mind" in pack
     assert "Not in session pack" not in pack
+
+
+def test_session_pack_fits_normal_load_and_cuts_whole_lines_without_mid_card_slice(
+    store: DotStore,
+) -> None:
+    store.update_identity(name="Avery Assistant")
+    for i in range(8):
+        prefix = f"When delegating task group {i}, specify exact verification command {i}: "
+        rule = prefix + ("v" * (200 - len(prefix)))
+        assert len(rule) == 200
+        store.add_lesson(rule)
+    user_cards = [
+        store.save_card(
+            _card(
+                "user",
+                f"User preference {i:02d}",
+                f"Pref {i:02d} " + ("p" * 88),
+                importance=(i % 5) + 1,
+            )
+        )
+        for i in range(24)
+    ]
+    concept_cards = [
+        store.save_card(
+            _card(
+                "concept",
+                f"Architecture concept {i:02d}",
+                f"Concept {i:02d} " + ("c" * 150),
+                importance=4,
+            )
+        )
+        for i in range(8)
+    ]
+
+    pack = build_session_pack(store)
+    assert len(pack) < SESSION_PACK_CHARS
+    assert 'The user named you "Avery Assistant".' in pack
+    assert session_pack_cuts(store) == []
+    assert session_pack_cuts(store.home) == []
+    for lesson in store.list_lessons():
+        assert f"[{lesson['id']}]" in pack
+    for card in user_cards:
+        line = f"- [{card.id}] {card.title} — {card.summary}"
+        assert len(line) == 149
+        assert line in pack
+    for card in concept_cards:
+        line = f"- [{card.id}] {card.title} — {card.summary}"
+        assert len(line) == 224
+        assert line in pack
+
+    # Now intentionally overflow both user and concept budgets; verify whole-line boundaries only.
+    overflow_users = [
+        store.save_card(
+            _card(
+                "user",
+                f"Extra user card {i:02d}",
+                "u" * 180,
+                importance=1,
+            )
+        )
+        for i in range(20)
+    ]
+    overflow_concepts = [
+        store.save_card(
+            _card(
+                "concept",
+                f"Extra concept card {i:02d}",
+                "c" * 180,
+                importance=1,
+            )
+        )
+        for i in range(12)
+    ]
+
+    crowded_pack = build_session_pack(store)
+    assert len(crowded_pack) <= SESSION_PACK_CHARS
+    cuts = session_pack_cuts(store)
+    assert cuts == ["profile", "concepts"]
+
+    all_expected_lines = {
+        f"- [{c.id}] {c.title} — {c.summary}"
+        for c in [*user_cards, *overflow_users, *concept_cards, *overflow_concepts]
+    }
+    pack_card_lines = [
+        line
+        for section in crowded_pack.split("## About the user\n", 1)[1].split("\n\n")
+        for line in section.splitlines()
+        if line.startswith("- [")
+    ]
+    assert pack_card_lines
+    for line in pack_card_lines:
+        assert line in all_expected_lines, f"mid-card truncation detected: {line!r}"
+
+    # Also verify remaining global pack budget cuts are reported in session_pack_cuts
+    # even when concept cards alone are within _CONCEPT_CHARS.
+    custom_store = DotStore(store.home.parent / "dot_tight_budget")
+    custom_store.ensure()
+    custom_store.role_path.write_text(
+        "# Custom Dot\n\n" + "\n".join(f"- rule line {i:03d} " + ("r" * 80) for i in range(90))
+    )
+    for i in range(6):
+        custom_store.save_card(
+            _card(
+                "concept",
+                f"Concept under section cap {i}",
+                "k" * 160,
+                importance=3,
+            )
+        )
+    tight_pack = build_session_pack(custom_store)
+    assert len(tight_pack) <= SESSION_PACK_CHARS
+    assert "concepts" in session_pack_cuts(custom_store)
+    for line in tight_pack.splitlines():
+        if line.startswith("- ["):
+            assert line.endswith("k" * 160)
 
 
 def test_turn_pack_sections_and_budget(store: DotStore) -> None:

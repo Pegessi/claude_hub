@@ -69,6 +69,82 @@ def test_guidance_preserves_choices_and_explicit_tool_contracts() -> None:
     assert TIDY_MESSAGE not in RETIRED_TIDY_MESSAGES
 
 
+def test_tool_guide_is_compact_and_preserves_workspace_lessons_and_safety_rules() -> None:
+    assert 800 <= len(TOOL_GUIDE.strip()) <= 1100
+    for token in (
+        "--help",
+        "CLAUDE_HUB_URL",
+        "dot show|remember|forget|cards|journal|inbox|lessons|health|status|identity|rotate|patrol|scout",
+        "workspace list",
+        "task create|dispatch|get|continue|followup",
+        "agent list|status|create|run|send|result|close",
+        "session logs",
+        "lessons list|get|create",
+        "claude-hub lessons create <workspace_id> --summary ... --do ... --avoid ...",
+        "dot cards",
+        "dot lessons",
+        "memory/<kind>/",
+        "may be read directly",
+        "never store or leak internal paths or secrets",
+    ):
+        assert token in TOOL_GUIDE, token
+    for bogus in ("dot card/", "dot files", "dot digest", "agent output", "create/send/output"):
+        assert bogus not in TOOL_GUIDE, bogus
+
+
+def test_format_task_brief_recipe_acceptance_checklists() -> None:
+    eval_brief = format_task_brief(
+        goal="Benchmark serving throughput",
+        context="Compare candidate vs baseline",
+        done_when="1. Report written",
+        output="reports/bench.md",
+        out_of_scope="Code edits",
+        constraints="Read-only",
+        recipe="eval_and_report",
+    )
+    assert "## Recipe acceptance checklist" in eval_brief
+    assert "sweep axis, load, and batch coverage across the intended operating range" in eval_brief
+    assert "not bunched at one point" in eval_brief
+    assert (
+        "Normalize per-replica or unit-resource throughput against an apples-to-apples "
+        "baseline distribution"
+    ) in eval_brief
+    assert (
+        "Update all affected tables, charts, and conclusions coherently throughout the "
+        "report body rather than appending an unintegrated tail section"
+    ) in eval_brief
+
+    triage_brief = format_task_brief(
+        goal="Diagnose timeout regression",
+        context="Inspect logs and runtime flags",
+        done_when="1. Root cause identified",
+        output="Reply in report",
+        out_of_scope="Code changes",
+        constraints="Read-only",
+        recipe="triage_diagnose",
+    )
+    assert "Post your plan (Goal Packet) before substantial work" not in triage_brief
+    assert "Perform read-only investigation directly within scope" in triage_brief
+    assert "## Recipe acceptance checklist" in triage_brief
+    assert (
+        "Trace back to the primary root-cause error log and config/parameter derivation "
+        "chain (verifying actual effective runtime values vs defaults), rather than "
+        "repeating secondary or cascading symptoms"
+    ) in triage_brief
+    assert "State concrete verification commands and evidence" in triage_brief
+
+    std_brief = format_task_brief(
+        goal="G",
+        context="C",
+        done_when="1. D",
+        output="O",
+        out_of_scope="N",
+        constraints="K",
+        recipe="standard",
+    )
+    assert "## Recipe acceptance checklist" not in std_brief
+
+
 @pytest.mark.parametrize("role", [b"Custom role: ask before changing memory.\n", b"", b"\xff\xfe"])
 def test_existing_role_is_not_rewritten(tmp_path: Path, role: bytes) -> None:
     home = tmp_path / "dot"

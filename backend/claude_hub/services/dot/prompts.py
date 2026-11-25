@@ -68,62 +68,55 @@ TURN_RULES = """\
 """
 
 TOOL_GUIDE = """\
-## Dot tools (run in your shell)
+## Dot tools (via `CLAUDE_HUB_URL`; `--help` for flags)
 
-- `claude-hub dot recall "<words>" [--kind user|work|knowledge|concept]` — search memory
-- `claude-hub dot show <card-id>` — read a full card
-- `claude-hub dot remember --kind <kind> --title "..." --summary "..." [--body "..."] \
-[--tag t] [--file <path>] [--link <card-id>]` — save a card (`--id <card-id>` updates one)
-- `claude-hub dot forget <card-id>` — archive a card
-- `claude-hub dot focus list|add "<title>" --why "..." --priority 1-5|done <id>|drop <id>`
-- `claude-hub dot work list` — tracked tasks (delegated or watched) and their state
-- `claude-hub dot delegate --workspace <id> --title "..." --goal "..." \
---done-when "<check>" [--done-when "<check>" ...] --output "<what, and where it goes>" \
-[--context "..."] [--out-of-scope "..."] [--constraints "..."] \
-[--agent codex|claude|cursor|maso|antigravity] [--model <id>] [--env-preset <name>] \
-[--recipe standard|triage_diagnose|spec_implement_review|eval_and_report] \
-[--demand-id <id>] [--session <agent-session-id>] [--stall-hours N]`. Keep one goal per task,
-  with checkable done-when items and a clear output location (`spec_implement_review` for
-  isolated-worktree code + independent review + branch push; `triage_diagnose` for read-only
-  diagnosis; `eval_and_report` for evaluations). A brief warning holds the task; revise it or
-  use `--confirm` when the warning does not apply.
-- `claude-hub dot review <task-id> --verdict ok|redo|skip \
-[--cause brief|env|worker|change] [--note "..."] [--lesson "<rule>" | --lesson-id <id>]` —
-  records a judgment for a task you delegated, not a watched task or human acceptance.
-  A redo needs a cause. `brief` also needs a lesson (new, max 200 characters) or
-  `--lesson-id`; other redo causes and `skip` need `--note`. `change` means the
-  user's goal changed. A useful lesson names the situation and missing brief detail.
-  A redo does not restart work. If revisions are needed, consider
-  `claude-hub task continue <task-id> --message "<what to fix>"` while in review
-  or failed, or delegate a separate check.
-- `claude-hub dot lessons` — your brief lessons; `lessons edit|drop|merge` keep them tidy
-- `claude-hub dot watch <task-id> [--stall-hours N]` — watch an existing Hub task (default \
-stuck alarm: 1 hour without progress); `claude-hub dot unwatch <task-id>` stops it
-- `claude-hub dot notify "<markdown>" [--title "..." --tone done|failed|decision|info]` —
-  message the user's Feishu chat (the bot bound to this Chat); with a title it is a
-  card with a coloured header. `Reach:` shows the reply destination and bot binding.
-  Use it when an update should reach the user now but this turn's reply will not.
-- `claude-hub task followup <workspace-id> <task-id> --message "..."` — steer a running
-  task (new direction, answer, scope change) without waiting for its result. When the
-  user answers a plan or question notice about a task, pass it on with this.
-- `claude-hub task list <workspace-id> --attention` — tasks waiting on a person or
-  without an owner, with the reason
-- `claude-hub task accept <task-id>` — accept a finished task once the user agrees
-- `claude-hub workspace list` — find a workspace id
-- `claude-hub dot identity [--name "..."] [--avatar "<emoji>"]` — show or change your name/avatar
-- `claude-hub dot patrol [--enable|--disable] [--feishu|--no-feishu] [--daily|--no-daily]` —
-  show or toggle proactive Feishu triage and daily InfoWall/MR radar (off by default)
-- `claude-hub dot rotate` — start a fresh session on the next turn (use after a big topic change)
-
-Your memory home is your working directory. Cards are markdown files under
-`memory/<kind>/`; the raw talk log is under `journal/`; stored files are
-under `files/`. You may read them directly.
+- Memory: `claude-hub dot recall` & `dot show|remember|forget|cards|journal|inbox|lessons|health|status|identity|rotate|patrol|scout`. Working dir is memory home (`memory/<kind>/`, `journal/`, `files/` may be read directly; mutate cards via `dot`; never store or leak internal paths or secrets).
+- Work: `dot focus`, `dot work list` — tracked tasks (delegated or watched), `dot watch|unwatch`, `dot notify [--title]`.
+- Tasks & agents: `dot delegate [--session <agent-session-id>] [--recipe standard|triage_diagnose|spec_implement_review|eval_and_report]` (one goal/task); `workspace list`; `task create|dispatch|get|continue|followup`; `task accept` once the user agrees; `agent list|status|create|run|send|result|close`; `session logs`.
+- Review & lessons: `dot review` (not a watched task or human acceptance; A redo does not restart work). Save repo guardrails via `claude-hub lessons create <workspace_id> --summary ... --do ... --avoid ...` (`lessons list|get|create`); user preferences stay in `dot cards` / `dot lessons`.
 """
 
 _BRIEF_GOAL_PACKET_LINE = (
     "- Post your plan (Goal Packet) before substantial work; the user sees it and may\n"
     "  redirect you through a follow-up message."
 )
+
+_RECIPES: dict[str, dict[str, str | tuple[str, ...] | None]] = {
+    "standard": {
+        "goal_packet_line": None,
+        "acceptance_checks": (),
+    },
+    "spec_implement_review": {
+        "goal_packet_line": (
+            "- Execute end-to-end in your isolated feature worktree without pausing for a\n"
+            "  separate Goal Packet approval round; commit verified changes and request review."
+        ),
+        "acceptance_checks": (),
+    },
+    "triage_diagnose": {
+        "goal_packet_line": (
+            "- Perform read-only investigation directly within scope without a separate\n"
+            "  Goal Packet round; never edit repository files or push branches."
+        ),
+        "acceptance_checks": (
+            "Trace back to the primary root-cause error log and config/parameter derivation "
+            "chain (verifying actual effective runtime values vs defaults), rather than "
+            "repeating secondary or cascading symptoms.",
+            "State concrete verification commands and evidence supporting the diagnosis.",
+        ),
+    },
+    "eval_and_report": {
+        "goal_packet_line": None,
+        "acceptance_checks": (
+            "Verify sweep axis, load, and batch coverage across the intended operating range "
+            "(not bunched at one point).",
+            "Normalize per-replica or unit-resource throughput against an apples-to-apples "
+            "baseline distribution.",
+            "Update all affected tables, charts, and conclusions coherently throughout the "
+            "report body rather than appending an unintegrated tail section.",
+        ),
+    },
+}
 
 BRIEF_TEMPLATE = """\
 # Task brief from Dot
@@ -180,20 +173,16 @@ def format_task_brief(
         out_of_scope=out_of_scope,
         constraints=constraints,
     )
-    if recipe == "spec_implement_review":
-        return rendered.replace(
-            _BRIEF_GOAL_PACKET_LINE,
-            "- Execute end-to-end in your isolated feature worktree without pausing for a\n"
-            "  separate Goal Packet approval round; commit verified changes and request review.",
-            1,
-        )
-    if recipe == "triage_diagnose":
-        return rendered.replace(
-            _BRIEF_GOAL_PACKET_LINE,
-            "- Perform read-only investigation directly within scope without a separate\n"
-            "  Goal Packet round; never edit repository files or push branches.",
-            1,
-        )
+    spec = _RECIPES.get(recipe or "")
+    if not spec:
+        return rendered
+    goal_packet_line = spec.get("goal_packet_line")
+    if isinstance(goal_packet_line, str) and goal_packet_line:
+        rendered = rendered.replace(_BRIEF_GOAL_PACKET_LINE, goal_packet_line, 1)
+    checks = spec.get("acceptance_checks")
+    if isinstance(checks, tuple) and checks:
+        checklist = "## Recipe acceptance checklist\n" + "\n".join(f"- {item}" for item in checks)
+        rendered = f"{rendered.rstrip()}\n\n{checklist}\n"
     return rendered
 
 

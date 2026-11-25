@@ -17,6 +17,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Iterable, Optional
 
 from .events_gateway import EXTERNAL_EVENT, render_external_event, triggers_wake
@@ -28,10 +29,11 @@ from .store import DEFAULT_NAME, Card, utc_now
 
 logger = logging.getLogger(__name__)
 
-SESSION_PACK_CHARS = 9000
+SESSION_PACK_CHARS = 12000
 TURN_PACK_CHARS = 5000
-_PROFILE_CHARS = 2500
-_CONCEPT_CHARS = 1500
+_LESSONS_CHARS = 1800
+_PROFILE_CHARS = 3600
+_CONCEPT_CHARS = 1800
 # Focus and work come first; caps keep room for reviews and events behind them.
 _FOCUS_CHARS = 1600
 _WORK_CHARS = 1400
@@ -66,44 +68,79 @@ def _ranked(cards: list[Card]) -> list[Card]:
     return sorted(newest_first, key=lambda card: -card.importance)
 
 
-def build_session_pack(store: DotStore) -> str:
-    """Role + name + turn rules + tools + lessons + user profile + concepts, capped at ``SESSION_PACK_CHARS``."""
-    parts = [store.read_role().strip()]
+def _coerce_store(store: DotStore | Path | str) -> DotStore:
+    return store if isinstance(store, DotStore) else DotStore(Path(store))
+
+
+def _assemble_session_pack(store_or_home: DotStore | Path | str) -> tuple[str, list[str]]:
+    """Assemble the session pack by whole lines and record any sections that were cut."""
+    store = _coerce_store(store_or_home)
+    budget = SESSION_PACK_CHARS
+    parts: list[str] = []
+    cuts: list[str] = []
+
+    preamble_blocks: list[tuple[str, str]] = [("role", store.read_role().strip())]
     name = store.read_identity()["name"]
     if name != DEFAULT_NAME:
-        parts.append(f'## Your name\nThe user named you "{name}". Use this name instead of Dot.')
-    parts.append(TURN_RULES.strip())
-    parts.append(TOOL_GUIDE.strip())
-    rules = session_rules(store.list_lessons(), utc_now())
-    if rules:
-        parts.append(
-            "## Brief guidance (learned from past reviews)\n"
-            + "\n".join(f"- {_clip(rule.get('rule', ''))} [{rule.get('id')}]" for rule in rules)
+        preamble_blocks.append(
+            (
+                "identity",
+                f'## Your name\nThe user named you "{name}". Use this name instead of Dot.',
+            )
         )
-    profile = _take_lines(
-        (_card_line(card) for card in _ranked(store.list_cards("user"))), _PROFILE_CHARS
+    preamble_blocks.append(("turn_rules", TURN_RULES.strip()))
+    preamble_blocks.append(("tool_guide", TOOL_GUIDE.strip()))
+
+    for section_name, raw_block in preamble_blocks:
+        if not raw_block:
+            continue
+        lines = raw_block.splitlines()
+        sep = 2 if parts else 0
+        kept = _take_lines(lines, max(budget - sep, 0))
+        if len(kept) < len(lines) and section_name not in cuts:
+            cuts.append(section_name)
+        if not kept:
+            continue
+        rendered = "\n".join(kept)
+        parts.append(rendered)
+        budget -= sep + len(rendered)
+
+    rules = session_rules(store.list_lessons(), utc_now())
+    lesson_lines = [f"- {_clip(rule.get('rule', ''))} [{rule.get('id')}]" for rule in rules]
+    profile_lines = [_card_line(card) for card in _ranked(store.list_cards("user"))]
+    concept_lines = [_card_line(card) for card in _ranked(store.list_cards("concept"))]
+
+    dynamic_sections = (
+        ("lessons", "## Brief guidance (learned from past reviews)", lesson_lines, _LESSONS_CHARS),
+        ("profile", "## About the user", profile_lines, _PROFILE_CHARS),
+        ("concepts", "## Key concepts", concept_lines, _CONCEPT_CHARS),
     )
-    if profile:
-        parts.append("## About the user\n" + "\n".join(profile))
-    concepts = _take_lines(
-        (_card_line(card) for card in _ranked(store.list_cards("concept"))), _CONCEPT_CHARS
-    )
-    if concepts:
-        parts.append("## Key concepts\n" + "\n".join(concepts))
-    pack = "\n\n".join(part for part in parts if part)
-    return pack[:SESSION_PACK_CHARS]
+    for section_name, title, lines, section_cap in dynamic_sections:
+        if not lines:
+            continue
+        sep = 2 if parts else 0
+        line_budget = min(section_cap, max(budget - sep - len(title), 0))
+        kept = _take_lines(lines, line_budget)
+        if len(kept) < len(lines):
+            cuts.append(section_name)
+        if not kept:
+            continue
+        block = title + "\n" + "\n".join(kept)
+        parts.append(block)
+        budget -= sep + len(block)
+
+    return "\n\n".join(parts), cuts
 
 
-def session_pack_cuts(store: DotStore) -> list[str]:
+def build_session_pack(store: DotStore | Path | str) -> str:
+    """Role + name + turn rules + tools + lessons + user profile + concepts, capped at ``SESSION_PACK_CHARS``."""
+    pack, _ = _assemble_session_pack(store)
+    return pack
+
+
+def session_pack_cuts(store: DotStore | Path | str) -> list[str]:
     """Session pack sections with cards that did not fit (for ``health``)."""
-    cuts = []
-    for name, kind, cap in (
-        ("profile", "user", _PROFILE_CHARS),
-        ("concepts", "concept", _CONCEPT_CHARS),
-    ):
-        lines = [_card_line(card) for card in store.list_cards(kind)]
-        if len(_take_lines(lines, cap)) < len(lines):
-            cuts.append(name)
+    _, cuts = _assemble_session_pack(store)
     return cuts
 
 

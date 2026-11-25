@@ -7,6 +7,11 @@
 
 ## Released
 
+### fix(dot): prevent session pack mid-card truncation and add recipe acceptance checklists
+
+- Compact `TOOL_GUIDE`, rebalance session pack budgets, and fit every section by whole lines so user preference and concept cards never truncate mid-line and `session_pack_cuts` reflects actual omissions.
+- Add built-in acceptance checklists for `eval_and_report` and `triage_diagnose` task briefs in `format_task_brief`.
+
 ### feat(feishu): triage realtime messages in background agents
 
 - Retire scheduled Feishu polling while preserving daily digests and WebSocket controls.
