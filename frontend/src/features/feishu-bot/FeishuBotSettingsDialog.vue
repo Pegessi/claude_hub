@@ -222,6 +222,8 @@
           </div>
         </div>
 
+        <FeishuRealtimeControl />
+
         <p
           v-if="aiCommandLoading && !aiCommandLoaded"
           class="empty"
@@ -804,6 +806,7 @@
 </template>
 
 <script setup lang="ts">
+import FeishuRealtimeControl from './FeishuRealtimeControl.vue'
 import { aiEffortLabel, matchesAiModelOption, resolveVariantModelId } from './feishuModelOptions'
 import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { useFeishuBotPoolStore } from '@/stores/feishuBotPoolStore'

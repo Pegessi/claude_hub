@@ -192,6 +192,7 @@
 
 .dot-patrol-bar {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 8px;
   padding: 6px 8px;
@@ -199,6 +200,10 @@
   border: 1px solid var(--ch-color-border-muted);
   border-radius: var(--ch-radius-md);
   background: var(--ch-color-surface-sunken);
+}
+
+.dot-patrol-bar__realtime {
+  flex-basis: 100%;
 }
 
 .dot-patrol-bar__summary {

@@ -413,11 +413,13 @@ class FeishuBotPoolStateStore(object):
             transport_revision=bot_transport_revision(raw),
         )
 
-    def snapshot(self, environ: Mapping[str, str] | None = None) -> PoolSnapshot:
+    def snapshot(
+        self, environ: Mapping[str, str] | None = None, *, sync_environment: bool = True
+    ) -> PoolSnapshot:
         env_config = environment_config(environ)
         now = self._now()
         with self._lock:
-            state = self._load_synced(environ, now)
+            state = self._load_synced(environ, now) if sync_environment else self._load()
         raw_bots = dict(state["bots"])
         entries = tuple(
             self._entry_view(bot_id, raw, env_config, now, env_seen=environment_present(environ))

@@ -141,6 +141,7 @@
                 <span>{{ patrolConfig.enabled ? 'On' : 'Off' }}</span>
               </label>
             </div>
+            <FeishuRealtimeControl />
             <div
               v-if="patrolConfig.enabled"
               class="dot-patrol__channels"
@@ -291,6 +292,7 @@
                 >
                   {{ patrolConfig.enabled ? 'Disable' : 'Enable' }}
                 </button>
+                <FeishuRealtimeControl summary class="dot-patrol-bar__realtime" />
               </div>
               <form
                 class="dot-row-form"
@@ -642,6 +644,7 @@
 
 <script setup lang="ts">
 import DotAvatar from '@/components/DotAvatar.vue'
+import FeishuRealtimeControl from '@/features/feishu-bot/FeishuRealtimeControl.vue'
 import DotExecutionEditor from './DotExecutionEditor.vue'
 import { useDotPanel, type DotPanelProps } from './useDotPanel'
 

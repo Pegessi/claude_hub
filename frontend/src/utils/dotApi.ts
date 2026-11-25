@@ -181,6 +181,16 @@ export interface DotPatrolConfig {
   max_triage_per_run: number
 }
 
+export interface FeishuRealtimeStatus {
+  effective_enabled: boolean
+  env_override: boolean | null
+  has_web_session: boolean
+  frontier_connected: boolean
+  realtime_stream_healthy: boolean
+  emitted: number
+  suppressed: number
+}
+
 export interface DotPatrolStatus {
   config: DotPatrolConfig
   running: boolean
@@ -238,6 +248,15 @@ export function setupDot(env?: Record<string, string>): Promise<DotStatus> {
 }
 export function loadDotHealth(): Promise<DotHealth> {
   return requestJson('/health')
+}
+export function loadFeishuRealtime(): Promise<FeishuRealtimeStatus> {
+  return requestJson('/patrol/realtime')
+}
+export async function updateFeishuRealtime(enabled: boolean): Promise<FeishuRealtimeStatus> {
+  const result = await requestJson<{ realtime: FeishuRealtimeStatus }>(
+    '/patrol', jsonRequest('PATCH', { realtime_enabled: enabled }),
+  )
+  return result.realtime
 }
 export function loadDotPatrol(): Promise<DotPatrolStatus> {
   return requestJson('/patrol')

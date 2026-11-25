@@ -205,13 +205,16 @@ class WebChat:
     last_message_id: str = ""
 
 
+CHATTER_USER = 1
+
+
 @dataclass(frozen=True)
 class WebChatter:
     """A person or bot by web ID."""
 
     id: str = ""
     name: str = ""
-    type: int = 1
+    type: int = CHATTER_USER
 
 
 @dataclass(frozen=True)

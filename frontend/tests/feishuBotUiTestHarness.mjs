@@ -64,6 +64,8 @@ await import(clipboardUrl)
 imports['@/utils/clipboard'] = clipboardUrl
 imports['@/components/FeishuBrandMark.vue'] = compileSfcUrl('components/FeishuBrandMark.vue', 'feishu-brand-mark')
 imports['@/components/FeishuIdentityMark.vue'] = compileSfcUrl('components/FeishuIdentityMark.vue', 'feishu-identity-mark')
+// The browser-mock scenario exercises the realtime control against its REST routes.
+imports['./FeishuRealtimeControl.vue'] = moduleUrl('export default { render: () => null }')
 const Settings = (await import(compileSfcUrl('features/feishu-bot/FeishuBotSettingsDialog.vue', 'bot-settings-behavior'))).default
 const BindingPanel = (await import(compileSfcUrl('components/FeishuBindingPanel.vue', 'feishu-binding-panel'))).default
 

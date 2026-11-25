@@ -18,6 +18,8 @@ from claude_hub.services.feishu_web_session.codec import decode
 from claude_hub.services.feishu_web_session.rich import _num, _str, text_of
 from claude_hub.services.runtime_isolation import resolve_runtime_home
 
+from .feishu_realtime_settings import ENABLED_ENV, SETTINGS_FILE, parse_switch
+
 _HTTP_URL_RE = re.compile(r"https?://[^\s<>\"')\]}]+", re.IGNORECASE)
 _URL_TRAILER_CHARS = ".,;:!?。，；：！？、)】》>\"'"
 _HTML_AT_TAG_RE = re.compile(r"<at\b[^>]*>.*?</at>", re.IGNORECASE | re.DOTALL)
@@ -177,7 +179,7 @@ def extract_message_urls(typ: int, content: bytes, text: str = "") -> tuple[str,
 
 def _read_runtime_json_documents() -> list[Mapping[str, Any]]:
     home, docs = resolve_runtime_home(), []
-    for filename in ("feishu_realtime_events.json", "local_runtime_settings.json"):
+    for filename in (SETTINGS_FILE, "local_runtime_settings.json"):
         try:
             data = json.loads((home / filename).read_text(encoding="utf-8"))
             if isinstance(data, Mapping):
@@ -227,12 +229,8 @@ def _setting_bool(
 ) -> bool:
     for src in (os.environ, *docs):
         for n in names:
-            val = src.get(n)
-            if isinstance(val, bool):
-                return val
-            raw = val.strip().lower() if isinstance(val, str) else ""
-            if raw in {"1", "true", "yes", "on", "0", "false", "no", "off"}:
-                return raw in {"1", "true", "yes", "on"}
+            if (value := parse_switch(src.get(n))) is not None:
+                return value
     return default
 
 
@@ -275,7 +273,7 @@ class FeishuRealtimeEventConfig:
         auto_ids, e_urls = v("PATROL_AUTOMATED_CHAT_IDS automated_chat_ids"), v(
             "FEISHU_REALTIME_EVENTS_URL events_url"
         )
-        en = b("FEISHU_REALTIME_EVENTS_ENABLED enabled", True)
+        en = _setting_bool([ENABLED_ENV, "enabled"], d, default=True)
         sup = b("FEISHU_SUPPRESS_PATROL_WHEN_HEALTHY suppress_patrol_when_healthy", True)
         return cls(
             en,

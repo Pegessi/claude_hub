@@ -438,6 +438,16 @@ async def main(browser_run: BrowserRun) -> None:
                 body=encoded,
             )
 
+        realtime = {
+            "effective_enabled": False,
+            "env_override": None,
+            "has_web_session": False,
+            "frontier_connected": False,
+            "realtime_stream_healthy": False,
+            "emitted": 0,
+            "suppressed": 0,
+        }
+
         async def route_all(route) -> None:
             nonlocal pool_revision, shared_avatar_requests, ai_get_calls
             request = route.request
@@ -484,6 +494,14 @@ async def main(browser_run: BrowserRun) -> None:
             submitted = json.loads(raw_body) if raw_body else None
             api_calls.append({"method": method, "path": path, "body": submitted})
 
+            if method == "GET" and path == "/api/dot/patrol/realtime":
+                await fulfill_json(route, realtime)
+                return
+            if method == "PATCH" and path == "/api/dot/patrol":
+                assert submitted == {"realtime_enabled": True}
+                realtime["effective_enabled"] = True
+                await fulfill_json(route, {"detail": "Uncertain response"}, status=503)
+                return
             if method == "GET" and path == "/api/feishu/bot/bots":
                 await fulfill_json(route, pool())
                 return
@@ -1079,6 +1097,15 @@ async def main(browser_run: BrowserRun) -> None:
         await settings.get_by_test_id("feishu-ai-retry-btn").click()
         ai_form = settings.get_by_test_id("feishu-ai-settings-form")
         await expect(ai_form).to_be_visible()
+        realtime_control = settings.get_by_test_id("feishu-realtime-control")
+        await expect(realtime_control.get_by_role("status")).to_have_text("Off")
+        realtime_switch = realtime_control.get_by_label("Feishu realtime events (WebSocket)")
+        await realtime_switch.click()
+        await expect(realtime_control.get_by_role("status")).to_have_text("Unavailable")
+        await expect(realtime_switch).to_be_disabled()
+        await realtime_control.get_by_role("button", name="Refresh", exact=True).click()
+        await expect(realtime_switch).to_be_checked()
+        await expect(realtime_control.get_by_role("status")).to_have_text("No web session")
         token_card = settings.get_by_test_id("feishu-ai-token-card")
         await expect(token_card).to_have_attribute("data-state", "failed")
         await expect(settings.locator(".detail-title-row .source-chip")).to_have_text(

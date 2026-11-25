@@ -53,6 +53,7 @@ from claude_hub.services.feishu_web_session.rich import (
     Node,
     T,
     WebChat,
+    WebChatter,
     WebMessage,
     rich_text,
 )
@@ -182,6 +183,18 @@ def _setup_poller(
             resp_bytes = encode("reactions_PutReactionResponse", {"count": 1})
         elif cmd_id == 26:  # DeleteReactionRequest
             resp_bytes = encode("reactions_DeleteReactionResponse", {})
+        elif cmd_id == 46:  # PullChattersByIdsRequest
+            chatter_ids = decode(
+                "lark_chatters_PullChattersByIdsRequest", base64.b64decode(pkt["payload"])
+            ).get("chatterIds", [])
+            resp_bytes = encode(
+                "lark_chatters_PullChattersByIdsResponse",
+                {
+                    "chatters": {
+                        uid: {"id": uid, "name": "Test user", "type": 1} for uid in chatter_ids
+                    }
+                },
+            )
         elif cmd_id == 5:  # PutMessageRequest
             resp_bytes = encode(
                 "lark_messages_PutMessageResponse",
@@ -559,7 +572,10 @@ async def test_self_reply_and_courtesy_closing_suppression(tmp_path: Path) -> No
 
 
 @pytest.mark.asyncio
-async def test_ai_command_unaffected_and_records_owner_activity(tmp_path: Path) -> None:
+@pytest.mark.parametrize("realtime_enabled", [True, False])
+async def test_ai_command_unaffected_and_records_owner_activity(
+    tmp_path: Path, realtime_enabled: bool
+) -> None:
     emitted: list[ExternalEvent] = []
     dispatched_prompts: list[str] = []
 
@@ -570,7 +586,7 @@ async def test_ai_command_unaffected_and_records_owner_activity(tmp_path: Path) 
     poller, service, _uc = _setup_poller(
         tmp_path,
         realtime_config=FeishuRealtimeEventConfig(
-            enabled=True,
+            enabled=realtime_enabled,
             watch_chat_ids=frozenset({ORDINARY_CHAT_WEB_ID}),
             url_patterns=(r"https?://compute\.example\.com/job/\d+",),
         ),
@@ -593,6 +609,7 @@ async def test_ai_command_unaffected_and_records_owner_activity(tmp_path: Path) 
     await poller.wait_for_inflight(timeout=3.0)
     assert len(dispatched_prompts) == 1
     assert "总结当前话题" in dispatched_prompts[0]
+    assert poller.status_dict()["commands_succeeded"] == 1
     await poller.quiesce()
 
 
@@ -2488,3 +2505,426 @@ async def test_live_push_during_first_snapshot_is_not_lost(tmp_path: Path) -> No
     await poller._run_web_replay()
     assert poller._replay_ready
     assert [event.dedupe_key for event in delivered] == [pushed.message.id]
+
+
+@pytest.mark.asyncio
+async def test_runtime_switch_suppresses_realtime_without_releasing_cli_patrol(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from claude_hub.services import feishu_ai_poller
+    from claude_hub.services.feishu_realtime_settings import write_realtime_enabled
+
+    monkeypatch.setenv("CLAUDE_HUB_HOME", str(tmp_path))
+    monkeypatch.delenv("CLAUDE_HUB_FEISHU_REALTIME_EVENTS_ENABLED", raising=False)
+    monkeypatch.delenv("enabled", raising=False)
+    settings_path = tmp_path / "feishu_realtime_events.json"
+    settings_path.write_text(
+        json.dumps(
+            {
+                "watch_chat_ids": [PRIORITY_CHAT_WEB_ID],
+                "url_patterns": [r"https://compute\.example\.com/job/\d+"],
+            }
+        )
+    )
+    sink = AsyncMock(return_value=True)
+    poller, _, _ = _setup_poller(tmp_path, event_sink=sink)
+    monkeypatch.setattr(feishu_ai_poller, "_DEFAULT_AI_POLLER", poller)
+    state = PatrolState(
+        config=PatrolConfig(
+            enabled=True,
+            feishu_enabled=True,
+            feishu_window_start="00:00",
+            feishu_window_end="23:59",
+        )
+    )
+    now = datetime(2026, 1, 1, 4, tzinfo=timezone.utc)
+
+    write_realtime_enabled(False)
+    pushes = []
+    for idx, (chat_id, chat_type, nodes) in enumerate(
+        [
+            (P2P_CHAT_WEB_ID, CHAT_P2P, [T("Can you look into this?")]),
+            (
+                ORDINARY_CHAT_WEB_ID,
+                CHAT_GROUP,
+                [Node(text="@Owner", at=OWNER_WEB_UID), T(" Need help")],
+            ),
+            (
+                PRIORITY_CHAT_WEB_ID,
+                CHAT_GROUP,
+                [T("Please investigate https://compute.example.com/job/123")],
+            ),
+        ]
+    ):
+        pushed = _build_pushed_via_wire(
+            msg_id=f"74000000000000009{idx:02d}",
+            from_id=COLLEAGUE_WEB_UID,
+            chat_id=chat_id,
+            chat_type=chat_type,
+            nodes=nodes,
+        )
+        pushes.append(pushed)
+        assert not await poller.handle_pushed_web_message(pushed, background_realtime=True)
+        assert not await poller.handle_pushed_web_message(pushed)
+    sink.assert_not_awaited()
+    assert not poller.realtime_status()["effective_enabled"]
+    assert poller.web_replay_configured()
+    assert not feishu_due(state, now)
+
+    write_realtime_enabled(True)
+    for pushed in pushes:
+        assert await poller.handle_pushed_web_message(pushed)
+    assert [call.args[0].event_type for call in sink.await_args_list] == [
+        "im.p2p",
+        "im.mention",
+        "im.watch_chat_url",
+    ]
+    assert poller.realtime_status()["emitted"] == 3
+    await poller.quiesce()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("chat_type", [CHAT_P2P, CHAT_GROUP])
+async def test_numeric_bot_entity_never_triggers_dot(tmp_path: Path, chat_type: int) -> None:
+    sink = AsyncMock(return_value=True)
+    poller, _, user_client = _setup_poller(tmp_path, event_sink=sink)
+    transport = user_client._get_web_transport()
+    assert transport is not None
+    chat_id = P2P_CHAT_WEB_ID if chat_type == CHAT_P2P else ORDINARY_CHAT_WEB_ID
+    sender = "7200000000000000099"
+    transport._web.chatters = AsyncMock(return_value={sender: WebChatter(id=sender, type=2)})
+    for index in range(2):
+        pushed = _build_pushed_via_wire(
+            msg_id=f"74000000000000990{index}",
+            from_id=sender,
+            chat_id=chat_id,
+            chat_type=chat_type,
+            nodes=[Node(text="@Owner", at=OWNER_WEB_UID), T(" Check this")],
+        )
+        assert not await poller.handle_pushed_web_message(pushed)
+    transport._web.chatters.assert_awaited_once_with([sender])
+    sink.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("locally_bound", [True, False])
+async def test_cold_p2p_bot_chat_suppresses_before_sender_lookup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, locally_bound: bool
+) -> None:
+    from claude_hub.services.feishu_bot_pool import (
+        FeishuBotConfig,
+        FeishuBotPoolStore,
+        OwnerIdentity,
+    )
+
+    monkeypatch.setenv("CLAUDE_HUB_HOME", str(tmp_path))
+    sink = AsyncMock(return_value=True)
+    poller, _, user_client = _setup_poller(tmp_path, event_sink=sink)
+    transport = user_client._get_web_transport()
+    assert transport is not None
+    open_chat_id = "oc_synthetic_bot_dm"
+    bot_open_id = "ou_synthetic_bot"
+    if locally_bound:
+        pool = FeishuBotPoolStore()
+        bot_id = pool.create_bot(
+            name="Synthetic Bot",
+            config=FeishuBotConfig("cli_synthetic_bot", "test-secret"),
+            feishu_open_id=bot_open_id,
+        )
+        pool.bind_p2p(
+            bot_id,
+            owner=OwnerIdentity("ou_test_owner", "", "oauth"),
+            tab_id="test-tab",
+            workspace_id=None,
+            sender_open_id="ou_test_bot_user",
+            chat_id=open_chat_id,
+        )
+    assert P2P_CHAT_WEB_ID not in transport._chat_cache
+    transport._web.chats = AsyncMock(
+        return_value={
+            P2P_CHAT_WEB_ID: WebChat(
+                id=P2P_CHAT_WEB_ID,
+                type=CHAT_P2P,
+                bot=not locally_bound,
+                open_chat_id=open_chat_id if locally_bound else "",
+            ),
+        }
+    )
+    transport._web.chatters = AsyncMock(return_value={})
+    pushed = _build_pushed_via_wire(
+        msg_id="740000000000009911",
+        from_id="7200000000000000099",
+        chat_id=P2P_CHAT_WEB_ID,
+        chat_type=CHAT_P2P,
+        nodes=[T("Here is my answer")],
+    )
+    assert not await poller.handle_pushed_web_message(pushed)
+    transport._web.chats.assert_awaited_once_with([P2P_CHAT_WEB_ID])
+    transport._web.chatters.assert_not_awaited()
+    sink.assert_not_awaited()
+
+    if locally_bound:
+        # A known bot sender alias is enough to suppress a group mention too.
+        transport.bind_sender_alias(bot_open_id, pushed.message.from_id)
+        group = _build_pushed_via_wire(
+            msg_id="740000000000009912",
+            from_id=pushed.message.from_id,
+            chat_id=ORDINARY_CHAT_WEB_ID,
+            nodes=[Node(text="@Owner", at=OWNER_WEB_UID), T(" Check this")],
+        )
+        assert not await poller.handle_pushed_web_message(group)
+        transport._web.chatters.assert_not_awaited()
+        sink.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mention_owner", [False, True])
+@pytest.mark.parametrize("prefix", ["", "> "])
+async def test_personal_ai_footer_suppresses_topic_reply(
+    tmp_path: Path,
+    mention_owner: bool,
+    prefix: str,
+) -> None:
+    sink = AsyncMock(return_value=True)
+    poller, _, _ = _setup_poller(tmp_path, event_sink=sink)
+    await poller.handle_pushed_web_message(
+        _build_pushed_via_wire(
+            msg_id="740000000000009920",
+            from_id=OWNER_WEB_UID,
+            chat_id=ORDINARY_CHAT_WEB_ID,
+            thread_id="740000000000009919",
+            topic_position=1,
+            nodes=[T("Investigating")],
+        )
+    )
+    nodes = [Node(text="@Owner", at=OWNER_WEB_UID)] if mention_owner else []
+    nodes.append(T(f"Here is the summary.\n{prefix}🤖 AI 代答，仅供参考\n"))
+    pushed = _build_pushed_via_wire(
+        msg_id="740000000000009921",
+        from_id=COLLEAGUE_WEB_UID,
+        chat_id=ORDINARY_CHAT_WEB_ID,
+        thread_id="740000000000009919",
+        topic_position=2,
+        create_time_s=1_760_000_101,
+        nodes=nodes,
+    )
+    assert not await poller.handle_pushed_web_message(pushed)
+    sink.assert_not_awaited()
+    human = replace(
+        pushed,
+        message=replace(
+            pushed.message,
+            content=_encode_rich_message(
+                [T("The message says 「🤖 AI 代答，仅供参考」 but I confirmed the issue.")],
+                is_post=False,
+                title="",
+            )[1],
+        ),
+    )
+    assert await poller.handle_pushed_web_message(human)
+    assert sink.await_args is not None
+    assert sink.await_args.args[0].event_type == "im.topic_reply"
+
+
+@pytest.mark.asyncio
+async def test_unknown_numeric_dm_and_explicit_app_sender_are_quiet(tmp_path: Path) -> None:
+    sink = AsyncMock(return_value=True)
+    poller, _, user_client = _setup_poller(tmp_path, event_sink=sink)
+    transport = user_client._get_web_transport()
+    assert transport is not None
+    transport._web.chatters = AsyncMock(return_value={})
+    pushed = _build_pushed_via_wire(
+        msg_id="740000000000009930",
+        from_id="7200000000000000099",
+        chat_id=P2P_CHAT_WEB_ID,
+        chat_type=CHAT_P2P,
+        nodes=[T("Here is my reply")],
+    )
+    assert not await poller.handle_pushed_web_message(pushed)
+    transport._web.chatters.assert_awaited_once_with([pushed.message.from_id])
+    assert poller.realtime_router.needs_patrol_fallback
+    generation = poller.realtime_router.fallback_generation
+    transport._web.chatters.reset_mock()
+    user_msg = transport.ingest_pushed_message(pushed)
+    assert user_msg is not None
+    assert not await poller.realtime_router.handle_pushed_message(
+        pushed, replace(user_msg, sender_type="app"), web_transport=transport
+    )
+    transport._web.chatters.assert_not_awaited()
+    sink.assert_not_awaited()
+
+    assert poller.realtime_router.fallback_generation == generation
+
+
+@pytest.mark.asyncio
+async def test_frontier_sender_timeout_preserves_human_dm_until_replay(tmp_path: Path) -> None:
+    from claude_hub.services.feishu_web_session.rich import FeedPage
+
+    sink = AsyncMock(return_value=True)
+    poller, _, client = _setup_poller(tmp_path, event_sink=sink)
+    transport = client._get_web_transport()
+    assert transport is not None
+    poller._active_web_transport = transport
+    poller._frontier_connected = True
+    transport._web.feed_cards = AsyncMock(return_value=FeedPage())
+    transport._web.chatters = AsyncMock(
+        side_effect=[TimeoutError(), {}, {COLLEAGUE_WEB_UID: WebChatter(id=COLLEAGUE_WEB_UID)}],
+    )
+    pushed = _build_pushed_via_wire(
+        msg_id="740000000000009931",
+        from_id=COLLEAGUE_WEB_UID,
+        chat_id=P2P_CHAT_WEB_ID,
+        chat_type=CHAT_P2P,
+        nodes=[T("Please check this failure")],
+        position=1,
+    )
+    await poller._handle_frontier_pushed_web_message(pushed)
+    assert poller._realtime_queue_worker is not None
+    await poller._realtime_queue_worker
+    assert poller._replay_task is not None
+    await poller._replay_task
+    assert [p.message.id for p in poller._web_journal.pending()] == [pushed.message.id]
+    assert not poller.realtime_stream_healthy
+    sink.assert_not_awaited()
+
+    await poller._run_web_replay()
+    assert poller._web_journal.pending() == []
+    assert not poller.realtime_router.needs_patrol_fallback
+    sink.assert_awaited_once()
+    assert sink.await_args is not None
+    assert sink.await_args.args[0].dedupe_key == pushed.message.id
+    await poller.quiesce()
+
+
+@pytest.mark.asyncio
+async def test_unresolved_dm_does_not_starve_journal_or_cross_chat_catchup(tmp_path: Path) -> None:
+    from claude_hub.services.feishu_web_session.rich import FeedCard, FeedPage
+
+    sink = AsyncMock(return_value=True)
+    poller, _, client = _setup_poller(tmp_path, event_sink=sink)
+    transport = client._get_web_transport()
+    assert transport is not None
+    poller._active_web_transport = transport
+    poller._frontier_connected = True
+    missing_sender = "7200000000000000099"
+    chats = {cid: WebChat(id=cid, type=CHAT_P2P) for cid in (P2P_CHAT_WEB_ID, ORDINARY_CHAT_WEB_ID)}
+    cards = tuple(FeedCard(id=cid) for cid in chats)
+    transport._web.feed_cards = AsyncMock(return_value=FeedPage(cards=cards, chats=chats))
+    await poller._run_web_replay()
+
+    def dm(suffix: int, sender: str, chat_id: str, position: int) -> PushedMessage:
+        return _build_pushed_via_wire(
+            msg_id=f"74000000000000994{suffix}",
+            from_id=sender,
+            chat_id=chat_id,
+            chat_type=CHAT_P2P,
+            nodes=[T(f"Please investigate failure {suffix}")],
+            position=position,
+        )
+
+    unresolved_push = dm(0, missing_sender, P2P_CHAT_WEB_ID, 0)
+    human_push = dm(1, COLLEAGUE_WEB_UID, ORDINARY_CHAT_WEB_ID, 0)
+    unresolved_history = dm(2, missing_sender, P2P_CHAT_WEB_ID, 1)
+    human_history = dm(3, COLLEAGUE_WEB_UID, ORDINARY_CHAT_WEB_ID, 1)
+    poller._web_journal.add(unresolved_push)
+    poller._web_journal.add(human_push)
+    transport._web.feed_cards.return_value = FeedPage(
+        cards=cards,
+        chats={cid: replace(chat, last_position=1, has_last=True) for cid, chat in chats.items()},
+    )
+    transport._web.chats = AsyncMock(return_value=chats)
+    transport._web.topics = AsyncMock(return_value={})
+    history = {
+        P2P_CHAT_WEB_ID: [unresolved_push.message, unresolved_history.message],
+        ORDINARY_CHAT_WEB_ID: [human_push.message, human_history.message],
+    }
+
+    async def messages_at(chat_id: str, positions: list[int]) -> list[WebMessage]:
+        return [history[chat_id][position] for position in positions]
+
+    transport._web.messages_at = AsyncMock(side_effect=messages_at)
+    people = {COLLEAGUE_WEB_UID: WebChatter(id=COLLEAGUE_WEB_UID)}
+
+    async def chatters(ids: list[str]) -> dict[str, WebChatter]:
+        return {uid: people[uid] for uid in ids if uid in people}
+
+    transport._web.chatters = AsyncMock(side_effect=chatters)
+    for _ in range(3):
+        await asyncio.wait_for(poller._run_web_replay(), timeout=3)
+    assert [call.args[0].dedupe_key for call in sink.await_args_list] == [
+        human_push.message.id,
+        human_history.message.id,
+    ]
+    assert [item.message.id for item in poller._web_journal.pending()] == [
+        unresolved_push.message.id,
+        unresolved_history.message.id,
+    ]
+    assert poller._web_replay._load()["chats"] == dict.fromkeys(chats, 1)
+    assert not poller._replay_ready
+
+    people[missing_sender] = WebChatter(id=missing_sender)
+    await poller._run_web_replay()
+    assert not poller._web_journal.pending()
+    assert poller._replay_ready
+    assert [call.args[0].dedupe_key for call in sink.await_args_list] == [
+        human_push.message.id,
+        human_history.message.id,
+        unresolved_push.message.id,
+        unresolved_history.message.id,
+    ]
+    await poller.quiesce()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("realtime_enabled", [True, False], ids=["confirmed-bot", "disabled"])
+async def test_live_retransmission_clears_replay_backlog(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, realtime_enabled: bool
+) -> None:
+    from claude_hub.services.feishu_realtime_settings import write_realtime_enabled
+    from claude_hub.services.feishu_web_session.rich import FeedPage
+
+    monkeypatch.setenv("CLAUDE_HUB_HOME", str(tmp_path))
+    monkeypatch.delenv("CLAUDE_HUB_FEISHU_REALTIME_EVENTS_ENABLED", raising=False)
+    monkeypatch.delenv("enabled", raising=False)
+    write_realtime_enabled(True)
+    sink = AsyncMock(return_value=True)
+    poller, _, client = _setup_poller(tmp_path, event_sink=sink)
+    transport = client._get_web_transport()
+    assert transport is not None
+    poller._active_web_transport = transport
+    poller._frontier_connected = True
+    transport._web.feed_cards = AsyncMock(return_value=FeedPage())
+    transport._web.chatters = AsyncMock(return_value={})
+    sender = "7200000000000000099"
+    pushed = _build_pushed_via_wire(
+        msg_id="740000000000009950",
+        from_id=sender,
+        chat_id=P2P_CHAT_WEB_ID,
+        chat_type=CHAT_P2P,
+        nodes=[T("Here is the result")],
+        position=1,
+    )
+
+    await poller._handle_frontier_pushed_web_message(pushed)
+    assert poller._realtime_queue_worker is not None
+    await poller._realtime_queue_worker
+    assert poller._replay_task is not None
+    await poller._replay_task
+    assert poller._web_journal.pending() == [pushed]
+    assert poller.realtime_router.needs_patrol_fallback
+    assert not poller._replay_ready
+
+    transport._web.chatters.return_value = {sender: WebChatter(id=sender, type=2)}
+    write_realtime_enabled(realtime_enabled)
+    accepted = await poller._handle_frontier_pushed_web_message(pushed)
+    assert accepted is realtime_enabled
+    if accepted:
+        assert poller._realtime_queue_worker is not None
+        await poller._realtime_queue_worker
+    assert not poller._web_journal.pending()
+    assert not poller.realtime_router.needs_patrol_fallback
+    sink.assert_not_awaited()
+
+    await poller._run_web_replay()
+    assert poller._replay_ready
+    await poller.quiesce()
