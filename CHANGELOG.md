@@ -7,6 +7,10 @@
 
 ## Released
 
+### fix(cursor): recover empty ACP sessions
+
+- Replace an unrecoverable empty ACP shell after a restart while preserving fail-closed recovery for conversations with history.
+
 ### fix(goals): recover missing completion signals without false failure
 
 - Accept protocol-only Markdown wrappers while rejecting inline quotations and trailing prose.

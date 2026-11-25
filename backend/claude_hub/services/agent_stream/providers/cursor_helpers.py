@@ -415,3 +415,79 @@ def _extract_permission_detail(tool_call: Dict[str, Any]) -> str:
             if isinstance(path, str) and path.strip():
                 parts.append(f"Path: {path.strip()}")
     return "\n".join(parts)
+
+
+def _is_empty_acp_shell(sid: str, cwd: str, env: Dict[str, str]) -> bool:
+    """Recognize only a readable ACP metadata shell with no possible legacy store."""
+    from ..._cursor_verify import _cwd_hash, _read_agent_id_from_db, resolve_cursor_roots
+
+    if not sid or sid in {".", ".."} or "/" in sid or "\\" in sid:
+        return False
+    try:
+        chats, config = resolve_cursor_roots(env=env, cwd=cwd)
+        # Unknown legacy data roots cannot safely prove absence.
+        if env.get("CURSOR_DATA_DIR"):
+            from ..._cursor_verify import _expand_with_home
+
+            home = Path(env.get("HOME") or str(Path.home())).expanduser()
+            if _expand_with_home(env["CURSOR_DATA_DIR"], home, cwd).resolve() != chats.resolve():
+                return False
+        directory = config / "acp-sessions" / sid
+        meta = directory / "meta.json"
+        db = directory / "store.db"
+        if any(path.is_symlink() for path in (config, directory.parent, directory, meta, db)):
+            return False
+        if db.exists() or not meta.is_file():
+            return False
+        metadata = json.loads(meta.read_text(encoding="utf-8"))
+        if not isinstance(metadata, dict) or not isinstance(metadata.get("cwd"), str):
+            return False
+        if not metadata["cwd"] or os.path.realpath(metadata["cwd"]) != os.path.realpath(cwd):
+            return False
+        bucket = chats / "chats" / _cwd_hash(cwd)
+        if any(path.is_symlink() for path in (chats, chats / "chats", bucket)):
+            return False
+        if bucket.exists():
+            if not bucket.is_dir():
+                return False
+            for index, entry in enumerate(bucket.iterdir()):
+                if index >= 1000 or entry.is_symlink() or not entry.is_dir():
+                    return False
+                candidate = entry / "store.db"
+                if candidate.is_symlink():
+                    return False
+                if candidate.exists():
+                    if not candidate.is_file():
+                        return False
+                    agent_id = _read_agent_id_from_db(candidate)
+                    if not agent_id or agent_id == sid:
+                        return False
+        return True
+    except (OSError, ValueError, TypeError):
+        return False
+
+
+async def _has_no_prior_turns(session: Any, pending_turn_id: Optional[str]) -> bool:
+    """Exclude only the current, provably unsubmitted turn from durable history."""
+    import asyncio
+
+    from ....models import AgentStreamEventType
+    from ..store import AgentStreamStore
+
+    try:
+        store = AgentStreamStore(session.workspace_id, session.id)
+        count = await store.count_turns(strict=True)
+        if count > 1 or (count == 1 and not pending_turn_id):
+            return False
+        events = await asyncio.to_thread(lambda: list(store.iter_events()))
+        starts = 0
+        for event in events:
+            if event.type == AgentStreamEventType.TURN_STARTED and event.turn_id == pending_turn_id:
+                starts += 1
+            elif event.type not in (AgentStreamEventType.STATUS, AgentStreamEventType.ERROR):
+                return False
+            elif event.turn_id is not None:
+                return False
+        return starts == count
+    except Exception:
+        return False

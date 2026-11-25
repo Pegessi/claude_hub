@@ -31,7 +31,9 @@ from .cursor_helpers import (
     _ensure_acp_meta_file,
     _extract_permission_detail,
     _format_acp_error_text,
+    _has_no_prior_turns,
     _inject_acp_preload_env,
+    _is_empty_acp_shell,
     _migrate_legacy_cli_store_for_acp,
     _parse_cursor_model_spec,
     _resolve_config_option_updates,
@@ -470,26 +472,39 @@ class CursorSession(ProcessSession):
         ):
             sid = self._conversation_id
             await asyncio.to_thread(_migrate_legacy_cli_store_for_acp, sid, cwd, provider_env)
-            self._replaying_history = True
-            try:
-                loaded_resp = await self._startup_request(
-                    "session/load",
-                    {"sessionId": sid, "cwd": cwd, "mcpServers": []},
-                    _ACP_SESSION_INIT_TIMEOUT_S,
-                )
-            except ProviderRpcError as exc:
-                raise RuntimeError(f"could not resume Cursor conversation {sid}: {exc}") from exc
-            finally:
-                self._replaying_history = False
-            if isinstance(loaded_resp, dict) and loaded_resp.get("sessionId", sid) != sid:
-                raise RuntimeError(
-                    f"Cursor session/load returned a different conversation for {sid}"
-                )
-            self._acp_session_id = sid
-            self._capture_session_metadata(loaded_resp)
-            await self._ensure_session_model()
-            await self._ensure_session_mode()
-            return
+            pending = (
+                getattr(self, "_cursor_unsubmitted_turn_id", None)
+                if self._send_lock.locked()
+                else None
+            )
+            empty_shell = (
+                self._required_conversation_id is None
+                and await asyncio.to_thread(_is_empty_acp_shell, sid, cwd, provider_env)
+                and await _has_no_prior_turns(self.session, pending)
+            )
+            if not empty_shell:
+                self._replaying_history = True
+                try:
+                    loaded_resp = await self._startup_request(
+                        "session/load",
+                        {"sessionId": sid, "cwd": cwd, "mcpServers": []},
+                        _ACP_SESSION_INIT_TIMEOUT_S,
+                    )
+                except ProviderRpcError as exc:
+                    raise RuntimeError(
+                        f"could not resume Cursor conversation {sid}: {exc}"
+                    ) from exc
+                finally:
+                    self._replaying_history = False
+                if isinstance(loaded_resp, dict) and loaded_resp.get("sessionId", sid) != sid:
+                    raise RuntimeError(
+                        f"Cursor session/load returned a different conversation for {sid}"
+                    )
+                self._acp_session_id = sid
+                self._capture_session_metadata(loaded_resp)
+                await self._ensure_session_model()
+                await self._ensure_session_mode()
+                return
 
         if self._required_conversation_id is not None:
             raise RuntimeError("the original provider conversation could not be resumed")

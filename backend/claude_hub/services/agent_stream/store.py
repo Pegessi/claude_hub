@@ -782,11 +782,18 @@ class AgentStreamStore:
 
         return await _complete_io(count_rows)
 
-    async def count_turns(self) -> int:
-        """Count durable ``turn_started`` events without unpacking their bodies."""
+    async def count_turns(self, *, strict: bool = False) -> int:
+        """Count durable starts; strict mode rejects malformed imported history."""
 
         def count_rows() -> int:
             with self._read_database() as (db, name):
+                if (
+                    strict
+                    and db.execute(
+                        "SELECT 1 FROM stream_errors WHERE name=? LIMIT 1", (name,)
+                    ).fetchone()
+                ):
+                    raise RuntimeError("cannot count turns in corrupt agent stream")
                 return int(
                     db.execute(
                         "SELECT count(*) FROM stream_events WHERE name=? AND kind=?",

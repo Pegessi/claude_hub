@@ -519,6 +519,8 @@ class InputMixin(SessionState):
 
             def mark_before_delivery() -> None:
                 nonlocal before_delivery_called
+                if getattr(transport, "adapter_id", None) == "cursor-native":
+                    setattr(transport, "_cursor_unsubmitted_turn_id", None)
                 if hasattr(transport, "_quarantined_turn_id"):
                     transport._quarantined_turn_id = client_turn_id
                 if before_delivery is not None and not before_delivery_called:
@@ -551,7 +553,13 @@ class InputMixin(SessionState):
                     with transport.delivery_admission(combined_admission):
                         if delivery_guard is not None:
                             delivery_guard()
-                        await transport.send_message(text, images)
+                        if getattr(transport, "adapter_id", None) == "cursor-native":
+                            setattr(transport, "_cursor_unsubmitted_turn_id", client_turn_id)
+                        try:
+                            await transport.send_message(text, images)
+                        finally:
+                            if getattr(transport, "adapter_id", None) == "cursor-native":
+                                setattr(transport, "_cursor_unsubmitted_turn_id", None)
 
             submit_task = asyncio.create_task(
                 submit_to_provider(),
