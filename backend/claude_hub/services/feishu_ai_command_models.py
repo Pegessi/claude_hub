@@ -28,7 +28,7 @@ from claude_hub.services.terminal_runtime.defaults import DEFAULT_CLAUDE_LAUNCH_
 _STATE_VERSION = 1
 DEFAULT_AI_COMMAND_PREFIX = "/ai"
 DEFAULT_AI_COMMAND_ACK_EMOJI = "OnIt"
-DEFAULT_AI_COMMAND_DONE_EMOJI = ""
+DEFAULT_AI_COMMAND_DONE_EMOJI = "DONE"
 DEFAULT_AI_COMMAND_FOOTER = "> 🤖 AI 代答，仅供参考"
 DEFAULT_AI_COMMAND_PROVIDER = AgentType.CODEX
 DEFAULT_AI_COMMAND_MODEL = "gpt-5.4"
@@ -480,6 +480,7 @@ class FeishuAiCommandConfig:
             for k, v in mappings.items()
         ):
             raise ValueError("web_bot_chat_ids must map numeric Web chat IDs to oc_ IDs")
+        done_emoji = data.get("done_emoji")
         kw: dict[str, Any] = {
             "enabled": bool(data.get("enabled", False)),
             "prefix": prefix,
@@ -495,7 +496,9 @@ class FeishuAiCommandConfig:
             "max_active_chats": max_active,
             "max_context_messages": max_ctx,
             "ack_emoji": s("ack_emoji", DEFAULT_AI_COMMAND_ACK_EMOJI),
-            "done_emoji": s("done_emoji", DEFAULT_AI_COMMAND_DONE_EMOJI),
+            "done_emoji": (
+                DEFAULT_AI_COMMAND_DONE_EMOJI if done_emoji is None else str(done_emoji).strip()
+            ),
             "footer": s("footer", DEFAULT_AI_COMMAND_FOOTER),
             "reply_in_thread": bool(data.get("reply_in_thread", True)),
             "send_interim_reply": bool(data.get("send_interim_reply", False)),

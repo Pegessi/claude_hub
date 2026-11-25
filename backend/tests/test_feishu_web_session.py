@@ -39,6 +39,7 @@ from claude_hub.services.feishu_web_session import (
     CHAT_P2P,
     CMD_ACK,
     CMD_PUSH_MESSAGES,
+    REACT_DONE,
     REACT_ON_IT,
     REDACTED_SECRET,
     TYPE_FILE,
@@ -767,7 +768,10 @@ async def test_web_session_1v1_dm_and_group_ai_command_in_place_reply_and_uncert
         assert len(dispatched_prompts) == 1
         assert "https://github.com/org/repo/pull/88" in dispatched_prompts[0]
 
-        assert reactions_added == [("7400000000000000202", REACT_ON_IT)]
+        assert reactions_added == [
+            ("7400000000000000202", REACT_ON_IT),
+            ("7400000000000000202", REACT_DONE),
+        ]
         assert ("7400000000000000202", REACT_ON_IT) in reactions_deleted
 
         assert len(sent_messages) == 1

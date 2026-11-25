@@ -9,7 +9,7 @@
 
 ### feat(feishu): show a busy reaction while /ai runs
 
-- Default to a busy reaction on the command message, then remove it after the reply. Progress replies are opt-in and the default completion reaction is empty.
+- Default to a busy reaction on the command message, then remove it after the reply. Progress replies are opt-in. Successful replies add `DONE` by default, and an empty completion reaction setting disables it.
 - Isolate new group topics by command message until Feishu returns the topic ID. Preserve session routing and busy-reaction cleanup when recovering a completed turn.
 
 ### feat(feishu): route Dot events through Web position replay

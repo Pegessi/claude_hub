@@ -982,6 +982,7 @@ async def test_web_session_and_agent_workspace_integrated_ai_command(tmp_path: P
     from claude_hub.services.feishu_user_client import FeishuUserClient
     from claude_hub.services.feishu_user_token_store import FeishuUserTokenStore
     from claude_hub.services.feishu_web_session import (
+        REACT_DONE,
         REACT_ON_IT,
         TYPE_POST,
         FeishuWebSession,
@@ -1126,7 +1127,10 @@ async def test_web_session_and_agent_workspace_integrated_ai_command(tmp_path: P
         assert managed_dispatches == [
             ("sess-1", "ws-pinned-integrated", "feishu-ai-7400000000000000888")
         ]
-        assert reactions_added == [("7400000000000000888", REACT_ON_IT)]
+        assert reactions_added == [
+            ("7400000000000000888", REACT_ON_IT),
+            ("7400000000000000888", REACT_DONE),
+        ]
         assert len(sent_messages) == 1
         final_text = sent_messages[0]["content"]["richText"]["innerText"]
         assert "Agent Workspace 与 Web Session 联合验证通过。" in final_text
@@ -1474,7 +1478,7 @@ async def test_final_only_thread_recovery_keeps_session_private(
         return FeishuReplyReceipt(message_id=f"reply-{kwargs['uuid']}", thread_id=thread)
 
     async def add_reaction(message_id, emoji):
-        assert emoji == "OnIt"
+        assert emoji in {"OnIt", "DONE"}
         return f"reaction-{message_id}"
 
     client: Any = SimpleNamespace(
@@ -1552,7 +1556,7 @@ async def test_final_only_thread_recovery_keeps_session_private(
     assert len(channels) == 2
     assert not service._channel_locks["oc_ws_chat:publish-thread"].locked()
     client.delete_reaction_as_user.assert_any_await("om_ws_0", "reaction-om_ws_0")
-    assert client.add_reaction_as_user.await_count == 3
+    assert client.add_reaction_as_user.await_count == 6
 
 
 @pytest.mark.asyncio
@@ -1631,7 +1635,7 @@ async def test_restart_cleans_persisted_busy_reaction(
 
     assert not restarted.list_pending_commands()
     assert len(dispatches) == 1
-    assert client.add_reaction_as_user.await_count == 1
+    assert client.add_reaction_as_user.await_count == (2 if crash_before_dispatch else 1)
     assert client.reply_as_user.await_count == int(crash_before_dispatch)
     client.delete_reaction_as_user.assert_awaited_with(message.message_id, "rx_original")
     assert client.delete_reaction_as_user.await_count == 2

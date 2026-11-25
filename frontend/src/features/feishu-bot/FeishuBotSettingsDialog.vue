@@ -411,7 +411,7 @@
                 v-model="aiEdit.done_emoji"
                 class="ch-input"
                 :disabled="busy || !aiCommandLoaded"
-                placeholder="None"
+                placeholder="None when empty"
                 data-testid="feishu-ai-done-emoji-input"
               >
             </label>
@@ -882,7 +882,7 @@ const aiEdit = reactive<FeishuAiCommandConfig>({
   max_active_chats: 10,
   max_context_messages: 20,
   ack_emoji: 'OnIt',
-  done_emoji: '',
+  done_emoji: 'DONE',
   footer: '> 🤖 AI 代答，仅供参考',
   reply_in_thread: true,
   send_interim_reply: false,
@@ -1132,11 +1132,13 @@ function applyAiCommandStatus(
   if (payload.capabilities) aiCapabilities.value = payload.capabilities
   if (!payload.config) return
 
-  const nextWatchText = (payload.config.watch_chats ?? []).join(', ')
+  const config = { ...payload.config, done_emoji: payload.config.done_emoji ?? 'DONE' }
+
+  const nextWatchText = (config.watch_chats ?? []).join(', ')
   const prev = aiServerSnapshot.value
 
   if (!options.preserveDraft || !prev) {
-    Object.assign(aiEdit, payload.config)
+    Object.assign(aiEdit, config)
     aiWatchChatsText.value = nextWatchText
     aiTupleConflict.value = null
   } else {
@@ -1146,20 +1148,20 @@ function applyAiCommandStatus(
       || aiEdit.reasoning_effort !== prev.reasoning_effort
     )
     const serverTupleChanged = (
-      payload.config.provider !== prev.provider
-      || payload.config.model !== prev.model
-      || payload.config.reasoning_effort !== prev.reasoning_effort
+      config.provider !== prev.provider
+      || config.model !== prev.model
+      || config.reasoning_effort !== prev.reasoning_effort
     )
     if (!tupleDirty) {
-      aiEdit.provider = payload.config.provider
-      aiEdit.model = payload.config.model
-      aiEdit.reasoning_effort = payload.config.reasoning_effort
+      aiEdit.provider = config.provider
+      aiEdit.model = config.model
+      aiEdit.reasoning_effort = config.reasoning_effort
       aiTupleConflict.value = null
     } else if (serverTupleChanged) {
       aiTupleConflict.value = {
-        provider: payload.config.provider,
-        model: payload.config.model,
-        reasoning_effort: payload.config.reasoning_effort,
+        provider: config.provider,
+        model: config.model,
+        reasoning_effort: config.reasoning_effort,
       }
     }
 
@@ -1183,18 +1185,18 @@ function applyAiCommandStatus(
       const prevVal = prev[key]
       const isIdentityKey = key === 'owner_open_id' || key === 'app_id'
       if (currentVal === prevVal || (isIdentityKey && !String(currentVal ?? '').trim())) {
-        ;(aiEdit as Record<string, unknown>)[key] = payload.config[key]
+        ;(aiEdit as Record<string, unknown>)[key] = config[key]
       }
     }
     if (aiWatchChatsText.value === aiServerWatchChatsText.value) {
       aiWatchChatsText.value = nextWatchText
-      aiEdit.watch_chats = [...(payload.config.watch_chats ?? [])]
+      aiEdit.watch_chats = [...(config.watch_chats ?? [])]
     }
   }
 
   aiServerSnapshot.value = {
-    ...payload.config,
-    watch_chats: [...(payload.config.watch_chats ?? [])],
+    ...config,
+    watch_chats: [...(config.watch_chats ?? [])],
   }
   aiServerWatchChatsText.value = nextWatchText
 }

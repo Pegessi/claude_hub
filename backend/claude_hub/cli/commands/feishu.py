@@ -529,7 +529,11 @@ def feishu_ai_command_status(ctx: click.Context) -> None:
     help="Maximum thread/chat context messages to fetch (1-100).",
 )
 @click.option("--ack-emoji", default=None, help="Initial reaction emoji (default: OnIt).")
-@click.option("--done-emoji", default=None, help="Completion reaction emoji (empty disables it).")
+@click.option(
+    "--done-emoji",
+    default=None,
+    help="Completion reaction emoji (default: DONE; empty disables it).",
+)
 @click.option("--footer", default=None, help="Reply footer appended to /ai posts.")
 @click.option(
     "--send-interim-reply/--no-send-interim-reply",

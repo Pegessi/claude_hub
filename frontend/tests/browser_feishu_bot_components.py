@@ -111,7 +111,6 @@ async def main(browser_run: BrowserRun) -> None:
         "max_active_chats": 10,
         "max_context_messages": 20,
         "ack_emoji": "OnIt",
-        "done_emoji": "DONE",
         "send_interim_reply": False,
         "footer": "> 🤖 AI 代答，仅供参考",
         "reply_in_thread": True,
@@ -1223,6 +1222,7 @@ async def main(browser_run: BrowserRun) -> None:
             if call["method"] == "PATCH" and call["path"] == "/api/feishu/bot/ai-command"
         ]
         assert len(ai_patches) == 3
+        assert ai_patches[0]["done_emoji"] == "DONE"
         assert ai_patches[0]["provider"] == "maso"
         assert ai_patches[0]["model"] == "example-model-dedfefd51120"
         assert ai_patches[0]["reasoning_effort"] == "default"

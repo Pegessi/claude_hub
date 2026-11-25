@@ -591,8 +591,10 @@ async def test_ai_command_pipeline_poller_and_ws_hook(tmp_path: Path) -> None:
             ("POST", "reactions"),
             ("POST", "reply"),
             ("DELETE", "rx_OnIt"),
+            ("POST", "reactions"),
         ]
         assert lifecycle[0][2]["reaction_type"]["emoji_type"] == "OnIt"
+        assert lifecycle[3][2]["reaction_type"]["emoji_type"] == "DONE"
         reply = lifecycle[1][2]
         assert reply["msg_type"] == "post"
         assert "逐文件审查通过" in reply["content"]
@@ -652,6 +654,8 @@ async def test_ai_command_pipeline_poller_and_ws_hook(tmp_path: Path) -> None:
         assert dispatched_turns[1][3]["reasoning_effort"] == "xhigh"
 
         # Follow-up in same thread/provider with inline --model/--effort hot-switches tab env
+        service.update_config({"done_emoji": ""})
+        api_events.clear()
         followup_res = await service.handle_message(
             FeishuUserMessage(
                 message_id="om_ws_ai_3",
@@ -664,7 +668,13 @@ async def test_ai_command_pipeline_poller_and_ws_hook(tmp_path: Path) -> None:
                 thread_id="omt_thread_1",
             )
         )
-        assert followup_res.handled is True
+        assert followup_res.status == "completed"
+        assert [
+            body["reaction_type"]["emoji_type"]
+            for method, path, body in api_events
+            if method == "POST" and path.endswith("/reactions")
+        ] == ["OnIt"]
+        service.update_config({"done_emoji": "DONE"})
         assert len(switched_envs) == 1
         assert switched_envs[0][1]["CODEX_MODEL"] == "o3"
         assert switched_envs[0][1]["CODEX_REASONING_EFFORT"] == "medium"

@@ -6,10 +6,10 @@ settings or use `claude-hub feishu ai-command configure --send-interim-reply`
 to restore the intermediate message. Use `--no-send-interim-reply` to disable it.
 
 An existing configuration with no `send_interim_reply` field uses the new
-default. An absent `done_emoji` now defaults to empty. Previously saved
-`done_emoji: "DONE"` is indistinguishable from an intentional choice, so the
-stored value still applies. Clear **Done reaction** in Feishu settings or run
-`claude-hub feishu ai-command configure --done-emoji ''` to remove it.
+default. An absent `done_emoji` defaults to `DONE` on success. Errors only remove the
+busy reaction. Clear **Done reaction** in Feishu settings or use
+`claude-hub feishu ai-command configure --done-emoji ''` to disable it. A saved
+empty value remains empty.
 
 A command that will open a new topic uses a message-scoped entry in
 `channel_tabs` until a reply identifies the topic. Independent root commands
