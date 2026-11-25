@@ -3,6 +3,9 @@
 from abc import ABC, abstractmethod
 
 from claude_hub.services.feedback.common import (
+    INLINE_LESSON_MIN_CONFIDENCE,
+    INLINE_LESSON_MIN_RELEVANCE,
+    INLINE_LESSONS_MAX_COUNT,
     AgentReport,
     Any,
     FeedbackLesson,
@@ -84,6 +87,7 @@ class FeedbackLessonCatalogStore(FeedbackPersistenceStore, ABC):
         *,
         now: datetime | None = None,
         enforce_iteration_signal: bool = True,
+        allow_manual_without_evidence: bool = False,
     ) -> FeedbackLesson:
         now = now or self._feedback_now()
         summary = payload.summary.strip()
@@ -105,6 +109,7 @@ class FeedbackLessonCatalogStore(FeedbackPersistenceStore, ABC):
             source_record_ids=self._clean_list(payload.source_record_ids),
             confidence=payload.confidence,
             enforce_iteration_signal=enforce_iteration_signal,
+            allow_manual_without_evidence=allow_manual_without_evidence,
         )
         fingerprint = (payload.fingerprint or "").strip()
         existing_fingerprints = {
@@ -245,12 +250,39 @@ class FeedbackLessonCatalogStore(FeedbackPersistenceStore, ABC):
                 lessons.append(lesson)
         return sorted(lessons, key=lambda item: (item.scope.value, item.id))
 
+    _RECORDED_USAGE_KEY_LIMIT = 500
+
+    @staticmethod
+    def _lesson_relevance(lesson: FeedbackLesson, query_tokens: set[str]) -> float:
+        """Compute field-aware lexical relevance using bilingual tokens.
+
+        Matches in high-signal metadata (id, title, tags, applies_when) carry
+        1.5 weight so a single targeted bilingual keyword clears the threshold,
+        while body-only incidental hits carry 1.0 weight and require >= 2 matches.
+        """
+        direct_tokens = _tokens(
+            " ".join(
+                [
+                    lesson.id,
+                    lesson.title,
+                    " ".join(lesson.tags),
+                    " ".join(lesson.applies_when),
+                ]
+            )
+        )
+        body_tokens = _tokens(" ".join([lesson.summary, lesson.do, lesson.avoid]))
+        direct_overlap = len(query_tokens & direct_tokens)
+        body_only_overlap = len((query_tokens & body_tokens) - direct_tokens)
+        return direct_overlap * 1.5 + body_only_overlap * 1.0
+
     def search_lessons(
         self,
         workspace_id: str,
         query: str,
         *,
         limit: int = 8,
+        min_relevance: float = 0.0,
+        min_confidence: float | None = None,
     ) -> list[FeedbackLesson]:
         query_tokens = _tokens(query)
         lessons = self.list_lessons(workspace_id)
@@ -259,27 +291,17 @@ class FeedbackLessonCatalogStore(FeedbackPersistenceStore, ABC):
                 return []
             return lessons[:limit]
 
-        scored: list[tuple[float, FeedbackLesson]] = []
+        scored: list[tuple[float, str, FeedbackLesson]] = []
         for lesson in lessons:
-            haystack = " ".join(
-                [
-                    lesson.id,
-                    lesson.title,
-                    lesson.summary,
-                    lesson.do,
-                    lesson.avoid,
-                    " ".join(lesson.applies_when),
-                    " ".join(lesson.tags),
-                ]
-            )
-            lesson_tokens = _tokens(haystack)
-            overlap = len(query_tokens & lesson_tokens)
-            if overlap == 0:
-                continue
             confidence = lesson.confidence if lesson.confidence is not None else 0.5
-            score = overlap + min(2, lesson.hit_count) * 0.25 + confidence * 0.2
-            scored.append((score, lesson))
-        return [lesson for _, lesson in sorted(scored, key=lambda item: item[0], reverse=True)][
+            if min_confidence is not None and confidence < min_confidence:
+                continue
+            relevance = self._lesson_relevance(lesson, query_tokens)
+            if relevance <= 0.0 or relevance < min_relevance:
+                continue
+            score = relevance + min(2, lesson.hit_count) * 0.25 + confidence * 0.5
+            scored.append((score, lesson.id, lesson))
+        return [lesson for _, _, lesson in sorted(scored, key=lambda item: (-item[0], item[1]))][
             :limit
         ]
 
@@ -294,7 +316,7 @@ class FeedbackLessonCatalogStore(FeedbackPersistenceStore, ABC):
                 return lesson
         raise KeyError(lesson_id)
 
-    _CONTEXT_LIMIT_DEFAULT = 5
+    _CONTEXT_LIMIT_DEFAULT = INLINE_LESSONS_MAX_COUNT
 
     def lesson_context_payload(
         self,
@@ -302,30 +324,140 @@ class FeedbackLessonCatalogStore(FeedbackPersistenceStore, ABC):
         query: str,
         *,
         limit: int = _CONTEXT_LIMIT_DEFAULT,
+        min_confidence: float = INLINE_LESSON_MIN_CONFIDENCE,
+        min_relevance: float = INLINE_LESSON_MIN_RELEVANCE,
     ) -> list[dict[str, Any]]:
-        """Return a compact relevance-ranked lesson index for prompt injection.
+        """Return relevance- and confidence-filtered actionable lessons for inline prompt use.
 
-        Empty queries and zero matches return an empty index. Popularity is
-        not relevance and must not inject unrelated instructions into a Chat.
+        Empty queries, zero matches, and lessons below relevance/confidence
+        thresholds return an empty list so prompts incur zero bloat.
         """
         matched: list[FeedbackLesson]
         limit = min(max(limit, 1), 10)
         if query.strip() and _tokens(query):
-            matched = self.search_lessons(workspace_id, query, limit=limit)
+            matched = self.search_lessons(
+                workspace_id,
+                query,
+                limit=limit,
+                min_relevance=min_relevance,
+                min_confidence=min_confidence,
+            )
         else:
             matched = []
 
         index: list[dict[str, Any]] = []
         for lesson in matched:
+            title = (lesson.title or "").strip() or self._title_from_summary(lesson.summary)
             index.append(
                 {
                     "id": lesson.id[:80],
-                    "title": lesson.title[:100],
+                    "title": title[:100],
+                    "summary": lesson.summary[:200],
+                    "applies_when": [item[:60] for item in lesson.applies_when[:4]],
+                    "do": lesson.do[:200],
+                    "avoid": lesson.avoid[:200],
                     "tags": [tag[:24] for tag in lesson.tags[:6]],
                     "confidence": lesson.confidence,
                 }
             )
         return index
+
+    def record_lesson_hit(
+        self,
+        workspace_id: str,
+        lesson_ids: list[str],
+        *,
+        task_id: str | None = None,
+        now: datetime | None = None,
+    ) -> list[str]:
+        """Record hit usage for matched/inlined lessons, deduplicated per (lesson_id, task_id)."""
+        unique_ids = self._clean_list(lesson_ids)
+        if not unique_ids:
+            return []
+        if not task_id or not task_id.strip():
+            self.increment_lesson_usage(workspace_id, unique_ids, success=False, now=now)
+            return unique_ids
+
+        clean_task_id = task_id.strip()
+        index = self._read_feedback_index(workspace_id)
+        recorded_hits = [
+            str(entry) for entry in index.get("recorded_hits", []) if str(entry).strip()
+        ]
+        seen = set(recorded_hits)
+        newly_hit: list[str] = []
+        for lid in unique_ids:
+            key = f"{clean_task_id}:{lid}"
+            if key in seen:
+                continue
+            seen.add(key)
+            recorded_hits.append(key)
+            newly_hit.append(lid)
+        if not newly_hit:
+            return []
+        self.increment_lesson_usage(workspace_id, newly_hit, success=False, now=now)
+        index = self._read_feedback_index(workspace_id)
+        index["recorded_hits"] = recorded_hits[-self._RECORDED_USAGE_KEY_LIMIT :]
+        self._write_feedback_index(workspace_id, index)
+        return newly_hit
+
+    def record_lesson_success(
+        self,
+        workspace_id: str,
+        lesson_ids: list[str],
+        *,
+        task_id: str | None = None,
+        now: datetime | None = None,
+    ) -> list[str]:
+        """Record completion success for lessons without double-counting prior dispatch hits."""
+        unique_ids = self._clean_list(lesson_ids)
+        if not unique_ids:
+            return []
+        if not task_id or not task_id.strip():
+            self.increment_lesson_usage(workspace_id, unique_ids, success=True, now=now)
+            return unique_ids
+
+        clean_task_id = task_id.strip()
+        index = self._read_feedback_index(workspace_id)
+        recorded_hits = [
+            str(entry) for entry in index.get("recorded_hits", []) if str(entry).strip()
+        ]
+        recorded_successes = [
+            str(entry) for entry in index.get("recorded_successes", []) if str(entry).strip()
+        ]
+        seen_hits = set(recorded_hits)
+        seen_successes = set(recorded_successes)
+
+        with_hit: list[str] = []
+        success_only: list[str] = []
+        recorded_now: list[str] = []
+        for lid in unique_ids:
+            key = f"{clean_task_id}:{lid}"
+            if key in seen_successes:
+                continue
+            seen_successes.add(key)
+            recorded_successes.append(key)
+            recorded_now.append(lid)
+            if key in seen_hits:
+                success_only.append(lid)
+            else:
+                seen_hits.add(key)
+                recorded_hits.append(key)
+                with_hit.append(lid)
+
+        if with_hit:
+            self.increment_lesson_usage(
+                workspace_id, with_hit, success=True, count_hit=True, now=now
+            )
+        if success_only:
+            self.increment_lesson_usage(
+                workspace_id, success_only, success=True, count_hit=False, now=now
+            )
+        if recorded_now:
+            index = self._read_feedback_index(workspace_id)
+            index["recorded_hits"] = recorded_hits[-self._RECORDED_USAGE_KEY_LIMIT :]
+            index["recorded_successes"] = recorded_successes[-self._RECORDED_USAGE_KEY_LIMIT :]
+            self._write_feedback_index(workspace_id, index)
+        return recorded_now
 
     def record_lesson_take(
         self,
@@ -342,6 +474,7 @@ class FeedbackLessonCatalogStore(FeedbackPersistenceStore, ABC):
         lesson_ids: list[str],
         *,
         success: bool = False,
+        count_hit: bool = True,
         now: datetime | None = None,
     ) -> None:
         if not lesson_ids:
@@ -352,16 +485,17 @@ class FeedbackLessonCatalogStore(FeedbackPersistenceStore, ABC):
         if not id_set:
             return
         changed = False
-        for lesson in lessons:
+        for index, lesson in enumerate(lessons):
             if lesson.id not in id_set:
                 continue
             update: dict[str, Any] = {
-                "hit_count": (lesson.hit_count or 0) + 1,
                 "last_used_at": now,
             }
+            if count_hit:
+                update["hit_count"] = (lesson.hit_count or 0) + 1
             if success:
                 update["success_count"] = (lesson.success_count or 0) + 1
-            lessons[lessons.index(lesson)] = lesson.model_copy(update=update)
+            lessons[index] = lesson.model_copy(update=update)
             changed = True
         if changed:
             self._write_lesson_index(workspace_id, lessons)

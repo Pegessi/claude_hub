@@ -63,6 +63,9 @@ class _WorkspaceManagerBase(_RuntimeHostContract):
     _feedback_chat_busy: Callable[[], bool] | None
     _feedback_started_at: datetime
     _feedback_summary_locks: dict[str, asyncio.Lock]
+    _feedback_reaper_jobs: dict[str, asyncio.Task[FeedbackSummaryRun]]
+    _feedback_reaper_active_runs: dict[str, FeedbackSummaryRun]
+    _feedback_reaper_caller: Callable[[str, str], Any] | None
     _liveness_locks: dict[str, asyncio.Lock]
     _task_notifier: TaskNotifier | None
     _task_notice_jobs: dict[str, asyncio.Task[None]]
@@ -438,6 +441,15 @@ class _WorkspaceManagerBase(_RuntimeHostContract):
     def _lesson_context_payload(self, workspace: Workspace, query: str) -> list[dict[str, Any]]: ...
 
     @abstractmethod
+    def _record_inlined_lesson_hits(
+        self,
+        task: WorkspaceTask,
+        lesson_context: list[dict[str, Any]] | None,
+        *,
+        now: datetime | None = None,
+    ) -> list[str]: ...
+
+    @abstractmethod
     def _record_system_task_audit(
         self,
         *,
@@ -732,6 +744,15 @@ class _WorkspaceManagerBase(_RuntimeHostContract):
 
     @abstractmethod
     def _active_feedback_summary_task(self, workspace_id: str) -> WorkspaceTask | None: ...
+
+    @abstractmethod
+    def _has_active_feedback_reaper_job(self, workspace_id: str | None = None) -> bool: ...
+
+    @abstractmethod
+    async def _stop_feedback_reaper_jobs(self) -> None: ...
+
+    @abstractmethod
+    async def wait_for_feedback_reaper(self, workspace_id: str) -> FeedbackSummaryRun | None: ...
 
     @abstractmethod
     def _mark_feedback_summary_retryable(

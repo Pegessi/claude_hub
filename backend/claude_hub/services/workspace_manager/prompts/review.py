@@ -272,6 +272,7 @@ class _ReviewPromptsMixin(_AssignmentPromptsMixin):
                 )
             ),
             workspace_id=workspace.id,
+            role="review",
         )
         return (
             "Review workspace task.\n\n"

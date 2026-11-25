@@ -154,11 +154,14 @@ class _DispatchDeliveryMixin(_WorkspaceManagerBase):
         if current is None or current.status != task.status or current.session_id != session.id:
             return
         task = current
+        matched_lesson_ids = self._record_inlined_lesson_hits(task, lesson_context, now=now)
+        merged_lesson_ids = list(dict.fromkeys([*task.feedback_lesson_ids, *matched_lesson_ids]))
         self.tasks[task.id] = apply_task_update(
             task,
             {
                 "status": WorkspaceTaskStatus.WORKING,
                 "session_id": session.id,
+                "feedback_lesson_ids": merged_lesson_ids,
                 "started_at": now,
                 "updated_at": now,
             },

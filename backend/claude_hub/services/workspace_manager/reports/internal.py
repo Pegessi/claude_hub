@@ -192,10 +192,10 @@ class _InternalReportHandlingMixin(_ReportReviewRequestMixin):
         if updated.internal_kind == "scheduled":
             await self._auto_cleanup_scheduled_session(updated, session)
         if updated.feedback_lesson_ids:
-            self._feedback_store().increment_lesson_usage(
+            self._feedback_store().record_lesson_success(
                 updated.workspace_id,
                 list(updated.feedback_lesson_ids),
-                success=True,
+                task_id=updated.id,
                 now=now,
             )
         self._save_state()

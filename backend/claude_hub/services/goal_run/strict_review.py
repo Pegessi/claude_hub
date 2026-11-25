@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import logging
 import os
@@ -72,7 +73,7 @@ _GIT_CMD_TIMEOUT_SECONDS = 3.0
 _MAX_GIT_STDOUT_BYTES = 256 * 1024
 _MAX_GIT_STDERR_BYTES = 64 * 1024
 _MAX_GIT_SUMMARY_CHARS = 2_000
-_MAX_LESSONS_CHARS = 1_500
+_MAX_LESSONS_CHARS = 1_200
 _MAX_REVIEW_MD_BYTES = 8_192
 _MAX_REVIEW_MD_CHARS = 2_000
 
@@ -115,7 +116,7 @@ class StrictReviewContext:
             sections.append(f"Situational Git / Workspace Snapshot:\n{self.git_summary}")
         if self.lessons_summary:
             sections.append(
-                "Relevant Workspace Feedback Lessons (apply only when relevant to Objective):\n"
+                "Workspace Review Checkpoints (verify these lessons against the Objective and diff):\n"
                 f"{self.lessons_summary}"
             )
         if self.review_md_excerpt:
@@ -407,6 +408,8 @@ def _collect_workspace_memory_sync(
                         matched_ws = ws
 
         if matched_ws is not None:
+            from ..feedback.common import INLINE_LESSONS_MAX_COUNT, render_inline_lessons_block
+
             workspace_id = matched_ws.id
             query = f"{objective}\n{assistant_text[:1000]}"
             raw_items = workspace_manager._lesson_context_payload(matched_ws, query)
@@ -416,34 +419,51 @@ def _collect_workspace_memory_sync(
             except Exception:
                 feedback_store = None
 
-            lesson_lines: list[str] = []
-            for item in (raw_items or [])[:5]:
+            enriched_items: list[dict[str, object]] = []
+            matched_ids: list[str] = []
+            for item in (raw_items or [])[:INLINE_LESSONS_MAX_COUNT]:
+                if not isinstance(item, dict):
+                    continue
                 lid = str(item.get("id") or "").strip()
-                title = str(item.get("title") or "").strip()
-                summary = str(item.get("summary") or "").strip()
-                do_text = str(item.get("do") or "").strip()
-                avoid_text = str(item.get("avoid") or "").strip()
-                if feedback_store is not None and lid and not (summary or do_text or avoid_text):
+                if not lid:
+                    continue
+                enriched: dict[str, object] = dict(item)
+                has_actionable = bool(
+                    str(enriched.get("do") or "").strip()
+                    or str(enriched.get("avoid") or "").strip()
+                    or str(enriched.get("summary") or "").strip()
+                )
+                if feedback_store is not None and not has_actionable:
                     try:
                         full = feedback_store.get_lesson(matched_ws.id, lid)
-                        summary = getattr(full, "summary", "") or ""
-                        do_text = getattr(full, "do", "") or ""
-                        avoid_text = getattr(full, "avoid", "") or ""
+                        enriched["title"] = enriched.get("title") or getattr(full, "title", "")
+                        enriched["summary"] = getattr(full, "summary", "") or ""
+                        enriched["applies_when"] = list(getattr(full, "applies_when", []) or [])
+                        enriched["do"] = getattr(full, "do", "") or ""
+                        enriched["avoid"] = getattr(full, "avoid", "") or ""
                     except Exception:
                         pass
-                detail_parts = [
-                    p
-                    for p in (
-                        summary,
-                        f"Do: {do_text}" if do_text else "",
-                        f"Avoid: {avoid_text}" if avoid_text else "",
-                    )
-                    if p
-                ]
-                detail_suffix = f" — {' | '.join(detail_parts)}" if detail_parts else ""
-                lesson_lines.append(f"- [{lid}] {title}{detail_suffix}")
-            if lesson_lines:
-                lessons_summary = "\n".join(lesson_lines)[:_MAX_LESSONS_CHARS]
+                enriched_items.append(enriched)
+                matched_ids.append(lid)
+
+            if enriched_items:
+                lessons_summary = render_inline_lessons_block(
+                    enriched_items,
+                    workspace_id=matched_ws.id,
+                    role="strict_review",
+                    max_chars=_MAX_LESSONS_CHARS,
+                    max_items=INLINE_LESSONS_MAX_COUNT,
+                )
+                if feedback_store is not None and matched_ids:
+                    dedupe_digest = hashlib.sha256(objective.encode("utf-8")).hexdigest()[:16]
+                    try:
+                        feedback_store.record_lesson_hit(
+                            matched_ws.id,
+                            matched_ids,
+                            task_id=f"strict-review:{dedupe_digest}",
+                        )
+                    except Exception:
+                        pass
     except Exception:
         logger.debug("Skipping workspace lesson lookup during Goal strict review", exc_info=True)
 

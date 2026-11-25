@@ -21,6 +21,7 @@ from claude_hub.models import (
     AgentRuntimeStatus,
     AgentType,
     ExecutionTarget,
+    FeedbackSummaryRun,
     GoalPacketStatus,
     ManagedSession,
     ManagedSessionStatus,
@@ -1147,13 +1148,19 @@ def test_direct_task_explicit_review_request_still_creates_reviewer(
     assert direct_task.status == WorkspaceTaskStatus.REVIEW
     assert direct_task.review_session_id is not None
     assert direct_task.review_requested_at is not None
-    assert direct_task.feedback_lesson_ids == []
+    assert direct_task.feedback_lesson_ids == ["explicit-review-handoff"]
     assert "Review workspace task." in sent_messages[-1][1]
     assert "explicit-review-handoff" in sent_messages[-1][1]
-    assert "Relevant lessons" in sent_messages[-1][1]
+    assert "Workspace review checkpoints" in sent_messages[-1][1]
     assert (
-        "Check changed files, validation, risks, and acceptance evidence."
-        not in sent_messages[-1][1]
+        "Check changed files, validation, risks, and acceptance evidence." in sent_messages[-1][1]
+    )
+    assert "Do not pass review based only on the completion message." in sent_messages[-1][1]
+    assert (
+        workspace_manager._feedback_store()
+        .get_lesson(workspace["id"], "explicit-review-handoff")
+        .hit_count
+        == 1
     )
     task_reports = [
         report
@@ -3401,15 +3408,23 @@ def test_task_assignment_injects_lessons_index_with_api_and_take_tracking(
 
     assert start_response.status_code == 201
     started_task = start_response.json()
-    assert started_task["feedback_lesson_ids"] == []
+    assert started_task["feedback_lesson_ids"] == ["cli-symbols-comma-separated"]
     assignment_prompt = sent_messages[-1][1]
-    assert "Relevant lessons" in assignment_prompt
+    assert "Workspace execution guardrails" in assignment_prompt
     assert "cli-symbols-comma-separated" in assignment_prompt
     assert "lessons-catalog.md" not in assignment_prompt
     assert "/api/workspaces/" in assignment_prompt
     assert "/lessons/<id>" in assignment_prompt
     assert workspace["id"] in assignment_prompt
-    assert "Use --symbols AAPL,MSFT" not in assignment_prompt
+    assert "Use --symbols AAPL,MSFT." in assignment_prompt
+    assert "Do not pass --symbols AAPL MSFT." in assignment_prompt
+    assert "CLI symbol lists" in assignment_prompt
+    assert (
+        workspace_manager._feedback_store()
+        .get_lesson(workspace["id"], "cli-symbols-comma-separated")
+        .hit_count
+        == 1
+    )
     task_reports = [
         report
         for report in workspace_manager.reports_for_workspace(workspace["id"])
@@ -3426,12 +3441,12 @@ def test_task_assignment_injects_lessons_index_with_api_and_take_tracking(
     assert fetched["summary"] == "--symbols expects comma-separated values."
     assert fetched["do"] == "Use --symbols AAPL,MSFT."
     assert fetched["avoid"] == "Do not pass --symbols AAPL MSFT."
-    assert fetched["hit_count"] == 1
+    assert fetched["hit_count"] == 2
 
     fetch_response2 = client.get(
         f"/api/workspaces/{workspace['id']}/lessons/cli-symbols-comma-separated"
     )
-    assert fetch_response2.json()["hit_count"] == 2
+    assert fetch_response2.json()["hit_count"] == 3
 
     notfound_response = client.get(f"/api/workspaces/{workspace['id']}/lessons/nonexistent-lesson")
     assert notfound_response.status_code == 404
@@ -3441,6 +3456,7 @@ def test_workspace_feedback_summary_uses_visible_managed_reaper_task(
     monkeypatch: MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    """Silent Feedback Reaper runs in background without creating board tasks."""
     repo = tmp_path / "repo"
     repo.mkdir()
     monkeypatch.setattr(workspace_module, "STATE_ROOT", tmp_path / "state")
@@ -3452,6 +3468,17 @@ def test_workspace_feedback_summary_uses_visible_managed_reaper_task(
         port=12536,
         sent_messages=sent_messages,
     )
+
+    captured_prompts: list[str] = []
+    release_turn: asyncio.Event | None = None
+
+    async def fake_reaper_caller(workspace_id: str, prompt: str) -> str:
+        captured_prompts.append(prompt)
+        if release_turn is not None:
+            await release_turn.wait()
+        return json.dumps({"lessons": [], "skipped_reason": "no_new_lessons"})
+
+    monkeypatch.setattr(workspace_manager, "_feedback_reaper_caller", fake_reaper_caller)
 
     client = TestClient(app)
     workspace = client.post(
@@ -3510,122 +3537,54 @@ def test_workspace_feedback_summary_uses_visible_managed_reaper_task(
     assert response.status_code == 201
     summary_run = response.json()
     assert summary_run["cache_hit"] is False
+    assert summary_run["task_id"] is None
     assert summary_run["input_record_ids"] == ["task-one"]
-    internal_task = workspace_manager.tasks[summary_run["task_id"]]
-    assert internal_task.system_internal is True
-    assert internal_task.internal_kind == "feedback_reaper"
-    assert internal_task.status == WorkspaceTaskStatus.WORKING
-    assert sent_messages
-    reaper_prompt = sent_messages[-1][1]
+    # Zero board tasks created, zero user orchestrator terminal sessions touched.
+    assert sent_messages == []
+    assert [
+        task
+        for task in workspace_manager.tasks.values()
+        if task.workspace_id == workspace["id"] and task.internal_kind == "feedback_reaper"
+    ] == []
+    board = client.get(f"/api/workspaces/{workspace['id']}/board").json()
+    assert board["tasks"] == []
+
+    assert captured_prompts
+    reaper_prompt = captured_prompts[-1]
     assert "internal Feedback Reaper" in reaper_prompt
-    assert "System-internal task" in reaper_prompt
     assert "input_task_digests" in reaper_prompt
     assert "task-one" in reaper_prompt
-    assert "POST /api/workspaces/" in reaper_prompt
-    # active_lessons payload must include fingerprint + truncated summary so
-    # the Reaper can deterministically dedup (not just title+tags).
     assert '"fingerprint":' in reaper_prompt
     assert '"summary":' in reaper_prompt
     assert "cli-symbols-comma-separated" in reaper_prompt
-    assert "merge" in reaper_prompt.lower()  # dedup/merge instruction present
-
-    board = client.get(f"/api/workspaces/{workspace['id']}/board").json()
-    assert internal_task.id in {task["id"] for task in board["tasks"]}
-    board_task = next(task for task in board["tasks"] if task["id"] == internal_task.id)
-    assert board_task["prompt"].startswith("System-managed Feedback Reaper task")
-    assert "input_task_digests" not in board_task["prompt"]
-    assert workspace_manager.tasks[internal_task.id].system_internal is True
-    assigned_session = next(
-        session for session in board["sessions"] if session["id"] == internal_task.session_id
-    )
-    assert assigned_session["current_task_id"] == internal_task.id
-    blocked_delete = client.delete(f"/api/workspaces/sessions/{internal_task.session_id}")
-    assert blocked_delete.status_code == 400
-    assert "queued, working, or review tasks" in blocked_delete.json()["detail"]
-    audit_reports = [
-        report
-        for report in workspace_manager.reports_for_workspace(workspace["id"])
-        if report.task_id == internal_task.id and report.risk_level == "system_audit"
-    ]
-    assert audit_reports
-
-    # This fixture stubs _save_state. Commit its source before rendering the
-    # derived cache, whose contract excludes uncommitted in-memory mutations.
-    workspace_manager._atomic_write_text(
-        workspace_manager._workspace_state_file(workspace["id"]),
-        json.dumps(workspace_manager._workspace_state_payload(workspace["id"]), indent=2),
-    )
-    workspace_manager._write_snapshot(workspace["id"])
-    snapshot = workspace_manager.snapshot_path(workspace["id"]).read_text(encoding="utf-8")
-    assert internal_task.id in snapshot
-    assert "Feedback Reaper: summarize workspace lessons" in snapshot
+    assert "merge" in reaper_prompt.lower()
+    assert "bilingual" in reaper_prompt.lower()
 
     feedback_dir = tmp_path / "state" / workspace["id"] / "feedback"
     pending_path = feedback_dir / "summary-runs" / f"{summary_run['id']}.pending.json"
-    assert pending_path.exists()
-    pending_index = json.loads((feedback_dir / "index.json").read_text(encoding="utf-8"))
-    assert pending_index["processed_task_records"] == []
-
-    # A repeated trigger while this task is active returns the same managed
-    # run/task and does not create another agent assignment.
-    message_count = len(sent_messages)
-    duplicate_response = client.post(f"/api/workspaces/{workspace['id']}/lessons/summarize")
-    assert duplicate_response.status_code == 201
-    assert duplicate_response.json()["id"] == summary_run["id"]
-    assert duplicate_response.json()["task_id"] == internal_task.id
-    assert len(sent_messages) == message_count
-    assert (
-        len(
-            [
-                task
-                for task in workspace_manager.tasks.values()
-                if task.workspace_id == workspace["id"]
-                and task.internal_kind == "feedback_reaper"
-                and task.status != WorkspaceTaskStatus.DONE
-            ]
-        )
-        == 1
-    )
-
-    completion_response = client.post(
-        f"/api/workspaces/sessions/{internal_task.session_id}/reports",
-        json={
-            "task_id": internal_task.id,
-            "state": "completed",
-            "message": "Internal reaper finished.",
-            "changed_files": [],
-            "validation": "skipped_reason=no_new_lessons",
-            "review_decision": "skip",
-            "review_reason": "System-internal Feedback Reaper audit.",
-            "risk_level": "system_audit",
-        },
-    )
-
-    assert completion_response.status_code == 201
-    completed = workspace_manager.tasks[internal_task.id]
-    assert completed.status == WorkspaceTaskStatus.DONE
-    assert completed.review_session_id is None
-    assert completed.review_skipped_at is not None
-    assert completed.review_skip_reason == "System-internal task completed without human review."
     assert not pending_path.exists()
     feedback_index = json.loads((feedback_dir / "index.json").read_text(encoding="utf-8"))
     assert feedback_index["processed_task_records"][0]["task_id"] == "task-one"
-    summary_run_files = list((feedback_dir / "summary-runs").glob("*.json"))
-    completed_run = [
-        json.loads(path.read_text(encoding="utf-8"))
-        for path in summary_run_files
-        if json.loads(path.read_text(encoding="utf-8"))["id"] == summary_run["id"]
-    ][0]
-    assert completed_run["skipped_reason"] == "no_new_lessons"
+    completed_run = workspace_manager._feedback_store().summary_run_by_id(
+        workspace["id"], summary_run["id"]
+    )
+    assert completed_run is not None
+    assert completed_run.skipped_reason == "no_new_lessons"
+    assert completed_run.running is False
+    assert completed_run.completed_at is not None
 
-    sent_messages.clear()
+    status = workspace_manager.feedback_automation_status(workspace["id"])
+    assert status["running"] is False
+    assert status["last_error"] is None
+    assert status["last_summarized_at"] is not None
+
     cache_response = client.post(f"/api/workspaces/{workspace['id']}/lessons/summarize")
     assert cache_response.status_code == 201
     cached_run = cache_response.json()
     assert cached_run["cache_hit"] is True
     assert cached_run["task_id"] is None
     assert cached_run["skipped_reason"] == "no_new_task_records"
-    assert sent_messages == []
+    assert len(captured_prompts) == 1
 
     force_response = client.post(
         f"/api/workspaces/{workspace['id']}/lessons/summarize",
@@ -3634,15 +3593,16 @@ def test_workspace_feedback_summary_uses_visible_managed_reaper_task(
     assert force_response.status_code == 201
     force_run = force_response.json()
     assert force_run["cache_hit"] is False
+    assert force_run["task_id"] is None
     assert force_run["input_record_ids"] == ["task-one"]
-    assert force_run["task_id"] in workspace_manager.tasks
-    assert sent_messages
+    assert len(captured_prompts) == 2
 
 
 def test_feedback_summary_prompt_and_completion_failures_remain_retryable(
     monkeypatch: MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    """Silent reaper prompt-build and index-commit failures never pollute the board."""
     repo = tmp_path / "repo"
     repo.mkdir()
     state_root = tmp_path / "state"
@@ -3653,6 +3613,12 @@ def test_feedback_summary_prompt_and_completion_failures_remain_retryable(
         tab_id="preparation-reaper-tab",
         port=12536,
     )
+
+    async def fake_reaper_caller(workspace_id: str, prompt: str) -> str:
+        return json.dumps({"lessons": [], "skipped_reason": "no_new_lessons"})
+
+    monkeypatch.setattr(workspace_manager, "_feedback_reaper_caller", fake_reaper_caller)
+
     client = TestClient(app)
     workspace = client.post(
         "/api/workspaces",
@@ -3679,41 +3645,21 @@ def test_feedback_summary_prompt_and_completion_failures_remain_retryable(
         fail_first_prompt_build,
     )
     failed_prompt_response = client.post(f"/api/workspaces/{workspace['id']}/lessons/summarize")
-    assert failed_prompt_response.status_code == 400
-    assert "prompt preparation failed" in failed_prompt_response.json()["detail"]
-    tasks = [
+    assert failed_prompt_response.status_code == 201
+    failed_run = failed_prompt_response.json()
+    assert failed_run["task_id"] is None
+    assert failed_run["running"] is False
+    assert "prompt package rejected" in (failed_run["error"] or "")
+    assert [
         task
         for task in workspace_manager.tasks.values()
         if task.workspace_id == workspace["id"] and task.internal_kind == "feedback_reaper"
-    ]
-    assert len(tasks) == 1
-    task = tasks[0]
-    assert task.status == WorkspaceTaskStatus.TODO
-    assert task.session_id is None
-    run = workspace_manager._feedback_store().summary_run_for_task(workspace["id"], task.id)
-    assert run is not None
-    assert run.input_record_ids == []
-    pending_path = (
-        state_root / workspace["id"] / "feedback" / "summary-runs" / f"{run.id}.pending.json"
-    )
-    assert not pending_path.exists()
-    assert any(
-        report.task_id == task.id
-        and report.state == AgentReportState.BLOCKED
-        and "prompt_preparation_retryable=true" in (report.validation or "")
-        for report in workspace_manager.reports.values()
-    )
+    ] == []
     board = client.get(f"/api/workspaces/{workspace['id']}/board").json()
-    assert task.id in {item["id"] for item in board["tasks"]}
-
-    prepared_response = client.post(f"/api/workspaces/{workspace['id']}/lessons/summarize")
-    assert prepared_response.status_code == 201
-    assert prepared_response.json()["id"] == run.id
-    assert prepared_response.json()["task_id"] == task.id
-    prepared_task = workspace_manager.tasks[task.id]
-    assert prepared_task.status == WorkspaceTaskStatus.WORKING
-    assert prepared_task.session_id is not None
-    assert pending_path.exists()
+    assert board["tasks"] == []
+    status = workspace_manager.feedback_automation_status(workspace["id"])
+    assert status["running"] is False
+    assert "prompt package rejected" in (status["last_error"] or "")
 
     store_type = type(workspace_manager._feedback_store())
     original_commit = store_type.commit_staged_summary_input
@@ -3731,69 +3677,42 @@ def test_feedback_summary_prompt_and_completion_failures_remain_retryable(
         return original_commit(store, workspace_id, run_id)
 
     monkeypatch.setattr(store_type, "commit_staged_summary_input", fail_first_completion_commit)
-    failed_completion_response = client.post(
-        f"/api/workspaces/sessions/{prepared_task.session_id}/reports",
-        json={
-            "task_id": task.id,
-            "state": "completed",
-            "message": "Summary created before index commit",
-            "validation": "created_lesson_ids=[]|merged_lesson_ids=[]|skipped_reason=none",
-            "review_decision": "skip",
-        },
+    commit_fail_response = client.post(f"/api/workspaces/{workspace['id']}/lessons/summarize")
+    assert commit_fail_response.status_code == 201
+    commit_fail_run_id = commit_fail_response.json()["id"]
+    persisted_fail = workspace_manager._feedback_store().summary_run_by_id(
+        workspace["id"], commit_fail_run_id
     )
-    assert failed_completion_response.status_code == 201
-    retryable = workspace_manager.tasks[task.id]
-    assert retryable.status == WorkspaceTaskStatus.TODO
-    assert retryable.session_id is None
-    assert retryable.review_skipped_at is None
-    assert retryable.review_skip_reason is None
-    assert pending_path.exists()
-    incomplete_run = workspace_manager._feedback_store().summary_run_for_task(
-        workspace["id"], task.id
-    )
-    assert incomplete_run is not None
-    assert incomplete_run.completed_at is None
-    assert any(
-        report.task_id == task.id
-        and report.state == AgentReportState.BLOCKED
-        and "pending_input_preserved=true" in (report.validation or "")
-        for report in workspace_manager.reports.values()
-    )
-
+    assert persisted_fail is not None
+    assert persisted_fail.running is False
+    assert "index write rejected" in (persisted_fail.error or "")
+    status_after_commit_fail = workspace_manager.feedback_automation_status(workspace["id"])
+    assert "index write rejected" in (status_after_commit_fail["last_error"] or "")
+    # Records were NOT committed on failure, so a subsequent retry succeeds cleanly.
     resumed_response = client.post(f"/api/workspaces/{workspace['id']}/lessons/summarize")
     assert resumed_response.status_code == 201
-    assert resumed_response.json()["id"] == run.id
-    resumed_task = workspace_manager.tasks[task.id]
-    assert resumed_task.status == WorkspaceTaskStatus.WORKING
-    assert resumed_task.session_id is not None
-    completed_response = client.post(
-        f"/api/workspaces/sessions/{resumed_task.session_id}/reports",
-        json={
-            "task_id": task.id,
-            "state": "completed",
-            "message": "Summary and index persisted",
-            "validation": "created_lesson_ids=[]|merged_lesson_ids=[]|skipped_reason=none",
-            "review_decision": "skip",
-        },
-    )
-    assert completed_response.status_code == 201
-    assert workspace_manager.tasks[task.id].status == WorkspaceTaskStatus.DONE
-    assert not pending_path.exists()
-    completed_run = workspace_manager._feedback_store().summary_run_for_task(
-        workspace["id"], task.id
+    resumed_run_id = resumed_response.json()["id"]
+    completed_run = workspace_manager._feedback_store().summary_run_by_id(
+        workspace["id"], resumed_run_id
     )
     assert completed_run is not None
+    assert completed_run.running is False
+    assert completed_run.error is None
     assert completed_run.completed_at is not None
     feedback_index = json.loads(
         (state_root / workspace["id"] / "feedback" / "index.json").read_text(encoding="utf-8")
     )
     assert feedback_index["processed_task_records"][0]["task_id"] == "task-prepare"
+    status_done = workspace_manager.feedback_automation_status(workspace["id"])
+    assert status_done["last_error"] is None
+    assert status_done["last_summarized_at"] is not None
 
 
 def test_feedback_summary_dispatch_failure_is_visible_retryable_and_delete_safe(
     monkeypatch: MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    """Silent reaper model failures record last_error silently and retry cleanly."""
     repo = tmp_path / "repo"
     repo.mkdir()
     state_root = tmp_path / "state"
@@ -3806,26 +3725,16 @@ def test_feedback_summary_dispatch_failure_is_visible_retryable_and_delete_safe(
         port=12537,
         sent_messages=sent_messages,
     )
-    failed_once = False
+    attempts = 0
 
-    async def fail_first_assignment(tmux_session: str, message: str) -> None:
-        nonlocal failed_once
-        if "New workspace task assigned." in message and not failed_once:
-            failed_once = True
-            raise RuntimeError("context request rejected")
-        sent_messages.append((tmux_session, message))
+    async def fail_first_turn(workspace_id: str, prompt: str) -> str:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError("ephemeral turn provider rejected")
+        return json.dumps({"lessons": [], "skipped_reason": "no_new_lessons"})
 
-    async def fail_first_assignment_with_receipt(
-        tmux_session: str, message: str, call_id: str
-    ) -> None:
-        await fail_first_assignment(tmux_session, message)
-
-    monkeypatch.setattr(workspace_manager, "_send_tmux_message", fail_first_assignment)
-    monkeypatch.setattr(
-        workspace_manager,
-        "_send_tmux_message_with_receipt",
-        fail_first_assignment_with_receipt,
-    )
+    monkeypatch.setattr(workspace_manager, "_feedback_reaper_caller", fail_first_turn)
 
     client = TestClient(app)
     workspace = client.post(
@@ -3851,62 +3760,52 @@ def test_feedback_summary_dispatch_failure_is_visible_retryable_and_delete_safe(
         encoding="utf-8",
     )
 
-    failed_response = client.post(f"/api/workspaces/{workspace['id']}/lessons/summarize")
-    assert failed_response.status_code == 400
-    assert "remains visible in Todo" in failed_response.json()["detail"]
-    reaper_tasks = [
+    first_response = client.post(f"/api/workspaces/{workspace['id']}/lessons/summarize")
+    assert first_response.status_code == 201
+    first_run_id = first_response.json()["id"]
+    assert first_response.json()["task_id"] is None
+    assert sent_messages == []
+    assert [
         task
         for task in workspace_manager.tasks.values()
         if task.workspace_id == workspace["id"] and task.internal_kind == "feedback_reaper"
-    ]
-    assert len(reaper_tasks) == 1
-    task = reaper_tasks[0]
-    assert task.status == WorkspaceTaskStatus.TODO
-    assert task.session_id is None
+    ] == []
     board = client.get(f"/api/workspaces/{workspace['id']}/board").json()
-    assert task.id in {item["id"] for item in board["tasks"]}
-    assert any(
-        report.task_id == task.id and report.state == AgentReportState.BLOCKED
-        for report in workspace_manager.reports.values()
-    )
+    assert board["tasks"] == []
+
     store = workspace_manager._feedback_store()
-    run = store.summary_run_for_task(workspace["id"], task.id)
-    assert run is not None
+    first_persisted = store.summary_run_by_id(workspace["id"], first_run_id)
+    assert first_persisted is not None
+    assert first_persisted.running is False
+    assert "ephemeral turn provider rejected" in (first_persisted.error or "")
     pending_path = (
-        state_root / workspace["id"] / "feedback" / "summary-runs" / (f"{run.id}.pending.json")
+        state_root / workspace["id"] / "feedback" / "summary-runs" / f"{first_run_id}.pending.json"
     )
-    assert pending_path.exists()
+    assert not pending_path.exists()
+    status_failed = workspace_manager.feedback_automation_status(workspace["id"])
+    assert status_failed["running"] is False
+    assert "ephemeral turn provider rejected" in (status_failed["last_error"] or "")
 
     retry_response = client.post(f"/api/workspaces/{workspace['id']}/lessons/summarize")
     assert retry_response.status_code == 201
-    assert retry_response.json()["id"] == run.id
-    assert retry_response.json()["task_id"] == task.id
-    retried = workspace_manager.tasks[task.id]
-    assert retried.status == WorkspaceTaskStatus.WORKING
-    assert retried.session_id is not None
-
-    session_id = retried.session_id
-    delete_response = client.delete(f"/api/workspaces/tasks/{task.id}")
-    assert delete_response.status_code == 204
-    assert task.id not in workspace_manager.tasks
-    assert workspace_manager.sessions[session_id].current_task_id is None
-    assert not pending_path.exists()
-    abandoned = store.summary_run_for_task(workspace["id"], task.id)
-    assert abandoned is not None
-    assert abandoned.skipped_reason == "task_deleted"
-    assert abandoned.completed_at is not None
-
-    replacement_response = client.post(f"/api/workspaces/{workspace['id']}/lessons/summarize")
-    assert replacement_response.status_code == 201
-    assert replacement_response.json()["id"] != run.id
-    assert replacement_response.json()["task_id"] != task.id
-    assert replacement_response.json()["input_record_ids"] == ["task-one"]
+    retry_run_id = retry_response.json()["id"]
+    assert retry_run_id != first_run_id
+    assert retry_response.json()["input_record_ids"] == ["task-one"]
+    retry_persisted = store.summary_run_by_id(workspace["id"], retry_run_id)
+    assert retry_persisted is not None
+    assert retry_persisted.running is False
+    assert retry_persisted.error is None
+    assert retry_persisted.completed_at is not None
+    status_recovered = workspace_manager.feedback_automation_status(workspace["id"])
+    assert status_recovered["last_error"] is None
+    assert status_recovered["last_summarized_at"] is not None
 
 
 def test_feedback_summary_abort_releases_agent_and_requeues_unprocessed_input(
     monkeypatch: MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    """Legacy unfinished feedback_reaper tasks are retired cleanly on workspace load."""
     repo = tmp_path / "repo"
     repo.mkdir()
     state_root = tmp_path / "state"
@@ -3914,98 +3813,78 @@ def test_feedback_summary_abort_releases_agent_and_requeues_unprocessed_input(
     stub_workspace_terminal(
         monkeypatch,
         repo,
-        tab_id="abort-reaper-tab",
+        tab_id="legacy-reaper-tab",
         port=12538,
     )
 
     client = TestClient(app)
     workspace = client.post(
         "/api/workspaces",
-        json={"name": "Abort Reaper", "path": str(repo), "session_prefix": "abort"},
+        json={"name": "Legacy Reaper Cleanup", "path": str(repo), "session_prefix": "legc"},
     ).json()
-    record_dir = state_root / workspace["id"] / "task_records"
-    record_dir.mkdir(parents=True)
-    record_dir.joinpath("2026-08-09T00-00-00-task-abort.json").write_text(
-        json.dumps(
-            {
-                "schema_version": 1,
-                "workspace_id": workspace["id"],
-                "task": {"id": "task-abort", "title": "Abort me", "status": "done"},
-                "reports": [
-                    {"state": "review_failed"},
-                    {"state": "completed", "message": "Abort evidence"},
-                ],
-                "artifacts": {"changed_files": [], "validation": [], "risks": []},
-                "final_summary": "Abort evidence",
-            }
-        ),
-        encoding="utf-8",
-    )
+    session = client.post(
+        f"/api/workspaces/{workspace['id']}/agent",
+        json={"agent_type": "codex", "reuse_existing": False},
+    ).json()
 
-    first_run = client.post(f"/api/workspaces/{workspace['id']}/lessons/summarize").json()
-    first_task = workspace_manager.tasks[first_run["task_id"]]
-    assert first_task.status == WorkspaceTaskStatus.WORKING
-    assert first_task.session_id is not None
-    first_session_id = first_task.session_id
+    now = workspace_manager._runtime_now()
+    legacy_task = WorkspaceTask(
+        id="legacy-reaper-task-1",
+        workspace_id=workspace["id"],
+        title="Feedback Reaper: summarize workspace lessons",
+        prompt="Legacy stuck feedback reaper",
+        agent_type=AgentType.CODEX,
+        status=WorkspaceTaskStatus.TODO,
+        session_id=session["id"],
+        system_internal=True,
+        internal_kind="feedback_reaper",
+        created_at=now,
+        updated_at=now,
+    )
+    workspace_manager.tasks[legacy_task.id] = legacy_task
+    workspace_manager.sessions[session["id"]] = workspace_manager.sessions[
+        session["id"]
+    ].model_copy(
+        update={
+            "task_id": legacy_task.id,
+            "current_task_id": legacy_task.id,
+            "status": ManagedSessionStatus.WORKING,
+            "runtime_status": AgentRuntimeStatus.WORKING,
+        }
+    )
+    store = workspace_manager._feedback_store()
+    legacy_run = FeedbackSummaryRun(
+        id="legacy-run-1",
+        workspace_id=workspace["id"],
+        task_id=legacy_task.id,
+        input_record_ids=["task-legacy"],
+        created_at=now,
+    )
+    store.write_summary_run(workspace["id"], legacy_run)
     pending_path = (
-        state_root
-        / workspace["id"]
-        / "feedback"
-        / "summary-runs"
-        / (f"{first_run['id']}.pending.json")
+        state_root / workspace["id"] / "feedback" / "summary-runs" / "legacy-run-1.pending.json"
     )
-    assert pending_path.exists()
+    pending_path.write_text("{}", encoding="utf-8")
 
-    needs_input_response = client.post(
-        f"/api/workspaces/sessions/{first_session_id}/reports",
-        json={
-            "task_id": first_task.id,
-            "state": "needs_input",
-            "message": "Context could not be processed",
-        },
-    )
-    assert needs_input_response.status_code == 201
-    retryable = workspace_manager.tasks[first_task.id]
-    assert retryable.status == WorkspaceTaskStatus.TODO
-    assert retryable.session_id is None
-    assert workspace_manager.sessions[first_session_id].current_task_id is None
-    assert pending_path.exists()
-
-    resumed_response = client.post(f"/api/workspaces/{workspace['id']}/lessons/summarize")
-    assert resumed_response.status_code == 201
-    assert resumed_response.json()["id"] == first_run["id"]
-    assert resumed_response.json()["task_id"] == first_task.id
-    resumed = workspace_manager.tasks[first_task.id]
-    assert resumed.status == WorkspaceTaskStatus.WORKING
-    assert resumed.session_id == first_session_id
-
-    abort_response = client.post(
-        f"/api/workspaces/tasks/{first_task.id}/abort",
-        json={"reason": "Agent could not process the context"},
-    )
-    assert abort_response.status_code == 200
-    aborted = workspace_manager.tasks[first_task.id]
-    assert aborted.status == WorkspaceTaskStatus.DONE
-    assert aborted.manual_aborted_at is not None
-    assert aborted.completed_at is not None
-    assert aborted.session_id is None
-    assert workspace_manager.sessions[first_session_id].current_task_id is None
+    cleaned = workspace_manager._cleanup_legacy_feedback_reaper_tasks()
+    assert cleaned == 1
+    retired = workspace_manager.tasks[legacy_task.id]
+    assert retired.status == WorkspaceTaskStatus.DONE
+    assert retired.session_id is None
+    assert retired.completed_at is not None
+    assert workspace_manager.sessions[session["id"]].current_task_id is None
+    assert workspace_manager.sessions[session["id"]].status == ManagedSessionStatus.IDLE
     assert not pending_path.exists()
-    abandoned_run = workspace_manager._feedback_store().summary_run_for_task(
-        workspace["id"], first_task.id
-    )
-    assert abandoned_run is not None
-    assert abandoned_run.skipped_reason == "manually_aborted"
-    assert abandoned_run.completed_at is not None
+    abandoned = store.summary_run_for_task(workspace["id"], legacy_task.id)
+    assert abandoned is not None
+    assert abandoned.skipped_reason == "legacy_reaper_retired"
+    assert abandoned.completed_at is not None
 
-    replacement_response = client.post(f"/api/workspaces/{workspace['id']}/lessons/summarize")
-    assert replacement_response.status_code == 201
-    replacement_run = replacement_response.json()
-    assert replacement_run["task_id"] != first_task.id
-    assert replacement_run["input_record_ids"] == ["task-abort"]
-    assert workspace_manager.tasks[replacement_run["task_id"]].status == (
-        WorkspaceTaskStatus.WORKING
-    )
+    # Hidden from both workspace board and board overview.
+    board = client.get(f"/api/workspaces/{workspace['id']}/board").json()
+    assert legacy_task.id not in {item["id"] for item in board["tasks"]}
+    overview = workspace_manager.get_board_overview()
+    assert legacy_task.id not in {item.id for item in overview["tasks"]}
 
 
 def test_reaper_prompt_stays_under_hard_budget_with_adversarial_input(
@@ -4033,6 +3912,13 @@ def test_reaper_prompt_stays_under_hard_budget_with_adversarial_input(
         port=12540,
         sent_messages=sent_messages,
     )
+    captured_prompts: list[str] = []
+
+    async def capture_reaper_prompt(workspace_id: str, prompt: str) -> str:
+        captured_prompts.append(prompt)
+        return json.dumps({"lessons": [], "skipped_reason": "no_new_lessons"})
+
+    monkeypatch.setattr(workspace_manager, "_feedback_reaper_caller", capture_reaper_prompt)
 
     client = TestClient(app)
     ws = client.post(
@@ -4092,8 +3978,10 @@ def test_reaper_prompt_stays_under_hard_budget_with_adversarial_input(
     assert response.status_code == 201
     run = response.json()
     assert run["prompt_version"] == FEEDBACK_SUMMARY_PROMPT_VERSION
-    assert sent_messages
-    reaper_prompt = sent_messages[-1][1]
+    assert run["task_id"] is None
+    assert sent_messages == []
+    assert captured_prompts
+    reaper_prompt = captured_prompts[-1]
     store = workspace_manager._feedback_store()
     # Hard budget honored.
     assert len(reaper_prompt) <= store.REAPER_PROMPT_HARD_CHAR_LIMIT, (
@@ -4192,20 +4080,27 @@ def test_lessons_index_filters_by_relevance_without_full_body_leak(
 
     assert cjk_start_response.status_code == 201
     cjk_started_task = cjk_start_response.json()
-    assert cjk_started_task["feedback_lesson_ids"] == []
+    assert cjk_started_task["feedback_lesson_ids"] == ["image-workflow-docs-first"]
     cjk_prompt = sent_messages[-1][1]
-    assert "Relevant lessons" in cjk_prompt
+    assert "Workspace execution guardrails" in cjk_prompt
     assert "image-workflow-docs-first" in cjk_prompt
-    # Irrelevant lesson should NOT appear in relevance-filtered index.
+    # Irrelevant lesson MUST NOT appear in relevance-filtered inline block.
     assert "market-data-symbols" not in cjk_prompt
     assert "图片生成先读文档" in cjk_prompt
     assert "Market data CLI uses comma-separated symbols" not in cjk_prompt
-    assert "先检查仓库工作流文档和已有运行记录。" not in cjk_prompt
+    # Relevant lesson actionable guardrails ARE inlined directly.
+    assert "先检查仓库工作流文档和已有运行记录。" in cjk_prompt
+    assert "不要只看原始提示词就开始生成。" in cjk_prompt
     assert "Use --symbols AAPL,MSFT." not in cjk_prompt
     assert "Do not pass symbols as separate arguments." not in cjk_prompt
-    assert "不要只看原始提示词就开始生成。" not in cjk_prompt
     assert "lessons-catalog.md" not in cjk_prompt
     assert "/api/workspaces/" in cjk_prompt
+    assert (
+        workspace_manager._feedback_store()
+        .get_lesson(cjk_workspace["id"], "image-workflow-docs-first")
+        .hit_count
+        == 1
+    )
 
     emoji_workspace = client.post(
         "/api/workspaces",
@@ -4245,7 +4140,9 @@ def test_lessons_index_filters_by_relevance_without_full_body_leak(
     emoji_started_task = emoji_start_response.json()
     assert emoji_started_task["feedback_lesson_ids"] == []
     emoji_prompt = sent_messages[-1][1]
-    assert "Workspace lessons: none active for this workspace" in emoji_prompt
+    # Zero characters injected when no lesson matches!
+    assert "Workspace execution guardrails" not in emoji_prompt
+    assert "Workspace lessons:" not in emoji_prompt
     assert "Relevant lessons" not in emoji_prompt
     assert "emoji-only-workspace-lesson" not in emoji_prompt
     assert "Apply the documented emoji formatting rules." not in emoji_prompt

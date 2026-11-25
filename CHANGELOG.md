@@ -7,6 +7,13 @@
 
 ## Released
 
+### feat(feedback): replace board reaper task with silent turn and inline bilingual top-3 lessons
+
+- Replace board-visible `WorkspaceTask(internal_kind="feedback_reaper")` dispatch with a single-flight silent background ephemeral Chat turn using public-safe MASO catalog selection (`CLAUDE_HUB_FEEDBACK_MODEL` / `CLAUDE_HUB_PATROL_MODEL` / advertised lightweight high-reasoning model) with read-only CLI fallback and guaranteed ephemeral session archival.
+- Retire leftover unfinished legacy `feedback_reaper` board tasks automatically on workspace load and hide legacy reaper entries from Kanban board views without breaking history serialization.
+- Align workspace lesson retrieval tokenization with overlapping 2-character CJK bigrams plus ASCII path/identifier tokens, require concise bilingual tags for non-English evidence, and inline actionable `applies_when` / `do` / `avoid` fields directly for at most Top-3 high-confidence relevant lessons (`<= 1,200` chars; `0` chars when irrelevant) across worker assignment, reviewer, and strict-review prompts with `(lesson_id, task_id)`-deduplicated hit and completion success tracking.
+- Polish `claude-hub lessons create` to auto-derive `--summary` from `--title` + `--do` and allow direct CLI/API persistence without `--evidence-task-id`, and update `lessons summarize` and frontend feedback status presentation for silent background runs.
+
 ### fix(dot): prevent session pack mid-card truncation and add recipe acceptance checklists
 
 - Compact `TOOL_GUIDE`, rebalance session pack budgets, and fit every section by whole lines so user preference and concept cards never truncate mid-line and `session_pack_cuts` reflects actual omissions.

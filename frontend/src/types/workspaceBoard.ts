@@ -110,6 +110,8 @@ export interface FeedbackSummaryRun {
   created_lesson_ids: string[]
   merged_lesson_ids: string[]
   skipped_reason?: string | null
+  running?: boolean
+  error?: string | null
   created_at: string
   completed_at?: string | null
 }

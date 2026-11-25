@@ -265,20 +265,10 @@ class _WorkspaceBoardMixin(_WorkspaceManagerBase):
         await self._prune_orphan_workspace_tabs(workspace_id)
         self._sync_workspace_tab_metadata(workspace_id)
         tasks = [
-            (
-                task.model_copy(
-                    update={
-                        "prompt": (
-                            "System-managed Feedback Reaper task. Inspect its reports and "
-                            "summary-run audit for lifecycle details."
-                        )
-                    }
-                )
-                if task.system_internal and task.internal_kind == "feedback_reaper"
-                else task
-            )
+            task
             for task in self.tasks.values()
             if task.workspace_id == workspace_id
+            and not (task.system_internal and task.internal_kind == "feedback_reaper")
         ]
 
         from claude_hub.services.board_pagination import paginate_board_tasks
@@ -318,20 +308,10 @@ class _WorkspaceBoardMixin(_WorkspaceManagerBase):
         for ws in workspaces:
             self._reconcile_natural_done_signals(ws.id)
             ws_tasks = [
-                (
-                    task.model_copy(
-                        update={
-                            "prompt": (
-                                "System-managed Feedback Reaper task. Inspect its reports and "
-                                "summary-run audit for lifecycle details."
-                            )
-                        }
-                    )
-                    if task.system_internal and task.internal_kind == "feedback_reaper"
-                    else task
-                )
+                task
                 for task in self.tasks.values()
                 if task.workspace_id == ws.id
+                and not (task.system_internal and task.internal_kind == "feedback_reaper")
             ]
             page_tasks, _ = paginate_board_tasks(ws_tasks, limit=done_per_workspace, cursor=None)
             lifecycles = self.task_lifecycles(page_tasks)

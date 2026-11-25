@@ -536,13 +536,16 @@ class FeedbackPersistenceStore(object):
         source_record_ids: list[str],
         confidence: float | None,
         enforce_iteration_signal: bool = True,
+        allow_manual_without_evidence: bool = False,
     ) -> float | None:
         """Enforce the workspace lesson contract; return a (possibly capped) confidence.
 
         Always-on rules:
         - applies_when must contain at least one condition.
         - do and avoid must be non-empty after stripping.
-        - evidence_task_ids must cite at least one task.
+        - Automated creation requires evidence_task_ids or verified chat-* source_record_ids;
+          explicit manual/CLI creation may omit evidence_task_ids when allow_manual_without_evidence
+          is True, while still validating any cited evidence_task_ids or chat-* records.
 
         Iteration-signal rules (skipped only when enforce_iteration_signal is False,
         which is reserved for human-confirmed manual reaper flows):
@@ -574,7 +577,7 @@ class FeedbackPersistenceStore(object):
                 raise FeedbackLessonValidationError(
                     f"no verified Chat correction record in this workspace: {record_id}"
                 ) from exc
-        if not evidence_task_ids and not correction_ids:
+        if not evidence_task_ids and not correction_ids and not allow_manual_without_evidence:
             raise FeedbackLessonValidationError(
                 "evidence_task_ids must cite at least one task that supports the lesson"
             )

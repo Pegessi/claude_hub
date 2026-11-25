@@ -60,7 +60,19 @@
         <p>{{ feedbackSummaryDescription(lastFeedbackSummaryRun) }}</p>
         <div class="summary-run-meta">
           <span>{{ lastFeedbackSummaryRun.mode }}</span>
-          <span>{{ lastFeedbackSummaryRun.cache_hit ? 'cache hit' : 'AI queued' }}</span>
+          <span>
+            {{
+              lastFeedbackSummaryRun.cache_hit
+                ? 'cache hit'
+                : lastFeedbackSummaryRun.running
+                  ? 'running in background'
+                  : lastFeedbackSummaryRun.error
+                    ? 'failed'
+                    : lastFeedbackSummaryRun.task_id
+                      ? 'AI queued'
+                      : 'completed'
+            }}
+          </span>
           <span v-if="lastFeedbackSummaryRun.input_record_ids.length">
             {{ lastFeedbackSummaryRun.input_record_ids.length }} records
           </span>

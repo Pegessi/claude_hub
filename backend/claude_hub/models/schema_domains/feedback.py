@@ -198,5 +198,7 @@ class FeedbackSummaryRun(BaseModel):
     created_lesson_ids: List[str] = Field(default_factory=list)
     merged_lesson_ids: List[str] = Field(default_factory=list)
     skipped_reason: Optional[str] = None
+    running: bool = False
+    error: Optional[str] = None
     created_at: datetime
     completed_at: Optional[datetime] = None

@@ -309,38 +309,71 @@ class _AssignmentPromptsMixin(_BootstrapPromptsMixin):
             query,
         )
 
-    def _lesson_context_block(self, workspace: Workspace, query: str) -> str:
+    def _lesson_context_block(
+        self,
+        workspace: Workspace,
+        query: str,
+        *,
+        role: str = "worker",
+    ) -> str:
         return self._lesson_context_block_from_payload(
             self._lesson_context_payload(workspace, query),
             workspace_id=workspace.id,
+            role=role,
         )
 
     def _lesson_context_block_from_payload(
         self,
-        lessons: list[dict[str, Any]],
+        lessons: list[dict[str, Any]] | None,
         *,
         workspace_id: str | None = None,
+        role: str = "worker",
     ) -> str:
-        if not lessons:
-            return (
-                "Workspace lessons: none active for this workspace. "
-                "State 'no lessons needed' in your report risks field.\n\n"
+        from claude_hub.services.feedback.common import render_inline_lessons_block
+
+        return render_inline_lessons_block(
+            lessons,
+            workspace_id=workspace_id,
+            role=role,
+        )
+
+    def _record_inlined_lesson_hits(
+        self,
+        task: WorkspaceTask,
+        lesson_context: list[dict[str, Any]] | None,
+        *,
+        now: datetime | None = None,
+    ) -> list[str]:
+        from claude_hub.services.feedback.common import INLINE_LESSONS_MAX_COUNT
+
+        if not lesson_context or not isinstance(lesson_context, list):
+            return []
+        lesson_ids: list[str] = []
+        for item in lesson_context:
+            if not isinstance(item, dict):
+                continue
+            lid = str(item.get("id") or "").strip()
+            if lid and lid not in lesson_ids:
+                lesson_ids.append(lid)
+            if len(lesson_ids) >= INLINE_LESSONS_MAX_COUNT:
+                break
+        if not lesson_ids:
+            return []
+        try:
+            self._feedback_store().record_lesson_hit(
+                task.workspace_id,
+                lesson_ids,
+                task_id=task.id,
+                now=now or self._runtime_now(),
             )
-        lines: list[str] = []
-        lines.append("Relevant lessons (id | title | tags | conf):")
-        for lesson in lessons:
-            tags = ",".join(lesson.get("tags", [])[:4]) or "—"
-            conf = lesson.get("confidence")
-            conf_str = f"{conf:.2f}" if isinstance(conf, (int, float)) else "?"
-            title = lesson["title"]
-            if len(title) > 50:
-                title = title[:47] + "..."
-            lines.append(f"- `{lesson['id']}` | {title} | [{tags}] c={conf_str}")
-        if workspace_id:
-            lines.append(f"Full detail: GET /api/workspaces/{workspace_id}/lessons/<id>")
-        lines.append("Apply only relevant lessons; list IDs used (or 'none') in report risks.")
-        lines.append("")
-        return "\n".join(lines)
+        except Exception:
+            logger.debug(
+                "Skipping feedback lesson hit recording workspace_id=%s task_id=%s",
+                task.workspace_id,
+                task.id,
+                exc_info=True,
+            )
+        return lesson_ids
 
     def _record_feedback_lesson_injection(
         self,

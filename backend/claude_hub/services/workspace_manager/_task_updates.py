@@ -443,10 +443,10 @@ class _TaskUpdatesMixin(_WorkspaceManagerBase):
                                 tab_id,
                             )
                 if task.feedback_lesson_ids:
-                    self._feedback_store().increment_lesson_usage(
+                    self._feedback_store().record_lesson_success(
                         task.workspace_id,
                         list(task.feedback_lesson_ids),
-                        success=True,
+                        task_id=task.id,
                         now=now,
                     )
                 if current.infowall_demand_id:

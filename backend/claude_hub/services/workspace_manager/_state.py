@@ -95,6 +95,9 @@ class _StateMixin(_WorkspaceManagerBase):
         self._dispatch_locks: dict[str, asyncio.Lock] = {}
         self._task_start_locks: dict[str, asyncio.Lock] = {}
         self._feedback_summary_locks: dict[str, asyncio.Lock] = {}
+        self._feedback_reaper_jobs: dict[str, asyncio.Task[Any]] = {}
+        self._feedback_reaper_active_runs: dict[str, Any] = {}
+        self._feedback_reaper_caller: Callable[[str, str], Any] | None = None
         # Per-session pump locks: serialize _pump_session_messages so two
         # concurrent pump cycles cannot both send the same pending call_id
         # to tmux (which would duplicate the model turn).
@@ -214,12 +217,90 @@ class _StateMixin(_WorkspaceManagerBase):
         # For STOPPED sessions the tmux inbox is gone and we cannot query the
         # receipt, so we fail closed: move processing call_ids to uncertain.
         self._recover_uncertain_deliveries()
+        self._cleanup_legacy_feedback_reaper_tasks()
 
         # A snapshot may be absent/stale after a crash or a derived-output failure.
         # Rebuild from committed files only; never save mutable state to refresh a cache.
         for workspace_id in self.workspaces:
             if document_exists(self._workspace_state_file(workspace_id)):
                 self._refresh_snapshot_best_effort(workspace_id)
+
+    def _cleanup_legacy_feedback_reaper_tasks(self) -> int:
+        """Retire leftover legacy unfinished ``feedback_reaper`` board tasks on load.
+
+        Silent background turns replaced board-visible ``feedback_reaper`` tasks.
+        Any stuck legacy Todo/Queued/Working/Review/Failed reaper card from an
+        older state.json is cleanly transitioned to DONE, its session pointers
+        released, and its pending stage abandoned without breaking history
+        serialization.
+        """
+        from ...models import AgentRuntimeStatus, WorkspaceTaskStatus
+        from ..task_transitions import apply_task_update
+
+        now = self._runtime_now()
+        store = self._feedback_store()
+        cleaned = 0
+        cleaned_workspaces: set[str] = set()
+        for task_id, task in list(self.tasks.items()):
+            if not (
+                task.system_internal
+                and task.internal_kind == "feedback_reaper"
+                and task.status != WorkspaceTaskStatus.DONE
+            ):
+                continue
+            for session_id, session in list(self.sessions.items()):
+                if session.task_id != task_id and session.current_task_id != task_id:
+                    continue
+                session_update: dict[str, Any] = {"updated_at": now}
+                if session.task_id == task_id:
+                    session_update["task_id"] = None
+                if session.current_task_id == task_id:
+                    session_update["current_task_id"] = None
+                if session.status == ManagedSessionStatus.WORKING:
+                    session_update["status"] = ManagedSessionStatus.IDLE
+                    session_update["runtime_status"] = AgentRuntimeStatus.IDLE
+                self.sessions[session_id] = session.model_copy(update=session_update)
+            try:
+                store.abandon_summary_run(
+                    task.workspace_id,
+                    task_id,
+                    reason="legacy_reaper_retired",
+                    now=now,
+                )
+            except OSError:
+                logger.warning(
+                    "Failed to abandon legacy feedback reaper summary run workspace_id=%s task_id=%s",
+                    task.workspace_id,
+                    task_id,
+                    exc_info=True,
+                )
+            self.tasks[task_id] = apply_task_update(
+                task,
+                {
+                    "status": WorkspaceTaskStatus.DONE,
+                    "session_id": None,
+                    "review_session_id": None,
+                    "dispatch_pending": False,
+                    "review_skipped_at": task.review_skipped_at or now,
+                    "review_skip_reason": (
+                        "Retired legacy Feedback Reaper board task "
+                        "(replaced by silent background reaper)."
+                    ),
+                    "completed_at": task.completed_at or now,
+                    "updated_at": now,
+                },
+                cause="feedback_reaper",
+            )
+            cleaned += 1
+            cleaned_workspaces.add(task.workspace_id)
+        if cleaned:
+            logger.info(
+                "Retired %d legacy unfinished feedback_reaper board task(s) on load", cleaned
+            )
+            for workspace_id in cleaned_workspaces:
+                if document_exists(self._workspace_state_file(workspace_id)):
+                    self._save_workspace_state(workspace_id)
+        return cleaned
 
     def _recover_uncertain_deliveries(self) -> None:
         """Cold-start delivery recovery.

@@ -504,7 +504,7 @@ async def summarize_feedback_lessons(
     payload: FeedbackSummaryRequest | None = None,
     current_user: User = Depends(get_current_user),
 ) -> FeedbackSummaryRun:
-    """Queue or return the visible managed Feedback Reaper task for this workspace."""
+    """Start or return the in-flight silent background Feedback Reaper run for this workspace."""
     try:
         return await workspace_manager.summarize_workspace_feedback(
             workspace_id,

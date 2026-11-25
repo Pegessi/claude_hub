@@ -79,7 +79,11 @@ def lessons_get(ctx: click.Context, workspace_id: str, lesson_id: str) -> None:
 
 @lessons.command("create")
 @click.argument("workspace_id")
-@click.option("--summary", required=True, help="Lesson summary.")
+@click.option(
+    "--summary",
+    default=None,
+    help="Lesson summary (auto-derived from --title and --do when omitted).",
+)
 @click.option("--title", default=None, help="Lesson title.")
 @click.option("--fingerprint", default=None, help="Stable lesson fingerprint.")
 @click.option("--applies-when", "applies_when", multiple=True, help="Applicability note.")
@@ -101,19 +105,19 @@ def lessons_get(ctx: click.Context, workspace_id: str, lesson_id: str) -> None:
 def lessons_create(
     ctx: click.Context,
     workspace_id: str,
-    summary: str,
-    title: str,
-    fingerprint: str,
+    summary: str | None,
+    title: str | None,
+    fingerprint: str | None,
     applies_when: tuple,
-    do_text: str,
-    avoid: str,
+    do_text: str | None,
+    avoid: str | None,
     tags: tuple,
-    scope: str,
+    scope: str | None,
     source_draft_ids: tuple,
     source_record_ids: tuple,
     evidence_task_ids: tuple,
-    confidence: float,
-    payload_json: str,
+    confidence: float | None,
+    payload_json: str | None,
 ) -> None:
     """Create or promote an active feedback lesson."""
     body = merge_payload(
@@ -131,6 +135,17 @@ def lessons_create(
         evidence_task_ids=evidence_task_ids,
         confidence=confidence,
     )
+    resolved_summary = str(body.get("summary") or "").strip()
+    if not resolved_summary:
+        resolved_title = str(body.get("title") or "").strip()
+        resolved_do = str(body.get("do") or "").strip()
+        if resolved_title and resolved_do:
+            derived = f"{resolved_title.rstrip('.')} — {resolved_do}"
+            body["summary"] = derived[:200]
+        else:
+            raise click.ClickException(
+                "--summary is required unless both --title and --do are provided."
+            )
     try:
         with cli_main.get_client(ctx) as client:
             data = client.create_lesson(workspace_id, body)
@@ -152,20 +167,20 @@ def lessons_create(
 @click.option(
     "--clear-context/--no-clear-context",
     default=None,
-    help="Clear reaper context before summarizing.",
+    help="Legacy flag accepted for compatibility (silent runs always use a fresh ephemeral turn).",
 )
 @click.option("--payload-json", default=None, help="Raw JSON object merged into the body.")
 @click.pass_context
 def lessons_summarize(
     ctx: click.Context,
     workspace_id: str,
-    mode: str,
-    limit: int,
-    force: bool,
-    clear_context: bool,
-    payload_json: str,
+    mode: str | None,
+    limit: int | None,
+    force: bool | None,
+    clear_context: bool | None,
+    payload_json: str | None,
 ) -> None:
-    """Queue workspace lesson summarization."""
+    """Trigger silent background workspace lesson summarization."""
     body = merge_payload(
         payload_json,
         mode=mode,

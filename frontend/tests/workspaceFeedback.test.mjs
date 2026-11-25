@@ -49,20 +49,42 @@ test('lesson labels retain title, first sentence, description, and tag fallback 
   assert.deepEqual(lessonTags(lesson('tags')), [])
 })
 
-test('summary task id takes priority over skip reasons and cache status', () => {
-  const run = { task_id: 'summary-task', skipped_reason: 'no_new_task_records', cache_hit: true }
-  assert.equal(feedbackSummaryTone(run), 'queued')
-  assert.equal(feedbackSummaryTitle(run), 'Internal AI summary queued')
-  assert.equal(feedbackSummaryDescription(run), 'A hidden Feedback Reaper task was started. It will update lessons and write audit evidence when it finishes.')
+test('summary running and legacy task id take priority over skip reasons and cache status', () => {
+  const running = { running: true, task_id: null, skipped_reason: 'no_new_task_records', cache_hit: true }
+  assert.equal(feedbackSummaryTone(running), 'queued')
+  assert.equal(feedbackSummaryTitle(running), 'Silent AI summary running')
+  assert.equal(
+    feedbackSummaryDescription(running),
+    'A silent background Feedback Reaper run was started. It will distill lessons in the background without adding a task card to the board.',
+  )
+
+  const legacy = { task_id: 'summary-task', skipped_reason: 'no_new_task_records', cache_hit: true }
+  assert.equal(feedbackSummaryTone(legacy), 'queued')
+  assert.equal(feedbackSummaryTitle(legacy), 'Internal AI summary queued')
+  assert.equal(
+    feedbackSummaryDescription(legacy),
+    'A legacy Feedback Reaper task was started. It will update lessons and write audit evidence when it finishes.',
+  )
 })
 
-test('summary empty, skipped, cached, and recorded variants retain their wording', () => {
+test('summary failed, empty, skipped, cached, and recorded variants retain their wording', () => {
+  const failed = { running: false, error: 'provider unavailable' }
+  assert.equal(feedbackSummaryTone(failed), 'skipped')
+  assert.equal(feedbackSummaryTitle(failed), 'Summary failed')
+  assert.equal(
+    feedbackSummaryDescription(failed),
+    'The background feedback summary failed without modifying the board: provider unavailable.',
+  )
+
   const empty = { skipped_reason: 'no_new_task_records' }
   assert.equal(feedbackSummaryTone(empty), 'skipped')
   assert.equal(feedbackSummaryTitle(empty), 'No new task records')
-  assert.equal(feedbackSummaryDescription(empty), 'No completed task records are available or changed, so no internal AI task was started. Force AI run can reprocess cached records once this workspace has records.')
+  assert.equal(
+    feedbackSummaryDescription(empty),
+    'No completed task records are available or changed, so no background AI summary was started. Force AI run can reprocess cached records once this workspace has records.',
+  )
   assert.equal(feedbackSummaryTitle({ skipped_reason: 'blocked' }), 'Summary skipped')
-  assert.equal(feedbackSummaryDescription({ skipped_reason: 'blocked' }), 'No internal AI task was started: blocked.')
+  assert.equal(feedbackSummaryDescription({ skipped_reason: 'blocked' }), 'No background AI summary was started: blocked.')
   assert.equal(feedbackSummaryTone({ cache_hit: true }), 'skipped')
   assert.equal(feedbackSummaryTitle({ cache_hit: true }), 'Summary recorded')
   assert.equal(feedbackSummaryTone({}), 'done')

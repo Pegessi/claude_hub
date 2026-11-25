@@ -19,6 +19,10 @@ from claude_hub.services.feedback.common import (
     _LESSON_MAX_TITLE,
     FEEDBACK_INDEX_SCHEMA_VERSION,
     FEEDBACK_SUMMARY_PROMPT_VERSION,
+    INLINE_LESSON_MIN_CONFIDENCE,
+    INLINE_LESSON_MIN_RELEVANCE,
+    INLINE_LESSONS_MAX_CHARS,
+    INLINE_LESSONS_MAX_COUNT,
     MULTI_EVIDENCE_CONFIDENCE_CAP,
     SINGLE_EVIDENCE_CONFIDENCE_CAP,
     AgentReport,
@@ -47,6 +51,7 @@ from claude_hub.services.feedback.common import (
     _slug,
     _TaskIterationSignal,
     _tokens,
+    render_inline_lessons_block,
 )
 from claude_hub.services.feedback.store import FeedbackLessonStore as _FeedbackLessonStore
 

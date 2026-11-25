@@ -268,6 +268,20 @@ class _ReportReviewRequestMixin(_AutonomousReportMixin):
                     lesson_context=lesson_context,
                 ),
             )
+            live_after_send = self.tasks.get(task.id)
+            if live_after_send is not None:
+                matched_lesson_ids = self._record_inlined_lesson_hits(
+                    live_after_send, lesson_context, now=self._runtime_now()
+                )
+                if matched_lesson_ids:
+                    merged_lesson_ids = list(
+                        dict.fromkeys([*live_after_send.feedback_lesson_ids, *matched_lesson_ids])
+                    )
+                    if merged_lesson_ids != live_after_send.feedback_lesson_ids:
+                        self.tasks[task.id] = live_after_send.model_copy(
+                            update={"feedback_lesson_ids": merged_lesson_ids}
+                        )
+                        self._save_state()
         except Exception as exc:
             logger.exception(
                 "Failed to dispatch workspace review prompt task_id=%s reviewer_id=%s",

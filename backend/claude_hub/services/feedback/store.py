@@ -418,6 +418,27 @@ class FeedbackLessonStore(FeedbackLessonCatalogStore):
         _, run = self._find_summary_run_by_task(workspace_id, task_id)
         return run
 
+    def summary_run_by_id(
+        self,
+        workspace_id: str,
+        run_id: str,
+    ) -> FeedbackSummaryRun | None:
+        """Return a persisted summary run by its run id."""
+
+        directory = self._summary_runs_dir(workspace_id)
+        if not directory.exists():
+            return None
+        for path in sorted(directory.glob("*.json"), reverse=True):
+            if path.name.endswith(".pending.json"):
+                continue
+            try:
+                run = FeedbackSummaryRun(**json.loads(path.read_text(encoding="utf-8")))
+            except Exception:
+                continue
+            if run.id == run_id:
+                return run
+        return None
+
     def abandon_summary_run(
         self,
         workspace_id: str,

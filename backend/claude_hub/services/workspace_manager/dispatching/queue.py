@@ -272,11 +272,16 @@ class _DispatchQueueMixin(_WorkspaceManagerBase):
                 continue
             task = current
             now = self._runtime_now()
+            matched_lesson_ids = self._record_inlined_lesson_hits(task, lesson_context, now=now)
+            merged_lesson_ids = list(
+                dict.fromkeys([*task.feedback_lesson_ids, *matched_lesson_ids])
+            )
             self.tasks[task.id] = apply_task_update(
                 task,
                 {
                     "status": WorkspaceTaskStatus.WORKING,
                     "session_id": task.session_id or session.id,
+                    "feedback_lesson_ids": merged_lesson_ids,
                     "started_at": task.started_at or now,
                     "updated_at": now,
                 },

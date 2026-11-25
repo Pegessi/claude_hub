@@ -37,6 +37,9 @@ class FeedbackAutomationState(BaseModel):
     last_run_id: str | None = None
     last_outcome: str = "initialized_fresh_only"
     scan_cursor: str = ""
+    last_summarized_at: datetime | None = None
+    last_error: str | None = None
+    running: bool = False
 
 
 class ChatCorrectionCreate(BaseModel):

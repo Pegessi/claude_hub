@@ -2,14 +2,19 @@ import type { FeedbackLesson, FeedbackSummaryRun, WorkspaceTask } from '@/types'
 
 function feedbackTokens(value: string): Set<string> {
   const text = value.toLowerCase()
-  const tokens = new Set(text.match(/[a-z0-9_.-]{2,}/g) || [])
-  const cjkChunks = text.match(/\p{Script=Han}+/gu) || []
+  const tokens = new Set<string>()
+  const asciiMatches = text.match(/[a-z0-9][a-z0-9._/-]*/g) || []
+  asciiMatches.forEach((raw) => {
+    const cleaned = raw.replace(/^[._/-]+|[._/-]+$/g, '')
+    if (cleaned.length >= 2) tokens.add(cleaned)
+    cleaned.split(/[._/-]+/).forEach((part) => {
+      if (part.length >= 2) tokens.add(part)
+    })
+  })
+  const cjkChunks = text.match(/\p{Script=Han}{2,}/gu) || []
   cjkChunks.forEach((chunk) => {
-    for (const size of [2, 3]) {
-      if (chunk.length < size) continue
-      for (let index = 0; index <= chunk.length - size; index += 1) {
-        tokens.add(chunk.slice(index, index + size))
-      }
+    for (let index = 0; index <= chunk.length - 2; index += 1) {
+      tokens.add(chunk.slice(index, index + 2))
     }
   })
   return tokens
@@ -63,27 +68,35 @@ export function lessonTags(lesson: FeedbackLesson): string[] {
 }
 
 export function feedbackSummaryTone(run: FeedbackSummaryRun): 'queued' | 'skipped' | 'done' {
-  if (run.task_id) return 'queued'
-  if (run.cache_hit || run.skipped_reason) return 'skipped'
+  if (run.running || run.task_id) return 'queued'
+  if (run.error || run.cache_hit || run.skipped_reason) return 'skipped'
   return 'done'
 }
 
 export function feedbackSummaryTitle(run: FeedbackSummaryRun): string {
+  if (run.running) return 'Silent AI summary running'
   if (run.task_id) return 'Internal AI summary queued'
+  if (run.error) return 'Summary failed'
   if (run.skipped_reason === 'no_new_task_records') return 'No new task records'
   if (run.skipped_reason) return 'Summary skipped'
   return 'Summary recorded'
 }
 
 export function feedbackSummaryDescription(run: FeedbackSummaryRun): string {
+  if (run.running) {
+    return 'A silent background Feedback Reaper run was started. It will distill lessons in the background without adding a task card to the board.'
+  }
   if (run.task_id) {
-    return 'A hidden Feedback Reaper task was started. It will update lessons and write audit evidence when it finishes.'
+    return 'A legacy Feedback Reaper task was started. It will update lessons and write audit evidence when it finishes.'
+  }
+  if (run.error) {
+    return `The background feedback summary failed without modifying the board: ${run.error}.`
   }
   if (run.skipped_reason === 'no_new_task_records') {
-    return 'No completed task records are available or changed, so no internal AI task was started. Force AI run can reprocess cached records once this workspace has records.'
+    return 'No completed task records are available or changed, so no background AI summary was started. Force AI run can reprocess cached records once this workspace has records.'
   }
   if (run.skipped_reason) {
-    return `No internal AI task was started: ${run.skipped_reason}.`
+    return `No background AI summary was started: ${run.skipped_reason}.`
   }
   return 'The feedback summary run was recorded.'
 }
