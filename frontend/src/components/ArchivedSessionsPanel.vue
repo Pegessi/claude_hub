@@ -180,6 +180,16 @@ function handleKeydown(event: KeyboardEvent) {
   if (event.key === 'Escape') emit('close')
 }
 
+watch(
+  () => archivedManagedTabs.value.length,
+  count => {
+    if (count === 0 && archiveScope.value === 'workspace') {
+      archiveScope.value = 'personal'
+      confirmDeleteId.value = null
+    }
+  }
+)
+
 // Load the archived list whenever the panel opens, and wire Esc-to-close.
 watch(
   () => props.open,

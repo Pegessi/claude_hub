@@ -108,6 +108,8 @@ test('list shows Active first and a collapsible Earlier with unified View action
   assert.match(rows, /\.subagent-summary \{[\s\S]*?grid-column: 2;[\s\S]*?grid-row: 2;/)
   assert.match(rows, /\.subagent-time \{[\s\S]*?grid-column: 3;[\s\S]*?grid-row: 1;[\s\S]*?justify-self: end;/)
   assert.match(rows, /\.subagent-action \{[\s\S]*?grid-column: 3;[\s\S]*?grid-row: 2;[\s\S]*?justify-self: end;/)
+  assert.match(rows, /\.subagent-line\.span-aside \{[\s\S]*?grid-column: 2 \/ -1;/)
+  assert.match(rows, /\.subagent-summary\.span-aside \{[\s\S]*?grid-column: 2 \/ -1;/)
   // Narrow right-gutter rail hides View with opacity rather than display: none
   // so hovering never shifts the row layout horizontally.
   assert.match(dockPill, /\.subagent-rail :deep\(\.subagent-action\) \{[\s\S]*?opacity: 0;/)

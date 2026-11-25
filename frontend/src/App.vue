@@ -202,7 +202,7 @@ import { useAppStore } from '@/stores/appStore'
 import { useTerminalStore } from '@/stores/terminalStore'
 import { useAuthStore } from '@/stores/authStore'
 import { parseTabDeepLink, stripTabDeepLink } from '@/utils/deepLink'
-import { isAttachmentNavigation } from '@/utils/attachmentHistory'
+import { hasActiveAttachmentPreview, isAttachmentNavigation } from '@/utils/attachmentHistory'
 import { isMobileOrCoarseViewport, MODAL_SURFACE_SELECTOR, syncModalViewportScroll } from '@/utils/mobileInputFocus'
 import { useViewport } from '@/composables/useViewport'
 
@@ -237,6 +237,15 @@ async function retryCheckAuth() {
   }
 }
 
+function clearStaleTabQueryParam(tabId: string | null = activePane.value?.tabId || null) {
+  if (!initialDeepLinkResolved || resolvingDeepLink || typeof window === 'undefined') return
+  if (hasActiveAttachmentPreview()) return
+  const linkedTabId = parseTabDeepLink(window.location.search)
+  if (linkedTabId && linkedTabId !== tabId) {
+    clearTabQueryParam()
+  }
+}
+
 // Expose active pane tab ID for mobile controls, and clear stale ?tab= deep
 // link parameters once the user (or background retirement) moves away from the
 // deep-linked tab so a later refresh never re-triggers an old tab/unarchive.
@@ -244,12 +253,7 @@ watch(() => activePane.value?.tabId || null, (tabId) => {
   if (typeof window !== 'undefined') {
     window.__claudeHub.activePaneTabId = tabId
   }
-  if (!initialDeepLinkResolved || resolvingDeepLink || typeof window === 'undefined') return
-  if (window.history.state?.attachmentPreview) return
-  const linkedTabId = parseTabDeepLink(window.location.search)
-  if (linkedTabId && linkedTabId !== tabId) {
-    clearTabQueryParam()
-  }
+  clearStaleTabQueryParam(tabId)
 }, { immediate: true })
 
 // ---- Mobile viewport sync with visualViewport API ----
@@ -540,7 +544,12 @@ async function runDeepLink() {
 }
 
 function handleHistoryNavigation(event: PopStateEvent) {
-  if (isAttachmentNavigation(event)) return
+  if (isAttachmentNavigation(event)) {
+    // If the active tab changed while an attachment preview held the URL,
+    // clean the stale ?tab= once the preview entry exits.
+    clearStaleTabQueryParam()
+    return
+  }
   void runDeepLink()
 }
 

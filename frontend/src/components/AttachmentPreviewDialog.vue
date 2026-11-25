@@ -24,7 +24,12 @@
 import { onBeforeUnmount, ref, watch } from 'vue'
 import AttachmentViewer from '@/components/AttachmentViewer.vue'
 import type { AttachmentTarget } from '@/composables/useAttachmentPreview'
-import { backFromAttachmentPreview, markAttachmentNavigation } from '@/utils/attachmentHistory'
+import {
+  backFromAttachmentPreview,
+  markAttachmentNavigation,
+  registerActiveAttachmentPreview,
+  unregisterActiveAttachmentPreview,
+} from '@/utils/attachmentHistory'
 
 const props = defineProps<{ target: AttachmentTarget | null; canGoBack: boolean }>()
 const emit = defineEmits<{ close: []; back: [] }>()
@@ -39,6 +44,7 @@ function onPopState(event: PopStateEvent) {
   markAttachmentNavigation(event, previewUrl)
   ownsHistory = false
   closing = false
+  unregisterActiveAttachmentPreview(marker)
   if (dialog.value?.open) dialog.value.close()
   emit('close')
 }
@@ -50,6 +56,7 @@ function requestClose() {
     closing = false
   }
   ownsHistory = false
+  unregisterActiveAttachmentPreview(marker)
   if (dialog.value?.open) dialog.value.close()
   emit('close')
 }
@@ -64,6 +71,7 @@ function release() {
   const goBack = ownsHistory && !closing
   ownsHistory = false
   closing = false
+  unregisterActiveAttachmentPreview(marker)
   if (goBack) backFromAttachmentPreview(marker, previewUrl)
 }
 // Mark preview departures before App's ordinary bubbling routing listener runs.
@@ -77,6 +85,7 @@ watch(() => Boolean(props.target), (open) => {
     previewUrl = window.location.href
     window.history.pushState({ ...window.history.state, attachmentPreview: marker, attachmentPreviewUrl: previewUrl }, '')
     ownsHistory = true
+    registerActiveAttachmentPreview(marker)
   }
 }, { flush: 'post' })
 onBeforeUnmount(() => {

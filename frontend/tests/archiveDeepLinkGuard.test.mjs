@@ -35,20 +35,37 @@ test('App clears stale ?tab= deep links on failure, not-found, and tab switch wi
   assert.match(appSource, /function clearTabQueryParam\(\)/)
   assert.match(appSource, /stripTabDeepLink\(window\.location\)/)
   assert.match(appSource, /window\.history\.replaceState\(window\.history\.state, '', nextUrl\)/)
-  assert.match(appSource, /if \(window\.history\.state\?\.attachmentPreview\) return/)
+  assert.match(appSource, /if \(hasActiveAttachmentPreview\(\)\) return/)
   assert.match(appSource, /if \(linkedTabId && linkedTabId !== tabId\)/)
+  assert.match(appSource, /if \(isAttachmentNavigation\(event\)\) \{[\s\S]*?clearStaleTabQueryParam\(\)/)
 })
 
-test('App and WorkspaceSummary do not duplicate toast errors in full-width banners', () => {
+test('App and WorkspaceSummary do not duplicate toast errors in full-width banners, and toasts teleport above modals', () => {
   const workspaceSummary = readFileSync(
     new URL('../src/features/workspace/components/WorkspaceSummary.vue', import.meta.url),
     'utf8',
   )
+  const tabBar = readFileSync(
+    new URL('../src/features/terminal/components/TabBar.vue', import.meta.url),
+    'utf8',
+  )
+  const tabBarCss = readFileSync(
+    new URL('../src/features/terminal/styles/tab-bar.css', import.meta.url),
+    'utf8',
+  )
+  const wsNotifs = readFileSync(
+    new URL('../src/features/workspace/components/WorkspaceNotifications.vue', import.meta.url),
+    'utf8',
+  )
   assert.doesNotMatch(appSource, /class="error-banner"/)
   assert.doesNotMatch(workspaceSummary, /class="workspace-error"/)
+  assert.match(tabBar, /<Teleport to="body">[\s\S]*?class="toast-stack"/)
+  assert.match(tabBarCss, /\.toast-stack \{[\s\S]*?z-index:\s*1500;/)
+  assert.match(wsNotifs, /<Teleport to="body">[\s\S]*?class="toast-stack"/)
+  assert.match(wsNotifs, /\.toast-stack \{[\s\S]*?z-index:\s*1500;/)
 })
 
-test('ArchivedSessionsPanel gates close on restore result and separates Personal vs Workspace tabs', () => {
+test('ArchivedSessionsPanel gates close on restore result, separates Personal vs Workspace tabs, and recovers scope when last Workspace tab disappears', () => {
   const panelSource = readFileSync(
     new URL('../src/components/ArchivedSessionsPanel.vue', import.meta.url),
     'utf8',
@@ -56,4 +73,5 @@ test('ArchivedSessionsPanel gates close on restore result and separates Personal
   assert.match(panelSource, /const restored = await unarchiveTab\(tabId\)\s+if \(restored\) emit\('close'\)/)
   assert.match(panelSource, /archivedManualTabs/)
   assert.match(panelSource, /archivedManagedTabs/)
+  assert.match(panelSource, /count === 0 && archiveScope\.value === 'workspace'[\s\S]*?archiveScope\.value = 'personal'/)
 })

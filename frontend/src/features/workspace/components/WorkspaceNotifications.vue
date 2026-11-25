@@ -1,37 +1,39 @@
 <template>
-  <!-- Toast / notification stack for workspace mode -->
-  <div
-    v-if="workspaceNotifications.length"
-    class="toast-stack"
-    role="region"
-    aria-label="Notifications"
-  >
+  <!-- Toast / notification stack for workspace mode (teleported above all modals) -->
+  <Teleport to="body">
     <div
-      v-for="n in workspaceNotifications"
-      :key="n.id"
-      :class="['toast', `toast--${n.type}`]"
-      role="status"
+      v-if="workspaceNotifications.length"
+      class="toast-stack"
+      role="region"
+      aria-label="Notifications"
     >
-      <span
-        class="toast__icon"
-        aria-hidden="true"
-      />
-      <span class="toast__message">{{ n.message }}</span>
-      <button
-        type="button"
-        class="toast__close"
-        :aria-label="'Dismiss ' + n.type + ' notification'"
-        @click="dismissToast(n)"
-      >
-        ×
-      </button>
       <div
-        v-if="n.autoDismissMs"
-        class="toast__timer"
-        :style="{ animationDuration: `${n.autoDismissMs}ms` }"
-      />
+        v-for="n in workspaceNotifications"
+        :key="n.id"
+        :class="['toast', `toast--${n.type}`]"
+        role="status"
+      >
+        <span
+          class="toast__icon"
+          aria-hidden="true"
+        />
+        <span class="toast__message">{{ n.message }}</span>
+        <button
+          type="button"
+          class="toast__close"
+          :aria-label="'Dismiss ' + n.type + ' notification'"
+          @click="dismissToast(n)"
+        >
+          ×
+        </button>
+        <div
+          v-if="n.autoDismissMs"
+          class="toast__timer"
+          :style="{ animationDuration: `${n.autoDismissMs}ms` }"
+        />
+      </div>
     </div>
-  </div>
+  </Teleport>
 </template>
 
 <script setup lang="ts">
@@ -49,7 +51,7 @@ const {
   position: fixed;
   top: 72px;
   right: 16px;
-  z-index: 1000;
+  z-index: 1500;
   display: flex;
   flex-direction: column;
   gap: 8px;

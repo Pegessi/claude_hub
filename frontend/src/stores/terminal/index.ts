@@ -490,12 +490,21 @@ export const useTerminalStore = defineStore('terminal', () => {
     }
   }
 
+  async function findTabMetadata(tabId: string, preferArchived = false): Promise<TerminalTab | undefined> {
+    const lookup = () =>
+      preferArchived
+        ? archivedTabs.value.find(tab => tab.id === tabId) ?? tabs.value.find(tab => tab.id === tabId)
+        : tabs.value.find(tab => tab.id === tabId) ?? archivedTabs.value.find(tab => tab.id === tabId)
+    const cached = lookup()
+    if (cached) return cached
+    await fetchArchivedTabs()
+    return lookup()
+  }
+
   async function deleteTab(tabId: string) {
     isLoading.value = true
     try {
-      const targetTab =
-        tabs.value.find(tab => tab.id === tabId) ??
-        archivedTabs.value.find(tab => tab.id === tabId)
+      const targetTab = await findTabMetadata(tabId)
       const url = resolveTabDeletePath(API_BASE, tabId, targetTab)
       const response = await fetch(url, {
         method: 'DELETE',
@@ -589,9 +598,7 @@ export const useTerminalStore = defineStore('terminal', () => {
   async function unarchiveTab(tabId: string): Promise<boolean> {
     isLoading.value = true
     try {
-      const targetTab =
-        archivedTabs.value.find(tab => tab.id === tabId) ??
-        tabs.value.find(tab => tab.id === tabId)
+      const targetTab = await findTabMetadata(tabId, true)
       const url = resolveTabUnarchivePath(API_BASE, tabId, targetTab)
       const response = await fetch(url, {
         method: 'POST',

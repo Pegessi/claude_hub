@@ -1,5 +1,19 @@
 /** Explicitly distinguish preview history from real Chat navigation. */
 const previewNavigations = new WeakSet<PopStateEvent>()
+const activePreviewMarkers = new Set<string>()
+
+export function registerActiveAttachmentPreview(marker: string): void {
+  if (marker) activePreviewMarkers.add(marker)
+}
+
+export function unregisterActiveAttachmentPreview(marker: string): void {
+  if (marker) activePreviewMarkers.delete(marker)
+}
+
+/** True only while an AttachmentPreviewDialog actively owns a live preview entry. */
+export function hasActiveAttachmentPreview(): boolean {
+  return activePreviewMarkers.size > 0
+}
 
 export function markAttachmentNavigation(event: PopStateEvent, previewUrl: string): void {
   // A multi-entry Back can leave the preview AND navigate to a different Chat.

@@ -176,6 +176,7 @@ test('sidebar defaults to Folders view and manually switches to Status view', as
 
 test('collapsed Needs you auto-expands on new arrival and when switching back to Status view', async t => {
   installBrowser(t)
+  globalThis.document.querySelector = () => null
   const unreadA = { ...testTab, id: 'u-1', name: 'mr 4504 fix', is_unread: true }
   const unreadB = { ...testTab, id: 'u-2', name: 'llmserver bernard', is_unread: true }
   const store = fakeStore()
@@ -209,7 +210,7 @@ test('collapsed Needs you auto-expands on new arrival and when switching back to
   assert.match(header.attributes.title, /Click to collapse/)
   assert.equal(find(needsYouGroup, hasClass('chat-sidebar__group-count--alert')), null)
 
-  // User collapses Needs you -> badge switches to alert pill and title flips to Click to expand.
+  // User collapses Needs you -> badge switches to alert pill (hiddenCount > 0) and title flips to Click to expand.
   header.attributes.onClick()
   await nextTick()
   needsYouGroup = findGroup('status:needs_you')
@@ -217,6 +218,15 @@ test('collapsed Needs you auto-expands on new arrival and when switching back to
   assert.equal(header.attributes['aria-expanded'], false)
   assert.match(header.attributes.title, /Click to expand/)
   assert.ok(find(needsYouGroup, hasClass('chat-sidebar__group-count--alert')))
+
+  // If the sole Needs you item is the active tab (visible even while collapsed, hiddenCount === 0),
+  // the alert pill must not claim hidden items.
+  store.activeTabId.value = 'u-1'
+  await nextTick()
+  assert.equal(find(findGroup('status:needs_you'), hasClass('chat-sidebar__group-count--alert')), null)
+  store.activeTabId.value = 'a'
+  await nextTick()
+  assert.ok(find(findGroup('status:needs_you'), hasClass('chat-sidebar__group-count--alert')))
 
   // A new unread session arrives in Needs you -> group automatically re-expands.
   store.chatTabs.value = [unreadA, unreadB]

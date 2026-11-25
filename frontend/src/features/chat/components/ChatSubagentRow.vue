@@ -16,7 +16,10 @@
       :class="`is-${chip.state}`"
       aria-hidden="true"
     />
-    <span class="subagent-line">
+    <span
+      class="subagent-line"
+      :class="{ 'span-aside': hasAside && !time }"
+    >
       <span class="subagent-name">{{ displayName }}</span>
       <span class="subagent-type">{{ chip.agentType }}</span>
     </span>
@@ -24,7 +27,10 @@
       v-if="time"
       class="subagent-time"
     >{{ time }}</span>
-    <span class="subagent-summary">{{ chip.summary }}</span>
+    <span
+      class="subagent-summary"
+      :class="{ 'span-aside': hasAside && !showAction }"
+    >{{ chip.summary }}</span>
     <span
       v-if="showAction"
       class="subagent-action"
@@ -151,6 +157,10 @@ function activate(event: MouseEvent) {
   min-width: 0;
 }
 
+.subagent-line.span-aside {
+  grid-column: 2 / -1;
+}
+
 .subagent-name {
   min-width: 0;
   overflow: hidden;
@@ -192,6 +202,10 @@ function activate(event: MouseEvent) {
   font-size: 11px;
   line-height: 1.35;
   color: var(--ch-color-text-muted);
+}
+
+.subagent-summary.span-aside {
+  grid-column: 2 / -1;
 }
 
 .subagent-action {

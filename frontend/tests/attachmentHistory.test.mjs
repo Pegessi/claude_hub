@@ -8,7 +8,14 @@ const source = readFileSync(new URL('../src/utils/attachmentHistory.ts', import.
 const { outputText } = ts.transpileModule(source, {
   compilerOptions: { module: ts.ModuleKind.ES2022, target: ts.ScriptTarget.ES2020 },
 })
-const { markAttachmentNavigation, isAttachmentNavigation, backFromAttachmentPreview } = await import(
+const {
+  markAttachmentNavigation,
+  isAttachmentNavigation,
+  backFromAttachmentPreview,
+  registerActiveAttachmentPreview,
+  unregisterActiveAttachmentPreview,
+  hasActiveAttachmentPreview,
+} = await import(
   `data:text/javascript;base64,${Buffer.from(outputText).toString('base64')}`
 )
 
@@ -78,4 +85,13 @@ test('stale preview cleanup cannot move history or register a suppression', t =>
   assert.equal(backFromAttachmentPreview('preview-1', URL_A), false)
   assert.equal(backCount(), 0)
   assert.deepEqual(listeners, [])
+})
+
+test('active preview registry distinguishes live open previews from stale Forward history markers', t => {
+  mockWindow(t, { state: { attachmentPreview: 'preview-stale', attachmentPreviewUrl: URL_A } })
+  assert.equal(hasActiveAttachmentPreview(), false)
+  registerActiveAttachmentPreview('preview-live')
+  assert.equal(hasActiveAttachmentPreview(), true)
+  unregisterActiveAttachmentPreview('preview-live')
+  assert.equal(hasActiveAttachmentPreview(), false)
 })

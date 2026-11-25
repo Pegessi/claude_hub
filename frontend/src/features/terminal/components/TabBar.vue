@@ -152,39 +152,43 @@
       @confirm="confirmCloseTab"
     />
 
-    <!-- Notification / toast stack (F5: replaces single mutable error string) -->
-    <div
-      v-if="notifications.length"
-      class="toast-stack"
-      role="region"
-      aria-label="Notifications"
-    >
+    <!-- Notification / toast stack (F5: replaces single mutable error string).
+         Teleported to body so it escapes .app-mode-bar's z-index: 50 stacking
+         context and stays visible above modals and drawers like ArchivedSessionsPanel. -->
+    <Teleport to="body">
       <div
-        v-for="n in notifications"
-        :key="n.id"
-        :class="['toast', `toast--${n.type}`]"
-        role="status"
+        v-if="notifications.length"
+        class="toast-stack"
+        role="region"
+        aria-label="Notifications"
       >
-        <span
-          class="toast__icon"
-          aria-hidden="true"
-        />
-        <span class="toast__message">{{ n.message }}</span>
-        <button
-          type="button"
-          class="toast__close"
-          :aria-label="'Dismiss ' + n.type + ' notification'"
-          @click="dismissNotification(n.id)"
-        >
-          ×
-        </button>
         <div
-          v-if="n.autoDismissMs"
-          class="toast__timer"
-          :style="{ animationDuration: `${n.autoDismissMs}ms` }"
-        />
+          v-for="n in notifications"
+          :key="n.id"
+          :class="['toast', `toast--${n.type}`]"
+          role="status"
+        >
+          <span
+            class="toast__icon"
+            aria-hidden="true"
+          />
+          <span class="toast__message">{{ n.message }}</span>
+          <button
+            type="button"
+            class="toast__close"
+            :aria-label="'Dismiss ' + n.type + ' notification'"
+            @click="dismissNotification(n.id)"
+          >
+            ×
+          </button>
+          <div
+            v-if="n.autoDismissMs"
+            class="toast__timer"
+            :style="{ animationDuration: `${n.autoDismissMs}ms` }"
+          />
+        </div>
       </div>
-    </div>
+    </Teleport>
   </div>
 </template>
 

@@ -243,3 +243,62 @@ test('deleteTab routes managed Chats to Workspace session deletion and manual Ch
     { url: '/api/tabs/tab-manual-del', method: 'DELETE' },
   ])
 })
+
+test('unarchiveTab and deleteTab refresh archivedTabs on cache miss before resolving managed Chat routes', async () => {
+  storage.clear()
+  setActivePinia(createPinia())
+  const store = useTerminalStore()
+  // Neither store.tabs nor store.archivedTabs knows about this background-archived managed tab yet.
+  store.tabs = []
+  store.archivedTabs = []
+  const remoteManaged = makeTab({
+    id: 'tab-bg-managed',
+    archived: true,
+    workspace_id: 'ws-bg',
+    managed_session_id: 'bg-agent-1',
+    workspace_role: 'orchestrator',
+  })
+
+  const requests = []
+  let restored = false
+  globalThis.fetch = async (url, options = {}) => {
+    const method = options.method || 'GET'
+    requests.push({ url, method })
+    if (url === '/api/tabs/archived' && method === 'GET') {
+      return jsonResponse(restored ? [] : [remoteManaged])
+    }
+    if (url === '/api/workspaces/ws-bg/sessions/bg-agent-1/unarchive' && method === 'POST') {
+      restored = true
+      return jsonResponse({ status: 'ok' })
+    }
+    if (url === '/api/tabs' && method === 'GET') {
+      return jsonResponse([{ ...remoteManaged, archived: false }])
+    }
+    if (url === '/api/tabs/preferences') {
+      return jsonResponse({ pinned_chat_ids: [] })
+    }
+    if (url === '/api/workspaces/sessions/bg-agent-1' && method === 'DELETE') {
+      return jsonResponse({ status: 'deleted' })
+    }
+    throw new Error(`Unexpected fetch: ${method} ${url}`)
+  }
+
+  assert.equal(await store.unarchiveTab('tab-bg-managed'), true)
+  await new Promise(resolve => setTimeout(resolve, 0))
+  assert.equal(requests[0].url, '/api/tabs/archived')
+  assert.deepEqual(requests[1], {
+    url: '/api/workspaces/ws-bg/sessions/bg-agent-1/unarchive',
+    method: 'POST',
+  })
+
+  // Now simulate deleteTab cache miss for another archived managed Chat.
+  store.tabs = []
+  store.archivedTabs = []
+  restored = false
+  requests.length = 0
+  assert.equal(await store.deleteTab('tab-bg-managed'), true)
+  assert.deepEqual(requests, [
+    { url: '/api/tabs/archived', method: 'GET' },
+    { url: '/api/workspaces/sessions/bg-agent-1', method: 'DELETE' },
+  ])
+})

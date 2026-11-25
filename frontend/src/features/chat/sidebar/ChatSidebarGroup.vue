@@ -73,7 +73,7 @@
         class="chat-sidebar__group-count"
         :class="{
           'chat-sidebar__group-count--alert':
-            group.statusBucket === 'needs_you' && group.collapsed && group.tabs.length > 0,
+            group.statusBucket === 'needs_you' && group.collapsed && group.hiddenCount > 0,
         }"
       >{{ group.tabs.length }}</span>
       <svg
