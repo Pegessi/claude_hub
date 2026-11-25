@@ -491,3 +491,14 @@ async def _has_no_prior_turns(session: Any, pending_turn_id: Optional[str]) -> b
         return starts == count
     except Exception:
         return False
+
+
+def _is_recovered_acp_update(update: Dict[str, Any]) -> bool:
+    """Recognize substantive parent output after a transient transport error."""
+    kind = update.get("sessionUpdate")
+    if kind in ("tool_call", "tool_call_update"):
+        return True
+    if kind in ("agent_thought_chunk", "agent_message_chunk"):
+        content = update.get("content")
+        return isinstance(content, dict) and bool(content.get("text"))
+    return False

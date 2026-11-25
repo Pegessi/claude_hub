@@ -7,6 +7,10 @@
 
 ## Released
 
+### fix(cursor): recover transient ACP interruptions
+
+- Delay transient turn errors until recovery and RPC outcome are known, and retain startup timeout diagnostics.
+
 ### test: stabilize mocked browser acceptance
 
 - Wait for exact Markdown code fade endpoints and verify that the restored HTML

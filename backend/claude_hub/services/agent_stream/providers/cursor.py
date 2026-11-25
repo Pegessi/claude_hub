@@ -34,6 +34,7 @@ from .cursor_helpers import (
     _has_no_prior_turns,
     _inject_acp_preload_env,
     _is_empty_acp_shell,
+    _is_recovered_acp_update,
     _migrate_legacy_cli_store_for_acp,
     _parse_cursor_model_spec,
     _resolve_config_option_updates,
@@ -127,6 +128,8 @@ class CursorSession(ProcessSession):
         self._pending_rotation: Optional[str] = None
         self._defer_initial_adoption = False
         self._turn_error_emitted = False
+        self._transient_turn_error: Optional[str] = None
+        self._transient_turn_recovered = False
 
     @property
     def active_thread_id(self) -> Optional[str]:
@@ -249,6 +252,11 @@ class CursorSession(ProcessSession):
                         await self._initialize_session(provider_env)
                 except _AcpStartupRetry as exc:
                     await self._terminate_process()
+                    stderr = self._runtime.redact_diagnostic(
+                        self._stderr_buffer.decode("utf-8", errors="replace").strip()
+                    )
+                    if stderr:
+                        exc.args = (f"{exc}: {_format_acp_error_text(stderr)}",)
                     if await self._retry_startup(exc, attempt):
                         continue
                     raise RuntimeError(self._last_error) from None
@@ -276,12 +284,13 @@ class CursorSession(ProcessSession):
     async def _retry_startup(self, error: _AcpStartupRetry, attempt: int) -> bool:
         self._last_error = str(error)
         self._runtime.logger().warning(
-            "cursor acp startup failure tab=%s phase=%s category=%s rpc_code=%s retry=%s",
+            "cursor acp startup failure tab=%s phase=%s category=%s rpc_code=%s retry=%s detail=%s",
             self.session.tab_id,
             error.method,
             error.category,
             error.code,
             attempt == 0,
+            error,
         )
         if attempt == 0:
             await asyncio.sleep(_ACP_STARTUP_RETRY_DELAY_S)
@@ -687,6 +696,8 @@ class CursorSession(ProcessSession):
 
             self._suppress_active_turn_updates = False
             self._turn_error_emitted = False
+            self._transient_turn_error = None
+            self._transient_turn_recovered = False
 
             prompt_generation = self._stdout_generation
             req_id, future = await self._write_request(
@@ -716,6 +727,8 @@ class CursorSession(ProcessSession):
         except Exception as exc:
             if not self._suppress_active_turn_updates and self._acp_session_id == sid:
                 msg = "" if self._turn_error_emitted else _format_acp_error_text(str(exc))
+                if self._transient_turn_error:
+                    msg = f"{self._transient_turn_error}; {msg}".rstrip("; ")
                 await self._enqueue_notification(
                     {
                         "type": "result",
@@ -742,6 +755,8 @@ class CursorSession(ProcessSession):
             else:
                 err_msg = str(err_obj)
             err_msg = "" if self._turn_error_emitted else _format_acp_error_text(err_msg)
+            if self._transient_turn_error:
+                err_msg = f"{self._transient_turn_error}; {err_msg}".rstrip("; ")
             await self._enqueue_notification(
                 {
                     "type": "result",
@@ -762,12 +777,14 @@ class CursorSession(ProcessSession):
                 {"type": "turn_ended", "status": "aborted"}, generation=generation
             )
             return
-        if self._turn_error_emitted:
+        if self._turn_error_emitted or (
+            self._transient_turn_error and not self._transient_turn_recovered
+        ):
             payload: Dict[str, Any] = {
                 "type": "result",
                 "subtype": "error",
                 "is_error": True,
-                "error": "",
+                "error": self._transient_turn_error or "",
                 "session_id": sid,
             }
             if isinstance(usage, dict):
@@ -1286,6 +1303,10 @@ class CursorSession(ProcessSession):
                 raw_err = text.lstrip("\n")
                 if raw_err.startswith("Error: "):
                     raw_err = raw_err[len("Error: ") :]
+                if raw_err.startswith("RetriableError:"):
+                    self._transient_turn_error = _format_acp_error_text(raw_err)
+                    self._transient_turn_recovered = False
+                    return
                 self._turn_error_emitted = True
                 await self._enqueue_notification(
                     {
@@ -1313,6 +1334,12 @@ class CursorSession(ProcessSession):
                 )
                 return
 
+        if (
+            self._transient_turn_error
+            and session_id == self._acp_session_id
+            and _is_recovered_acp_update(update)
+        ):
+            self._transient_turn_recovered = True
         await self._enqueue_notification(record, generation=generation)
 
     async def _enqueue_notification(

@@ -6410,3 +6410,178 @@ async def test_codex_failed_model_rpc_retains_cached_reasoning_options(
     assert native.current_reasoning_effort() == "max"
     assert "gpt-example-model-d050a243e4ed" in options
     assert native._provider_model_options is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ending", ["success", "rpc_error", "crash", "no_recovery"])
+async def test_cursor_retriable_error_requires_recovery_and_success(ending: str) -> None:
+    proc = _InteractiveAcpProc(session_id="recovery-test")
+    native = CursorNativeSession(_session(AgentType.CURSOR))
+    native._build_provider_env = AsyncMock(return_value={"PATH": "/bin"})  # type: ignore[method-assign]
+    native._spawn_subprocess = AsyncMock(return_value=proc)  # type: ignore[method-assign]
+    await native.start()
+    try:
+        await native.send_message("test", [])
+        prompt = next(r for r in proc.requests if r.get("method") == "session/prompt")
+
+        def update(update_kind: str, **fields: Any) -> None:
+            proc.stdout.push_json(
+                {
+                    "jsonrpc": "2.0",
+                    "method": "session/update",
+                    "params": {
+                        "sessionId": "recovery-test",
+                        "update": {"sessionUpdate": update_kind, **fields},
+                    },
+                }
+            )
+
+        update(
+            "agent_message_chunk",
+            content={
+                "type": "text",
+                "text": "\n\nError: RetriableError: [internal] HTTP/2 keepalive ping timed out after 5000ms",
+            },
+        )
+        if ending == "success":
+            update("agent_thought_chunk", content={"type": "text", "text": "resumed"})
+            update("tool_call", toolCallId="call-1", title="tool", kind="other")
+            update("agent_message_chunk", content={"type": "text", "text": "done"})
+        if ending == "crash":
+            await asyncio.sleep(0.02)
+            proc.crash(stderr_msg="connection lost")
+        elif ending == "rpc_error":
+            proc.stdout.push_json(
+                {
+                    "jsonrpc": "2.0",
+                    "id": prompt["id"],
+                    "error": {"code": -32000, "message": "connection lost"},
+                }
+            )
+        else:
+            proc.stdout.push_json(
+                {"jsonrpc": "2.0", "id": prompt["id"], "result": {"stopReason": "end_turn"}}
+            )
+        records = []
+        while True:
+            rec = await asyncio.wait_for(native.read_line(), 1)
+            if rec is None:
+                break
+            records.append(rec)
+            if rec.get("type") == "result":
+                break
+        result = next(r for r in records if r.get("type") == "result")
+        assert result["is_error"] is (ending != "success")
+        if ending != "success":
+            assert "RetriableError" in result["error"]
+        if ending == "rpc_error":
+            assert "connection lost" in result["error"]
+    finally:
+        await native.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failures", [1, 2])
+async def test_cursor_load_timeout_retries_fresh_process_with_diagnostics(
+    monkeypatch: MonkeyPatch, failures: int
+) -> None:
+    cursor_module = importlib.import_module("claude_hub.services.agent_stream.providers.cursor")
+    monkeypatch.setattr(cursor_module, "_ACP_SESSION_INIT_TIMEOUT_S", 0.02)
+    monkeypatch.setattr(cursor_module, "_ACP_STARTUP_RETRY_DELAY_S", 0.01)
+    monkeypatch.setattr(cursor_module, "_is_empty_acp_shell", lambda *args: False)
+    monkeypatch.setattr(cursor_module, "_migrate_legacy_cli_store_for_acp", lambda *args: None)
+    sess = _session(AgentType.CURSOR)
+    sess.agent_session_id = "verified-existing-sid"
+    native = CursorNativeSession(sess)
+    native._conversation_id_verified = True
+    procs = [_InteractiveAcpProc(), _InteractiveAcpProc()]
+    for proc in procs[:failures]:
+        proc.stderr = _InteractiveAcpStream()
+        original = proc._on_stdin
+
+        def handler(msg: Dict[str, Any], proc: Any = proc, original: Any = original) -> None:
+            if msg.get("method") == "session/load":
+                proc.requests.append(msg)
+                proc.stderr._queue.put_nowait(b"temporary upstream stall")
+            else:
+                original(msg)
+
+        proc.stdin._handler = handler
+    native._build_provider_env = AsyncMock(return_value={"PATH": "/bin"})  # type: ignore[method-assign]
+    native._spawn_subprocess = AsyncMock(side_effect=procs)  # type: ignore[method-assign]
+    try:
+        if failures == 2:
+            with pytest.raises(
+                RuntimeError, match="session/load.*request timed out.*temporary upstream stall"
+            ):
+                await native.start()
+        else:
+            await native.start()
+            assert native._acp_session_id == "verified-existing-sid"
+        assert native._spawn_subprocess.await_count == 2
+        assert procs[0].returncode is not None
+    finally:
+        await native.stop()
+
+
+@pytest.mark.asyncio
+async def test_cursor_retriable_recovery_completes_stream_turn(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    from claude_hub.services.agent_stream.store import AgentStreamStore
+    from claude_hub.services.agent_stream.tailer import SessionTailer
+
+    proc = _InteractiveAcpProc(session_id="recovery-stream")
+    native = CursorNativeSession(_session(AgentType.CURSOR))
+    monkeypatch.setattr(native, "_build_provider_env", AsyncMock(return_value={"PATH": "/bin"}))
+    monkeypatch.setattr(native, "_spawn_subprocess", AsyncMock(return_value=proc))
+    monkeypatch.setattr(
+        importlib.import_module("claude_hub.services.workspace_manager"), "STATE_ROOT", tmp_path
+    )
+    tailer = SessionTailer(
+        workspace_id="ws-recovery",
+        session_id="sess-recovery",
+        adapter=CursorCliTranscriptAdapter(),
+        session_getter=lambda: native.session,
+        store=AgentStreamStore("ws-recovery", "sess-recovery"),
+        native_transport=native,
+    )
+    queue = await tailer.subscribe()
+    try:
+        await tailer.send_message("test", [], client_turn_id="turn-recovery")
+        prompt = next(r for r in proc.requests if r.get("method") == "session/prompt")
+        for kind, text in (
+            (
+                "agent_message_chunk",
+                "\n\nError: RetriableError: [internal] HTTP/2 keepalive ping timed out after 5000ms",
+            ),
+            ("agent_thought_chunk", "resumed"),
+            ("agent_message_chunk", "done"),
+        ):
+            proc.stdout.push_json(
+                {
+                    "jsonrpc": "2.0",
+                    "method": "session/update",
+                    "params": {
+                        "sessionId": "recovery-stream",
+                        "update": {
+                            "sessionUpdate": kind,
+                            "content": {"type": "text", "text": text},
+                        },
+                    },
+                }
+            )
+        proc.stdout.push_json(
+            {"jsonrpc": "2.0", "id": prompt["id"], "result": {"stopReason": "end_turn"}}
+        )
+        events = []
+        while True:
+            event = await asyncio.wait_for(queue.get(), timeout=2)
+            events.append(event)
+            if event.type == AgentStreamEventType.TURN_COMPLETED:
+                break
+        assert events[-1].payload["status"] == "completed"
+        assert events[-1].payload["assistant_text"] == "done"
+        assert not any(e.type == AgentStreamEventType.ERROR for e in events)
+    finally:
+        await tailer.stop()
