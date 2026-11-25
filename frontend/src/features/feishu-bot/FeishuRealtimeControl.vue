@@ -1,5 +1,8 @@
 <template>
-  <div class="feishu-realtime-control" data-testid="feishu-realtime-control">
+  <div
+    class="feishu-realtime-control"
+    data-testid="feishu-realtime-control"
+  >
     <div class="feishu-realtime-control__row">
       <label>
         <input
@@ -11,26 +14,44 @@
         >
         <span>{{ summary ? 'Feishu WebSocket' : 'Feishu realtime events (WebSocket)' }}</span>
       </label>
-      <span class="feishu-realtime-control__chip" role="status">{{ health }}</span>
+      <span
+        class="feishu-realtime-control__chip"
+        role="status"
+      >{{ health }}</span>
     </div>
     <small v-if="!summary && status && status.env_override !== null">
       Controlled by the server environment.
     </small>
     <small v-else-if="!summary">
-      Sends incoming events to Dot independently of scheduled patrol and personal /ai commands.
+      Checks incoming messages in background sessions, independently of daily digests and personal /ai commands.
     </small>
-    <div v-if="error" role="alert">
+    <FeishuRealtimeAgentSettings
+      v-if="settings"
+      :capabilities="capabilities ?? null"
+    />
+    <div
+      v-if="error"
+      role="alert"
+    >
       {{ error }}
-      <button type="button" class="ch-btn ch-btn--ghost ch-btn--sm" @click="refresh">Refresh</button>
+      <button
+        type="button"
+        class="ch-btn ch-btn--ghost ch-btn--sm"
+        @click="refresh"
+      >
+        Refresh
+      </button>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
+import FeishuRealtimeAgentSettings from './FeishuRealtimeAgentSettings.vue'
+import type { FeishuAiCommandCapabilities } from '@/utils/feishuBotConfig'
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { loadFeishuRealtime, updateFeishuRealtime, type FeishuRealtimeStatus } from '@/utils/dotApi'
 
-defineProps<{ summary?: boolean }>()
+defineProps<{ summary?: boolean; settings?: boolean; capabilities?: FeishuAiCommandCapabilities | null }>()
 
 const status = ref<FeishuRealtimeStatus>()
 const busy = ref(false)

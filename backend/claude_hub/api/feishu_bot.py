@@ -1270,3 +1270,8 @@ alias_router = APIRouter(prefix="/api/feishu-bot", tags=["feishu-bot"], include_
 register_card_routes(router)
 register_ai_command_routes(router, require_hub_user=require_hub_user)
 register_ai_command_routes(alias_router, require_hub_user=require_hub_user)
+
+from .routes.feishu_bot.realtime import register_realtime_routes
+
+register_realtime_routes(router, require_hub_user=require_hub_user)
+register_realtime_routes(alias_router, require_hub_user=require_hub_user)

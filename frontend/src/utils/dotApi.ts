@@ -170,15 +170,10 @@ export interface DotPatrolConfig {
   enabled: boolean
   timezone: string
   workspace_id?: string
-  feishu_enabled: boolean
-  feishu_interval_minutes: number
-  feishu_window_start: string
-  feishu_window_end: string
   daily_enabled: boolean
   daily_slots: string[]
   stalled_hours: number
   pending_top_n: number
-  max_triage_per_run: number
 }
 
 export interface FeishuRealtimeStatus {

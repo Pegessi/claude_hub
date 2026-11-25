@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-PatrolChannel = Literal["all", "feishu", "daily"]
+PatrolChannel = Literal["all", "daily"]
 DEFAULT_PATROL_WORKSPACE_ID = "9b6725ac-68fa-4111-8ea9-b729764c6e97"
 
 
@@ -25,15 +25,10 @@ class PatrolConfig(BaseModel):
     enabled: bool = False
     timezone: str = "Asia/Shanghai"
     workspace_id: str = DEFAULT_PATROL_WORKSPACE_ID
-    feishu_enabled: bool = True
-    feishu_interval_minutes: int = Field(default=20, ge=1, le=1440)
-    feishu_window_start: str = "09:30"
-    feishu_window_end: str = "22:30"
     daily_enabled: bool = True
     daily_slots: list[str] = Field(default_factory=lambda: ["11:00", "17:30"], max_length=24)
     stalled_hours: float = Field(default=48.0, gt=0, le=8760, allow_inf_nan=False)
     pending_top_n: int = Field(default=5, ge=1, le=50)
-    max_triage_per_run: int = Field(default=3, ge=1, le=20)
 
     @model_validator(mode="before")
     @classmethod
@@ -69,21 +64,10 @@ class PatrolConfig(BaseModel):
             raise ValueError("timezone must be a valid IANA timezone") from exc
         return value
 
-    @field_validator("feishu_window_start", "feishu_window_end")
-    @classmethod
-    def valid_window_time(cls, value: str) -> str:
-        return validate_clock_time(value)
-
     @field_validator("daily_slots")
     @classmethod
     def valid_daily_slots(cls, values: list[str]) -> list[str]:
         return sorted({validate_clock_time(value) for value in values})
-
-    @model_validator(mode="after")
-    def ordered_window(self) -> PatrolConfig:
-        if self.feishu_window_start > self.feishu_window_end:
-            raise ValueError("feishu_window_start must not follow feishu_window_end")
-        return self
 
 
 def validate_clock_time(value: str) -> str:
@@ -101,7 +85,7 @@ class MRStateSnapshot(BaseModel):
 
 
 class PatrolRunRecord(BaseModel):
-    channel: Literal["feishu", "daily"]
+    channel: Literal["daily"]
     started_at: str
     dry_run: bool = False
     candidates: int = 0
@@ -114,8 +98,6 @@ class PatrolRunRecord(BaseModel):
 
 class PatrolState(BaseModel):
     config: PatrolConfig = Field(default_factory=PatrolConfig)
-    feishu_watermark_iso: str | None = None
-    processed_feishu_ids: list[str] = Field(default_factory=list)
     fired_daily_slots: list[str] = Field(default_factory=list)
     daily_mr_cursor: str = ""
     mr_snapshots: dict[str, MRStateSnapshot] = Field(default_factory=dict)
@@ -124,10 +106,6 @@ class PatrolState(BaseModel):
     recent_runs: list[PatrolRunRecord] = Field(default_factory=list)
 
     def bound_history(self) -> None:
-        # Keep the most recent occurrence when a recovery overlap revisits a message.
-        self.processed_feishu_ids = list(dict.fromkeys(reversed(self.processed_feishu_ids)))[:500][
-            ::-1
-        ]
         self.fired_daily_slots = list(dict.fromkeys(reversed(self.fired_daily_slots)))[:60][::-1]
         self.recent_runs = self.recent_runs[-20:]
         self.mr_snapshots = dict(list(self.mr_snapshots.items())[-500:])

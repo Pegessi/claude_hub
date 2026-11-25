@@ -438,3 +438,22 @@ export function dryRunFeishuAiCommand(
 ): Promise<{ dry_run: Record<string, unknown>; token_status: FeishuAiCommandTokenStatus }> {
   return requestJson(`${AI_COMMAND_ROOT}/dry-run`, jsonRequest('POST', input, signal))
 }
+
+export interface FeishuRealtimeEventConfig {
+  enabled: boolean
+  provider: FeishuAiCommandProvider
+  model: string
+  reasoning_effort: FeishuAiCommandReasoningEffort
+  workspace_id: string
+}
+
+export function loadFeishuRealtimeConfig(signal?: AbortSignal): Promise<{ config: FeishuRealtimeEventConfig }> {
+  return requestJson('/api/feishu/bot/realtime-events', { signal })
+}
+
+export function updateFeishuRealtimeConfig(
+  input: Pick<FeishuRealtimeEventConfig, 'provider' | 'model' | 'reasoning_effort' | 'workspace_id'>,
+  signal?: AbortSignal,
+): Promise<{ config: FeishuRealtimeEventConfig }> {
+  return requestJson('/api/feishu/bot/realtime-events', jsonRequest('PATCH', input, signal))
+}

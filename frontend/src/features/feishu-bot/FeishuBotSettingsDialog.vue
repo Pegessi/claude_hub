@@ -222,7 +222,10 @@
           </div>
         </div>
 
-        <FeishuRealtimeControl />
+        <FeishuRealtimeControl
+          settings
+          :capabilities="aiCapabilities"
+        />
 
         <p
           v-if="aiCommandLoading && !aiCommandLoaded"
@@ -817,7 +820,7 @@
 
 <script setup lang="ts">
 import FeishuRealtimeControl from './FeishuRealtimeControl.vue'
-import { aiEffortLabel, matchesAiModelOption, resolveVariantModelId } from './feishuModelOptions'
+import { aiEffortLabel, matchesAiModelOption, resolveVariantModelId, resolveAiModelOptionsForProvider as catalogModels, resolveEffortsForModel as catalogEfforts } from './feishuModelOptions'
 import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { useFeishuBotPoolStore } from '@/stores/feishuBotPoolStore'
 import {
@@ -850,27 +853,10 @@ const aiWatchChatsText = ref('')
 const aiServerSnapshot = ref<FeishuAiCommandConfig | null>(null)
 const aiServerWatchChatsText = ref('')
 const aiTupleConflict = ref<Pick<FeishuAiCommandConfig, 'provider' | 'model' | 'reasoning_effort'> | null>(null)
-const DEFAULT_PROVIDER_EFFORTS: Record<FeishuAiCommandProvider, string[]> = {
-  claude: [],
-  codex: ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'],
-  traex: ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'],
-  maso: ['default', 'none', 'low', 'medium', 'high', 'xhigh', 'max'],
-  cursor: ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'],
-  antigravity: [],
-}
-// Provider models are supplied by the authenticated capabilities response.
-const DEFAULT_PROVIDER_MODEL_OPTIONS: Record<FeishuAiCommandProvider, FeishuAiCommandModelOption[]> = {
-  claude: [], codex: [], traex: [], maso: [], cursor: [], antigravity: [],
-}
-function resolveAiModelOptionsForProvider(provider: FeishuAiCommandProvider): FeishuAiCommandModelOption[] {
-  const rich = aiCapabilities.value?.provider_model_options?.[provider]
-  if (Array.isArray(rich) && rich.length > 0) return rich
-  const legacyIds = aiCapabilities.value?.provider_models?.[provider]
-  if (Array.isArray(legacyIds) && legacyIds.length > 0) {
-    return legacyIds.map(id => ({ id, label: id, provider_model_id: id }))
-  }
-  return DEFAULT_PROVIDER_MODEL_OPTIONS[provider] ?? []
-}
+const resolveAiModelOptionsForProvider = (provider: FeishuAiCommandProvider) =>
+  catalogModels(aiCapabilities.value, provider)
+const resolveEffortsForModel = (provider: FeishuAiCommandProvider, model: string, option?: FeishuAiCommandModelOption | null) =>
+  catalogEfforts(aiCapabilities.value, provider, model, option)
 const aiEdit = reactive<FeishuAiCommandConfig>({
   enabled: false,
   prefix: '/ai',
@@ -918,38 +904,6 @@ const aiCustomModelOption = computed<{ value: string; label: string } | null>(()
   if (!activeModel || currentAiModelOption.value) return null
   return { value: activeModel, label: `${activeModel} (custom/current)` }
 })
-function resolveEffortsForModel(
-  provider: FeishuAiCommandProvider,
-  modelId: string,
-  option?: FeishuAiCommandModelOption | null,
-): string[] {
-  const clean = modelId.trim()
-  if (!clean) {
-    // Only ENV_KEY providers (codex, traex) have a separate effort channel when Provider default
-    // (model === '') is chosen; model-bound effort providers (maso, cursor) and non-effort
-    // providers (claude, antigravity) require a concrete model ID.
-    if (provider === 'maso' || provider === 'cursor' || provider === 'claude' || provider === 'antigravity') {
-      return []
-    }
-    const perProviderDefault = aiCapabilities.value?.provider_reasoning_efforts?.[provider]
-    if (Array.isArray(perProviderDefault)) return perProviderDefault
-    return DEFAULT_PROVIDER_EFFORTS[provider] ?? []
-  }
-  const matched = option ?? resolveAiModelOptionsForProvider(provider).find(opt => matchesAiModelOption(opt, clean)) ?? null
-  if (matched && Array.isArray(matched.supported_reasoning_efforts)) {
-    if (matched.supported_reasoning_efforts.length > 0) {
-      return matched.supported_reasoning_efforts.map(item => item.id)
-    }
-    if (provider === 'maso' || provider === 'cursor' || provider === 'claude' || provider === 'antigravity') {
-      return []
-    }
-  }
-  const perModel = aiCapabilities.value?.model_reasoning_efforts?.[clean]
-  if (Array.isArray(perModel)) return perModel
-  const perProvider = aiCapabilities.value?.provider_reasoning_efforts?.[provider]
-  if (Array.isArray(perProvider)) return perProvider
-  return DEFAULT_PROVIDER_EFFORTS[provider] ?? []
-}
 const aiEffortOptions = computed<string[]>(() => (
   resolveEffortsForModel(aiEdit.provider, aiEdit.model, currentAiModelOption.value)
 ))

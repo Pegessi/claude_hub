@@ -19,7 +19,7 @@ const cases = [
   ['setupDot', [{ ANTHROPIC_MODEL: 'm' }], 'POST', '/api/dot/setup', { env: { ANTHROPIC_MODEL: 'm' } }],
   ['loadDotHealth', [], 'GET', '/api/dot/health', undefined],
   ['loadDotPatrol', [], 'GET', '/api/dot/patrol', undefined],
-  ['updateDotPatrol', [{ enabled: true, feishu_enabled: false }], 'PATCH', '/api/dot/patrol', { enabled: true, feishu_enabled: false }],
+  ['updateDotPatrol', [{ enabled: true, daily_enabled: false }], 'PATCH', '/api/dot/patrol', { enabled: true, daily_enabled: false }],
   ['recallDot', ['flash attn', 'knowledge'], 'GET', '/api/dot/recall?q=flash+attn&kind=knowledge&limit=30', undefined],
   ['loadDotCards', [], 'GET', '/api/dot/cards', undefined],
   ['loadDotCard', ['k/1'], 'GET', '/api/dot/cards/k%2F1', undefined],

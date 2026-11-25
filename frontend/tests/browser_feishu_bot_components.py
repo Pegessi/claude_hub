@@ -15,6 +15,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from browser_lifecycle import BrowserRun, run_browser_main
+from feishu_realtime_browser_checks import check_realtime_agent_settings, check_realtime_mobile
 from playwright.async_api import expect
 
 CLOCK = datetime.now(timezone.utc)
@@ -448,6 +449,14 @@ async def main(browser_run: BrowserRun) -> None:
             "suppressed": 0,
         }
 
+        realtime_config = {
+            "enabled": False,
+            "provider": "maso",
+            "model": "",
+            "reasoning_effort": "high",
+            "workspace_id": "",
+        }
+
         async def route_all(route) -> None:
             nonlocal pool_revision, shared_avatar_requests, ai_get_calls
             request = route.request
@@ -494,6 +503,15 @@ async def main(browser_run: BrowserRun) -> None:
             submitted = json.loads(raw_body) if raw_body else None
             api_calls.append({"method": method, "path": path, "body": submitted})
 
+            if method == "GET" and path == "/api/workspaces":
+                await fulfill_json(route, [{"id": "workspace-a", "name": "Example workspace"}])
+                return
+            if path == "/api/feishu/bot/realtime-events" and method in {"GET", "PATCH"}:
+                if method == "PATCH":
+                    assert "enabled" not in submitted
+                    realtime_config.update(submitted)
+                await fulfill_json(route, {"config": realtime_config, "status": realtime})
+                return
             if method == "GET" and path == "/api/dot/patrol/realtime":
                 await fulfill_json(route, realtime)
                 return
@@ -1106,6 +1124,7 @@ async def main(browser_run: BrowserRun) -> None:
         await realtime_control.get_by_role("button", name="Refresh", exact=True).click()
         await expect(realtime_switch).to_be_checked()
         await expect(realtime_control.get_by_role("status")).to_have_text("No web session")
+        await check_realtime_agent_settings(settings, api_calls)
         token_card = settings.get_by_test_id("feishu-ai-token-card")
         await expect(token_card).to_have_attribute("data-state", "failed")
         await expect(settings.locator(".detail-title-row .source-chip")).to_have_text(
@@ -1393,6 +1412,7 @@ async def main(browser_run: BrowserRun) -> None:
         ).to_be_visible()
         await settings.get_by_test_id("feishu-ai-provider-select").scroll_into_view_if_needed()
         await expect(mobile_model_select).to_be_visible()
+        await check_realtime_mobile(settings)
         await page.screenshot(path=str(output / "feishu-ai-command-mobile.png"), full_page=True)
         await settings.locator("footer").get_by_role("button", name="Close", exact=True).click()
         await expect(settings).to_have_count(0)

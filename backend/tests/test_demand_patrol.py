@@ -35,7 +35,6 @@ from claude_hub.services.demand_patrol.models import (
 from claude_hub.services.demand_patrol.service import (
     DemandPatrolService,
     due_daily_slots,
-    feishu_due,
 )
 from claude_hub.services.demand_patrol.state import PatrolStateStore
 
@@ -116,7 +115,6 @@ def test_default_config_is_disabled_and_validation() -> None:
     assert default_cfg.enabled is False
     assert default_cfg.workspace_id == DEFAULT_PATROL_WORKSPACE_ID
     assert default_cfg.patrol_workspace_id == DEFAULT_PATROL_WORKSPACE_ID
-    assert default_cfg.feishu_enabled is True
     assert default_cfg.daily_enabled is True
     assert default_cfg.daily_slots == ["11:00", "17:30"]
     alias_cfg = PatrolConfig.model_validate({"patrol_workspace_id": "ws-custom"})
@@ -139,7 +137,6 @@ def test_default_config_is_disabled_and_validation() -> None:
 
 def test_state_roundtrip_bounded_history_and_isolation(store: PatrolStateStore) -> None:
     state = PatrolState(
-        processed_feishu_ids=[f"message-{i}" for i in range(520)],
         fired_daily_slots=[f"slot-{i}" for i in range(80)],
         recent_runs=[
             PatrolRunRecord(channel="daily", started_at=NOW.isoformat()) for _ in range(30)
@@ -148,33 +145,16 @@ def test_state_roundtrip_bounded_history_and_isolation(store: PatrolStateStore) 
     store.save(state)
     loaded = PatrolStateStore().load()
     assert loaded == state
-    assert len(loaded.processed_feishu_ids) == 500
-    assert loaded.processed_feishu_ids[0] == "message-20"
     assert len(loaded.fired_daily_slots) == 60
     assert len(loaded.recent_runs) == 20
     assert store.path.name == "demand_patrol_state.json"
     assert not store.path.exists()  # SQLite document, not a parallel JSON store.
 
 
-def test_feishu_work_window_and_interval() -> None:
-    assert not feishu_due(PatrolState(), NOW)
-    state = PatrolState(config=PatrolConfig(enabled=True))
-    assert not feishu_due(state, NOW - timedelta(minutes=91))
-    assert feishu_due(state, NOW - timedelta(minutes=90))
-    assert feishu_due(state, NOW + timedelta(hours=11, minutes=30))
-    assert not feishu_due(state, NOW + timedelta(hours=11, minutes=31))
-    state.recent_runs = [PatrolRunRecord(channel="feishu", started_at=NOW.isoformat())]
-    assert not feishu_due(state, NOW + timedelta(minutes=19))
-    assert feishu_due(state, NOW + timedelta(minutes=20))
-    state.config.enabled = False
-    assert not feishu_due(state, NOW)
-    assert due_daily_slots(state, NOW) == []
-
-
 async def test_daily_claim_survives_restart_and_concurrent_ticks(
     store: PatrolStateStore,
 ) -> None:
-    state = PatrolState(config=PatrolConfig(enabled=True, feishu_enabled=False))
+    state = PatrolState(config=PatrolConfig(enabled=True))
     store.save(state)
     dot, runner = FakeDot(), EmptyRunner()
     first = service(store, dot, runner)
@@ -251,7 +231,7 @@ async def test_status_and_disable_remain_responsive_during_run(
 async def test_failed_notice_retains_claim_and_records_outcome(
     store: PatrolStateStore,
 ) -> None:
-    store.save(PatrolState(config=PatrolConfig(enabled=True, feishu_enabled=False)))
+    store.save(PatrolState(config=PatrolConfig(enabled=True)))
     dot, runner = FakeDot(result="failed"), EmptyRunner(
         [
             {
@@ -401,11 +381,11 @@ async def test_rest_status_partial_config_run_and_auth(
         assert (await client.get("/api/dot/patrol")).json()["config"]["enabled"] is False
         dot_enabled = await client.patch(
             "/api/dot/patrol",
-            json={"enabled": True, "feishu_enabled": False},
+            json={"enabled": True},
         )
         assert dot_enabled.status_code == 200
         assert dot_enabled.json()["enabled"] is True
-        assert dot_enabled.json()["feishu_enabled"] is False
+        assert "feishu_enabled" not in dot_enabled.json()
         assert dot_enabled.json()["daily_enabled"] is True
         changed = await client.put("/api/patrol/config", json={"enabled": False})
         assert changed.status_code == 200
@@ -421,6 +401,14 @@ async def test_rest_status_partial_config_run_and_auth(
         assert result.status_code == 200
         assert result.json()["runs"][0]["llm_invoked"] == 0
         assert result.json()["markdown"] == ""
+        for endpoint, method in (
+            ("/api/patrol/config", client.put),
+            ("/api/dot/patrol", client.patch),
+        ):
+            retired = await method(endpoint, json={"feishu_enabled": True})
+            assert retired.status_code == 422
+        retired_run = await client.post("/api/patrol/run", json={"channel": "feishu"})
+        assert retired_run.status_code == 422
         bad = await client.post("/api/patrol/run", json={"channel": "typo"})
         assert bad.status_code == 422
     assert dot.calls == []
@@ -441,18 +429,11 @@ async def test_rest_status_partial_config_run_and_auth(
                 "patrol",
                 "config",
                 "--enable",
-                "--no-feishu",
                 "--daily",
                 "--daily-slot",
                 "11:00",
                 "--daily-slot",
                 "17:30",
-                "--feishu-interval",
-                "30",
-                "--window-start",
-                "10:00",
-                "--window-end",
-                "22:00",
                 "--workspace-id",
                 "ws-patrol",
             ],
@@ -460,12 +441,8 @@ async def test_rest_status_partial_config_run_and_auth(
             "/api/patrol/config",
             {
                 "enabled": True,
-                "feishu_enabled": False,
                 "daily_enabled": True,
                 "daily_slots": ["11:00", "17:30"],
-                "feishu_interval_minutes": 30,
-                "feishu_window_start": "10:00",
-                "feishu_window_end": "22:00",
                 "workspace_id": "ws-patrol",
             },
         ),
@@ -824,3 +801,60 @@ def test_infowall_large_json_and_overflow_close_transports_before_loop_shutdown(
     else:
         assert "output budget" in report["error"]
     assert result.stderr == "", result.stderr
+
+
+def test_legacy_polling_state_loads_and_saves_only_daily_fields(store: PatrolStateStore) -> None:
+    from claude_hub.services.local_storage import read_document, write_document
+
+    write_document(
+        store.path,
+        {
+            "config": {
+                "enabled": True,
+                "daily_slots": ["11:00", "17:30"],
+                "feishu_enabled": True,
+                "feishu_interval_minutes": 20,
+                "feishu_window_start": "09:30",
+                "feishu_window_end": "22:30",
+                "max_triage_per_run": 3,
+            },
+            "feishu_watermark_iso": NOW.isoformat(),
+            "processed_feishu_ids": ["old-message"],
+            "recent_runs": [
+                {"channel": "feishu", "started_at": NOW.isoformat()},
+                {"channel": "daily", "started_at": NOW.isoformat()},
+            ],
+        },
+    )
+    loaded = store.load()
+    assert loaded.config.enabled
+    assert loaded.config.daily_slots == ["11:00", "17:30"]
+    assert [record.channel for record in loaded.recent_runs] == ["daily"]
+    store.save(loaded)
+    saved = read_document(store.path)
+    assert "feishu_watermark_iso" not in saved
+    assert "processed_feishu_ids" not in saved
+    assert not any(key.startswith("feishu_") for key in saved["config"])
+    assert "max_triage_per_run" not in saved["config"]
+
+
+async def test_all_channel_runs_daily_only(store: PatrolStateStore) -> None:
+    runner = EmptyRunner()
+    result = await service(store, FakeDot(), runner).run(channel="all", dry_run=True)
+    assert [record["channel"] for record in result["runs"]] == ["daily"]
+    assert runner.calls == [["infowall", "demand", "list", "--json"]]
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["patrol", "run", "--channel", "feishu"],
+        ["patrol", "config", "--feishu"],
+        ["patrol", "config", "--feishu-interval", "20"],
+        ["dot", "patrol", "--feishu"],
+        ["dot", "patrol", "--window-start", "09:30"],
+    ],
+)
+def test_retired_cli_polling_controls_rejected(args: list[str]) -> None:
+    result = CliRunner().invoke(cli_main.cli, args)
+    assert result.exit_code == 2

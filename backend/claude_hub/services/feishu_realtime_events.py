@@ -4,21 +4,17 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 import threading
 import time
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import Any
 
-import httpx
 from pydantic import HttpUrl
 
 from claude_hub.services.dot.events_gateway import (
     ExternalEvent,
-    has_external_event_receipt,
     record_suppressed_external_event,
-    submit_external_event,
 )
 from claude_hub.services.feishu_realtime_automation import (
     BOT_SENDER_PREFIXES,
@@ -141,6 +137,7 @@ class FeishuRealtimeEventRouter:
         self.suppressed_courtesy_count = self.suppressed_replied_count = 0
         self.delivery_failed_count = 0
         self.last_delivery_error: str | None = None
+        self._triage_slots = asyncio.Semaphore(2)
 
     @property
     def pending_fallback_count(self) -> int:
@@ -861,19 +858,24 @@ class FeishuRealtimeEventRouter:
     async def _deliver_event(self, event: ExternalEvent, cfg: FeishuRealtimeEventConfig) -> bool:
         if self._event_sink is not None:
             return self._deliver_event_res(await self._event_sink(event))
-        if cfg.events_url:
-            tok = os.environ.get("CLAUDE_HUB_DOT_EVENTS_TOKEN", "").strip()
-            hdrs = {
-                "Content-Type": "application/json",
-                **({"Authorization": f"Bearer {tok}"} if tok else {}),
-            }
-            async with httpx.AsyncClient(timeout=5.0, trust_env=False) as client:
-                body = event.model_dump_json().encode("utf-8")
-                (await client.post(cfg.events_url, content=body, headers=hdrs)).raise_for_status()
-                return True
-        if await submit_external_event(event):
-            return True
-        return await has_external_event_receipt(event.source, event.dedupe_key)
+        from claude_hub.services.feishu_realtime_delivery import deliver_realtime_triage
+
+        async with self._triage_slots:
+            return await deliver_realtime_triage(
+                event,
+                cfg,
+                still_unanswered=lambda: not self.has_owner_replied(
+                    chat_id=str(
+                        event.payload.get("web_chat_id") or event.payload.get("chat_id") or ""
+                    ),
+                    thread_id=str(event.payload.get("thread_id") or ""),
+                    reply_to=str(event.payload.get("reply_to") or ""),
+                    message_id=event.dedupe_key,
+                    created_at_ms=int(str(event.payload.get("created_at_ms") or 0)),
+                    position=int(str(event.payload.get("position") or 0)),
+                    topic_position=int(str(event.payload.get("topic_position") or 0)),
+                ),
+            )
 
     async def handle_pushed_message(
         self, pushed: PushedMessage, user_msg: FeishuUserMessage, **kw: Any
@@ -1069,8 +1071,12 @@ class FeishuRealtimeEventRouter:
             zip(keys[:6], (ocid or wcid, wcid, cname[:200], ctype, cmid, user_msg.message_id))
         )
         pl.update(
-            zip(keys[6:10], (tid, user_msg.sender_open_id[:120], ftxt[:500], trig)),
+            zip(keys[6:10], (tid, user_msg.sender_open_id[:120], ftxt[:12000], trig)),
             matched_urls=u_slice,
+            created_at_ms=ms,
+            reply_to=msg.parent_id or msg.root_id,
+            position=msg.position,
+            topic_position=tpos,
         )
         ev_t = f"im.{trig}"
         ev_ttl = {
@@ -1080,7 +1086,7 @@ class FeishuRealtimeEventRouter:
             "topic_reply": "Feishu topic reply",
         }[trig]
         ev_kw: dict[str, Any] = dict(
-            source="feishu", event_type=ev_t, dedupe_key=cmid[:256], severity="urgent"
+            source="feishu", event_type=ev_t, dedupe_key=cmid[:256], severity="normal"
         )
         ev_kw.update(title=ev_ttl, summary=" · ".join(parts)[:1000], url=parsed_url, payload=pl)
         event = ExternalEvent(**ev_kw)

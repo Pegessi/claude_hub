@@ -123,6 +123,7 @@ def _enqueue(store: DotStore, event: ExternalEvent) -> bool:
                     source=event.source,
                     event_type=event.event_type,
                     severity=event.severity,
+                    payload=event.payload if event.event_type.startswith("triage.") else {},
                     url=str(event.url) if event.url else "",
                 )
                 if event.severity != "urgent":
@@ -146,6 +147,10 @@ def render_external_event(event: dict[str, Any]) -> str:
     text = " ".join(str(event.get("text", "")).split())[:240]
     url = str(event.get("url") or "")[:160]
     data = f"{event.get('source')}/{event.get('event_type')} {text} {url}".strip()
+    payload = event.get("payload")
+    if str(event.get("event_type", "")).startswith("triage.") and isinstance(payload, dict):
+        data += f" Summary: {str(payload.get('triage_summary', ''))[:600]}"
+        data += f" Suggested reply: {str(payload.get('reply_draft', ''))[:600]}"
     # Escape angle brackets and line breaks so producer text cannot forge a boundary.
     data = " ".join(data.split()).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
     return (

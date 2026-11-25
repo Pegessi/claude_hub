@@ -66,6 +66,7 @@ imports['@/components/FeishuBrandMark.vue'] = compileSfcUrl('components/FeishuBr
 imports['@/components/FeishuIdentityMark.vue'] = compileSfcUrl('components/FeishuIdentityMark.vue', 'feishu-identity-mark')
 // The browser-mock scenario exercises the realtime control against its REST routes.
 imports['./FeishuRealtimeControl.vue'] = moduleUrl('export default { render: () => null }')
+const RealtimeSettings = (await import(compileSfcUrl('features/feishu-bot/FeishuRealtimeAgentSettings.vue', 'realtime-settings-behavior'))).default
 const Settings = (await import(compileSfcUrl('features/feishu-bot/FeishuBotSettingsDialog.vue', 'bot-settings-behavior'))).default
 const BindingPanel = (await import(compileSfcUrl('components/FeishuBindingPanel.vue', 'feishu-binding-panel'))).default
 
@@ -325,4 +326,17 @@ export async function mountBindingPanel(t, h, initialTabId = 'tab-1') {
     tabId,
     get state() { return panelVm?.$.setupState },
   }
+}
+
+export async function mountRealtimeSettings(t, h, capabilities) {
+  const cleanupDom = ensureDomGlobals()
+  const root = createNode('root')
+  const app = testRenderer().createApp(RealtimeSettings, { capabilities })
+  app.use(h.pinia)
+  const vm = app.mount(root)
+  t.after(() => { app.unmount(); cleanupDom() })
+  await settleUi()
+  const state = vm.$.setupState
+  Object.defineProperty(state, '$root', { value: root, configurable: true })
+  return state
 }

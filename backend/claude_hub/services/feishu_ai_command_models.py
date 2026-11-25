@@ -112,6 +112,11 @@ def register_live_maso_model_variants(
             if match:
                 variant_map.setdefault(match.group(1).lower(), pmid)
         base_pmid = str(getattr(opt, "provider_model_id", None) or opt_id).strip()
+        raw_effort = re.search(
+            r"[_-](?:reasoning|thinking)[_-](low|medium|high|xhigh|max)$", base_pmid, re.I
+        )
+        if raw_effort:
+            variant_map.setdefault(raw_effort.group(1).lower(), base_pmid)
         for effort in ("default", "none", "low"):
             variant_map.setdefault(effort, base_pmid)
         if "medium" in variant_map:

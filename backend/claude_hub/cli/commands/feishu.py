@@ -836,3 +836,25 @@ def feishu_ai_command_web_logout(ctx: click.Context) -> None:
     except HubError as e:
         raise click.ClickException(str(e)) from e
     emit(payload, as_json=True)
+
+
+@feishu.command("realtime")
+@click.option("--enabled/--disabled", default=None)
+@click.option("--provider", type=click.Choice(AI_COMMAND_PROVIDER_CHOICES))
+@click.option("--model")
+@click.option("--reasoning-effort")
+@click.option("--workspace-id")
+@click.pass_context
+def feishu_realtime(ctx: click.Context, **options: Any) -> None:
+    """Show or configure the background WebSocket triage execution agent."""
+    changes = {key: value for key, value in options.items() if value is not None}
+    try:
+        client = cli_main.get_client(ctx)
+        payload = client._request(
+            "PATCH" if changes else "GET",
+            "/api/feishu/bot/realtime-events",
+            json=changes if changes else None,
+        )
+    except HubError as exc:
+        raise click.ClickException(str(exc)) from exc
+    emit(payload, as_json=True)

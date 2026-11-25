@@ -128,7 +128,7 @@
             <div class="dot-patrol__head">
               <div>
                 <h3>Proactive radar</h3>
-                <p>Off by default. Pushes Feishu triage drafts and daily InfoWall &amp; MR digests.</p>
+                <p>Off by default. Pushes daily InfoWall &amp; MR digests. Realtime Feishu triage runs independently.</p>
               </div>
               <label class="dot-patrol__switch">
                 <input
@@ -146,18 +146,6 @@
               v-if="patrolConfig.enabled"
               class="dot-patrol__channels"
             >
-              <label class="dot-patrol__channel">
-                <input
-                  type="checkbox"
-                  :checked="patrolConfig.feishu_enabled"
-                  :disabled="patrolSaving || executionBusy"
-                  aria-label="Work-hours Feishu triage"
-                  @change="changePatrol({ feishu_enabled: ($event.target as HTMLInputElement).checked })"
-                >
-                <span>
-                  Feishu unanswered triage ({{ patrolConfig.feishu_window_start }}–{{ patrolConfig.feishu_window_end }}, every {{ patrolConfig.feishu_interval_minutes }}m)
-                </span>
-              </label>
               <label class="dot-patrol__channel">
                 <input
                   type="checkbox"
@@ -292,7 +280,10 @@
                 >
                   {{ patrolConfig.enabled ? 'Disable' : 'Enable' }}
                 </button>
-                <FeishuRealtimeControl summary class="dot-patrol-bar__realtime" />
+                <FeishuRealtimeControl
+                  summary
+                  class="dot-patrol-bar__realtime"
+                />
               </div>
               <form
                 class="dot-row-form"

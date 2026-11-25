@@ -374,7 +374,7 @@ def test_parse_action_empty_errors() -> None:
 def test_feishu_group_commands() -> None:
     from claude_hub.cli.commands.feishu import feishu
 
-    assert set(feishu.commands) == {"build-card", "parse-action", "ai-command"}
+    assert set(feishu.commands) == {"build-card", "parse-action", "ai-command", "realtime"}
 
 
 def test_feishu_ai_command_cli_subcommands(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -472,3 +472,36 @@ def test_feishu_ai_command_cli_subcommands(monkeypatch: pytest.MonkeyPatch) -> N
     assert res_guide.exit_code == 0, res_guide.output
     assert "im:message.send_as_user" in json.loads(res_guide.output)["auth_login_command"]
     assert len(calls) == 5
+
+
+def test_realtime_execution_cli_reads_and_updates(monkeypatch) -> None:
+    captured = patch_get_client(
+        monkeypatch, lambda _request: httpx.Response(200, json={"config": {}})
+    )
+    runner = CliRunner()
+    assert runner.invoke(cli, ["feishu", "realtime"]).exit_code == 0
+    assert captured[-1].method == "GET"
+    result = runner.invoke(
+        cli,
+        [
+            "feishu",
+            "realtime",
+            "--provider",
+            "codex",
+            "--model",
+            "fast-model",
+            "--reasoning-effort",
+            "high",
+            "--workspace-id",
+            "ws-test",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert captured[-1].url.path == "/api/feishu/bot/realtime-events"
+    assert captured[-1].method == "PATCH"
+    assert json.loads(captured[-1].content) == {
+        "provider": "codex",
+        "model": "fast-model",
+        "reasoning_effort": "high",
+        "workspace_id": "ws-test",
+    }

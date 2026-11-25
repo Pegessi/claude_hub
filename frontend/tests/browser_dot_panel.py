@@ -117,15 +117,10 @@ async def main(browser_run: BrowserRun) -> None:
     patrol_config = {
         "enabled": False,
         "timezone": "Asia/Shanghai",
-        "feishu_enabled": True,
-        "feishu_interval_minutes": 20,
-        "feishu_window_start": "09:30",
-        "feishu_window_end": "22:30",
         "daily_enabled": True,
         "daily_slots": ["11:00", "17:30"],
         "stalled_hours": 48.0,
         "pending_top_n": 5,
-        "max_triage_per_run": 3,
     }
     realtime = {
         "effective_enabled": True,
@@ -500,14 +495,14 @@ async def main(browser_run: BrowserRun) -> None:
             await expect(patrol_master).not_to_be_checked()
             await patrol_master.check()
             await expect(patrol_master).to_be_checked()
-            await expect(patrol_editor.get_by_label("Work-hours Feishu triage")).to_be_checked()
+            await expect(patrol_editor.get_by_label("Work-hours Feishu triage")).to_have_count(0)
             await expect(patrol_editor.get_by_label("Daily demand digest")).to_be_checked()
-            await patrol_editor.get_by_label("Work-hours Feishu triage").uncheck()
-            await expect(patrol_editor.get_by_label("Work-hours Feishu triage")).not_to_be_checked()
+            await patrol_editor.get_by_label("Daily demand digest").uncheck()
+            await expect(patrol_editor.get_by_label("Daily demand digest")).not_to_be_checked()
             assert wrote("PATCH", "/api/dot/patrol") == [
                 {"realtime_enabled": False},
                 {"enabled": True},
-                {"feishu_enabled": False},
+                {"daily_enabled": False},
             ]
             await expect(execution_editor.get_by_label("Execution backend")).to_have_value("claude")
             initial_preset = await execution_editor.get_by_label(

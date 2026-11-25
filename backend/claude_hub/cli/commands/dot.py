@@ -94,13 +94,7 @@ def dot_health(ctx: click.Context) -> None:
     "--enable/--disable",
     "enabled",
     default=None,
-    help="Turn Dot's proactive demand and Feishu radar on or off (default: off).",
-)
-@click.option(
-    "--feishu/--no-feishu",
-    "feishu_enabled",
-    default=None,
-    help="Enable or disable work-hours unanswered Feishu triage.",
+    help="Turn Dot's daily demand digest on or off (default: off).",
 )
 @click.option(
     "--daily/--no-daily",
@@ -110,41 +104,25 @@ def dot_health(ctx: click.Context) -> None:
 )
 @click.option("--daily-slot", multiple=True, help="Replace daily slots (HH:MM); repeat for each.")
 @click.option(
-    "--feishu-interval",
-    type=click.IntRange(1, 1440),
-    default=None,
-    help="Feishu check interval in minutes.",
-)
-@click.option(
     "--realtime/--no-realtime",
     "realtime_enabled",
     default=None,
     help="Enable or disable Feishu WebSocket event dispatch independently of patrol.",
 )
-@click.option("--window-start", default=None, help="Feishu work-hours start (HH:MM).")
-@click.option("--window-end", default=None, help="Feishu work-hours end (HH:MM).")
 @click.pass_context
 def dot_patrol(
     ctx: click.Context,
     enabled: Optional[bool],
-    feishu_enabled: Optional[bool],
     realtime_enabled: Optional[bool],
     daily_enabled: Optional[bool],
     daily_slot: Tuple[str, ...],
-    feishu_interval: Optional[int],
-    window_start: Optional[str],
-    window_end: Optional[str],
 ) -> None:
-    """Show or toggle Dot's proactive demand and Feishu triage radar (off by default)."""
+    """Show or toggle Dot's daily digest and realtime Feishu events."""
     changes: Dict[str, Any] = {}
     for name, value in (
         ("enabled", enabled),
-        ("feishu_enabled", feishu_enabled),
         ("realtime_enabled", realtime_enabled),
         ("daily_enabled", daily_enabled),
-        ("feishu_interval_minutes", feishu_interval),
-        ("feishu_window_start", window_start),
-        ("feishu_window_end", window_end),
     ):
         if value is not None:
             changes[name] = value
@@ -164,14 +142,9 @@ def dot_patrol(
     realtime = data.get("realtime")
     cfg = data.get("config", data)
     master = "on" if cfg.get("enabled") else "off"
-    feishu_flag = "on" if cfg.get("feishu_enabled") else "off"
     daily_flag = "on" if cfg.get("daily_enabled") else "off"
     slots = ", ".join(cfg.get("daily_slots") or []) or "none"
-    click.echo(
-        f"patrol: {master} (feishu={feishu_flag} {cfg.get('feishu_window_start')}–"
-        f"{cfg.get('feishu_window_end')} every {cfg.get('feishu_interval_minutes')}m; "
-        f"daily={daily_flag} at {slots})"
-    )
+    click.echo(f"patrol: {master} (daily={daily_flag} at {slots})")
 
     if realtime is not None:
         enabled_label = "on" if realtime["effective_enabled"] else "off"

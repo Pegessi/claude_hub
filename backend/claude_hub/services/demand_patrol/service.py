@@ -8,7 +8,7 @@ import os
 import sys
 from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
-from typing import Any, Literal
+from typing import Any
 from zoneinfo import ZoneInfo
 
 from ...models import (
@@ -18,14 +18,9 @@ from ...models import (
     TaskPhase,
     WorkspaceTask,
 )
-from ..feishu_realtime_events import (
-    get_feishu_realtime_event_router,
-    is_feishu_realtime_stream_healthy,
-)
 from .commands import CommandRunner, run_command
 from .daily_digest import DecisionModel, build_daily_digest
 from .digest_provider import recommend_daily_decisions
-from .feishu_triage import TriageCallback, run_feishu_triage
 from .models import (
     PatrolChannel,
     PatrolConfig,
@@ -100,54 +95,6 @@ def due_daily_slots(state: PatrolState, now: datetime) -> list[str]:
     return due
 
 
-def feishu_due(
-    state: PatrolState,
-    now: datetime,
-    *,
-    realtime_healthy: bool | None = None,
-    web_replay_configured: bool | None = None,
-) -> bool:
-    config = state.config
-    if not config.enabled or not config.feishu_enabled:
-        return False
-    from ..feishu_ai_poller import get_feishu_ai_poller
-
-    if web_replay_configured is None:
-        web_replay_configured = get_feishu_ai_poller().web_replay_configured()
-    if web_replay_configured:
-        return False
-    router = get_feishu_realtime_event_router()
-    rt_cfg = router.resolve_config()
-    if realtime_healthy is None:
-        if (
-            rt_cfg.suppress_patrol_when_healthy
-            and is_feishu_realtime_stream_healthy()
-            and not router.needs_patrol_fallback
-        ):
-            return False
-    elif realtime_healthy and not router.needs_patrol_fallback:
-        return False
-    local = now.astimezone(ZoneInfo(config.timezone))
-    clock = local.strftime("%H:%M")
-    if not config.feishu_window_start <= clock <= config.feishu_window_end:
-        return False
-    last = next(
-        (
-            record.started_at
-            for record in reversed(state.recent_runs)
-            if record.channel == "feishu" and not record.dry_run
-        ),
-        None,
-    )
-    if last:
-        checked = datetime.fromisoformat(last)
-        if checked.tzinfo is None:
-            checked = checked.replace(tzinfo=timezone.utc)
-        if now - checked < timedelta(minutes=config.feishu_interval_minutes):
-            return False
-    return True
-
-
 class DemandPatrolService:
     def __init__(
         self,
@@ -155,7 +102,6 @@ class DemandPatrolService:
         store: PatrolStateStore | None = None,
         runner: CommandRunner = run_command,
         dot: PatrolNotifier | None = None,
-        triage: TriageCallback | None = None,
         decision_model: DecisionModel = recommend_daily_decisions,
         task_source: TaskSource = _hub_tasks,
         clock: Callable[[], datetime] = _utc_now,
@@ -163,7 +109,6 @@ class DemandPatrolService:
         self.store = store or PatrolStateStore()
         self.runner = runner
         self._dot_override = dot
-        self.triage = triage
         self.decision_model = decision_model
         self.task_source = task_source
         self.clock = clock
@@ -205,27 +150,21 @@ class DemandPatrolService:
         dry_run: bool = False,
         notify: bool = True,
     ) -> dict[str, Any]:
-        if channel not in {"all", "feishu", "daily"}:
-            raise ValueError("channel must be all, feishu or daily")
+        if channel not in {"all", "daily"}:
+            raise ValueError("channel must be all or daily")
         async with self._run_lock:
             state = await asyncio.to_thread(self.store.load)
             now = self.clock()
-            channels = ["feishu", "daily"] if channel == "all" else [channel]
-            records = []
-            for selected in channels:
-                record = await self._run_channel(
-                    state, selected, now=now, dry_run=dry_run, notify=notify
-                )
-                records.append(record)
+            record = await self._run_daily(state, now=now, dry_run=dry_run, notify=notify)
+            records = [record]
             return {
                 "runs": [record.model_dump(mode="json") for record in records],
                 "markdown": "\n\n".join(record.markdown for record in records if record.markdown),
             }
 
-    async def _run_channel(
+    async def _run_daily(
         self,
         state: PatrolState,
-        channel: str,
         *,
         now: datetime,
         dry_run: bool,
@@ -233,70 +172,55 @@ class DemandPatrolService:
         slot_key: str | None = None,
     ) -> PatrolRunRecord:
         candidate = state.model_copy(deep=True)
-        selected: Literal["feishu", "daily"] = "feishu" if channel == "feishu" else "daily"
         try:
-            if selected == "feishu":
-                record = await run_feishu_triage(
-                    candidate,
-                    now=now,
-                    runner=self.runner,
-                    dot=self._notifier(),
-                    dry_run=dry_run,
-                    notify=notify,
-                    triage=self.triage,
+            tasks, lifecycles, task_details = self.task_source()
+            slot_label = slot_key.split("@", 1)[1] if slot_key else "manual"
+            digest = await build_daily_digest(
+                candidate,
+                now=now,
+                runner=self.runner,
+                tasks=tasks,
+                lifecycles=lifecycles,
+                task_details=task_details,
+                decision_model=self.decision_model,
+                slot_label=slot_label,
+                dry_run=dry_run,
+            )
+            record = digest.record
+            if slot_key and not dry_run:
+                # A quiet run consumes its slot too. Claim before a send
+                # so an ambiguous delivery cannot replay this slot.
+                candidate.fired_daily_slots.append(slot_key)
+                if record.markdown:
+                    await self._save_run_state(candidate)
+            if notify and not dry_run and record.markdown:
+                result = await self._notifier().notify(
+                    record.markdown,
+                    title=f"📋 研发需求与 Work 巡检 ({slot_label})",
+                    tone="info",
                 )
-            else:
-                tasks, lifecycles, task_details = self.task_source()
-                slot_label = slot_key.split("@", 1)[1] if slot_key else "manual"
-                digest = await build_daily_digest(
-                    candidate,
-                    now=now,
-                    runner=self.runner,
-                    tasks=tasks,
-                    lifecycles=lifecycles,
-                    task_details=task_details,
-                    decision_model=self.decision_model,
-                    slot_label=slot_label,
-                    dry_run=dry_run,
-                )
-                record = digest.record
-                if slot_key and not dry_run:
-                    # A quiet run consumes its slot too. Claim before a send
-                    # so an ambiguous delivery cannot replay this slot.
-                    candidate.fired_daily_slots.append(slot_key)
-                    if record.markdown:
-                        await self._save_run_state(candidate)
-                if notify and not dry_run and record.markdown:
-                    result = await self._notifier().notify(
-                        record.markdown,
-                        title=f"📋 研发需求与 Work 巡检 ({slot_label})",
-                        tone="info",
+                record.notified = int(result == "sent")
+                record.details["notification"] = result
+                if result in {"sent", "repeat"}:
+                    candidate.daily_decision_receipts.update(digest.receipts)
+                else:
+                    record.errors.append(
+                        "Dot notification failed; inspect binding before manual retry"
                     )
-                    record.notified = int(result == "sent")
-                    record.details["notification"] = result
-                    if result in {"sent", "repeat"}:
-                        candidate.daily_decision_receipts.update(digest.receipts)
-                    else:
-                        record.errors.append(
-                            "Dot notification failed; inspect binding before manual retry"
-                        )
         except Exception as exc:
-            # This is the automation boundary: one broken source must not stop
-            # the other channel or the resident loop. Never emit raw CLI data.
-            logger.warning("%s patrol failed (%s)", selected, type(exc).__name__)
+            # A broken source must not stop the resident loop. Never emit raw CLI data.
+            logger.warning("Daily patrol failed (%s)", type(exc).__name__)
             record = PatrolRunRecord(
-                channel=selected,
+                channel="daily",
                 started_at=now.isoformat(),
                 dry_run=dry_run,
-                errors=[f"{selected} patrol failed: {type(exc).__name__}"],
+                errors=[f"daily patrol failed: {type(exc).__name__}"],
             )
         if not dry_run:
             candidate.recent_runs.append(record)
             await self._save_run_state(candidate)
-            # The next channel in this serialized run sees committed evidence.
+            # The next daily slot in this tick sees committed evidence.
             state.config = candidate.config
-            state.feishu_watermark_iso = candidate.feishu_watermark_iso
-            state.processed_feishu_ids = candidate.processed_feishu_ids
             state.fired_daily_slots = candidate.fired_daily_slots
             state.daily_mr_cursor = candidate.daily_mr_cursor
             state.mr_snapshots = candidate.mr_snapshots
@@ -314,21 +238,13 @@ class DemandPatrolService:
             records = []
             for key in due_daily_slots(state, now):
                 records.append(
-                    await self._run_channel(
+                    await self._run_daily(
                         state,
-                        "daily",
                         now=now,
                         dry_run=False,
                         notify=True,
                         slot_key=key,
                     )
-                )
-            from ..feishu_ai_poller import get_feishu_ai_poller
-
-            web_configured = await asyncio.to_thread(get_feishu_ai_poller().web_replay_configured)
-            if feishu_due(state, now, web_replay_configured=web_configured):
-                records.append(
-                    await self._run_channel(state, "feishu", now=now, dry_run=False, notify=True)
                 )
             return records
 

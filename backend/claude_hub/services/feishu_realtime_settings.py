@@ -31,6 +31,10 @@ def realtime_env_override() -> bool | None:
 
 
 def write_realtime_enabled(enabled: bool) -> None:
+    write_realtime_settings({"enabled": enabled})
+
+
+def write_realtime_settings(changes: dict[str, object]) -> None:
     """Replace the settings document atomically, preserving all other keys."""
     path = resolve_runtime_home() / SETTINGS_FILE
     with _write_lock:
@@ -40,8 +44,9 @@ def write_realtime_enabled(enabled: bool) -> None:
             settings = {}
         if not isinstance(settings, dict):
             raise ValueError("Feishu realtime settings must be a JSON object")
-        settings.pop(ENABLED_ENV, None)
-        settings["enabled"] = enabled
+        if "enabled" in changes:
+            settings.pop(ENABLED_ENV, None)
+        settings.update(changes)
         path.parent.mkdir(parents=True, exist_ok=True)
         handle = tempfile.NamedTemporaryFile(
             mode="w", encoding="utf-8", dir=path.parent, delete=False

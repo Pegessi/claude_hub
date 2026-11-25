@@ -12,7 +12,7 @@ from claude_hub.cli.output import emit
 def _call(ctx: click.Context, method: str, path: str, **kwargs: Any) -> Any:
     try:
         with cli_main.get_client(ctx) as client:
-            # Three diagnoses may each use the bounded 600-second provider turn.
+            # Daily digest collection and model analysis can take several minutes.
             if path.endswith("/run"):
                 kwargs["timeout"] = 12500.0
             return client.request(method, path, **kwargs)
@@ -22,7 +22,7 @@ def _call(ctx: click.Context, method: str, path: str, **kwargs: Any) -> Any:
 
 @click.group()
 def patrol() -> None:
-    """Inspect or configure the daily demand and work-hours Feishu radar."""
+    """Inspect or configure the daily demand digest."""
 
 
 @patrol.command("status")
@@ -32,7 +32,7 @@ def patrol_status(ctx: click.Context) -> None:
 
 
 @patrol.command("run")
-@click.option("--channel", type=click.Choice(["all", "feishu", "daily"]), default="all")
+@click.option("--channel", type=click.Choice(["all", "daily"]), default="all")
 @click.option("--dry-run", is_flag=True)
 @click.option("--notify/--no-notify", default=True)
 @click.pass_context
@@ -55,33 +55,21 @@ def patrol_run(ctx: click.Context, channel: str, dry_run: bool, notify: bool) ->
 
 @patrol.command("config")
 @click.option("--enable/--disable", "enabled", default=None)
-@click.option("--feishu/--no-feishu", "feishu_enabled", default=None)
 @click.option("--daily/--no-daily", "daily_enabled", default=None)
 @click.option("--daily-slot", multiple=True, help="Replace daily slots (HH:MM); repeat for each.")
-@click.option("--feishu-interval", type=click.IntRange(1, 1440), default=None)
-@click.option("--window-start", default=None)
-@click.option("--window-end", default=None)
 @click.option("--workspace-id", default=None)
 @click.pass_context
 def patrol_config(
     ctx: click.Context,
     enabled: bool | None,
-    feishu_enabled: bool | None,
     daily_enabled: bool | None,
     daily_slot: tuple[str, ...],
-    feishu_interval: int | None,
-    window_start: str | None,
-    window_end: str | None,
     workspace_id: str | None,
 ) -> None:
     changes: dict[str, Any] = {}
     for name, value in (
         ("enabled", enabled),
-        ("feishu_enabled", feishu_enabled),
         ("daily_enabled", daily_enabled),
-        ("feishu_interval_minutes", feishu_interval),
-        ("feishu_window_start", window_start),
-        ("feishu_window_end", window_end),
         ("workspace_id", workspace_id),
     ):
         if value is not None:

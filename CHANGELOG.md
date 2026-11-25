@@ -7,6 +7,12 @@
 
 ## Released
 
+### feat(feishu): triage realtime messages in background agents
+
+- Retire scheduled Feishu polling while preserving daily digests and WebSocket controls.
+- Run realtime questions and issue links in bounded ephemeral Workspace Chats, with live-catalog execution settings shared with the `/ai` assistant.
+- Send useful summaries and suggested replies through the bound Bot; retain passive context for Dot without waking its interactive Chat.
+
 ### perf: speed up backend verification
 
 - Run the default backend suite in isolated, coverage-merged shards on supported hosts; preserve focused single-process runs and bypass proxies for loopback tests.

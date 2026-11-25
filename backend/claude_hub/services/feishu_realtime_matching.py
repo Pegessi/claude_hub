@@ -244,6 +244,10 @@ class FeishuRealtimeEventConfig:
     automated_chat_ids: frozenset[str] = frozenset()
     events_url: str = ""
     suppress_patrol_when_healthy: bool = True
+    provider: str = "maso"
+    model: str = ""
+    reasoning_effort: str = "high"
+    workspace_id: str = ""
 
     @classmethod
     def from_runtime(cls) -> FeishuRealtimeEventConfig:
@@ -258,6 +262,16 @@ class FeishuRealtimeEventConfig:
             return _setting_bool(
                 [f"CLAUDE_HUB_{x}" if x.isupper() else x for x in s.split()], d, default=df
             )
+
+        def scalar(name: str, default: str) -> str:
+            env_name = f"CLAUDE_HUB_FEISHU_REALTIME_{name.upper()}"
+            if env_name in os.environ:
+                return os.environ[env_name].strip()
+            for doc in d:
+                for key in (env_name, name):
+                    if isinstance(doc.get(key), str):
+                        return str(doc[key]).strip()
+            return default
 
         w_ids = v(
             "FEISHU_WATCH_CHAT_IDS FEISHU_REALTIME_WATCH_CHAT_IDS PATROL_WATCH_CHAT_IDS FEISHU_PRIORITY_CHAT_IDS watch_chat_ids"
@@ -284,6 +298,10 @@ class FeishuRealtimeEventConfig:
             frozenset(x.casefold() for x in auto_ids),
             e_urls[0] if e_urls else "",
             sup,
+            scalar("provider", "maso"),
+            scalar("model", ""),
+            scalar("reasoning_effort", "high"),
+            scalar("workspace_id", ""),
         )
 
 
