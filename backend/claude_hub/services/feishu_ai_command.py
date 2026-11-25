@@ -26,7 +26,6 @@ from claude_hub.services.feishu_ai_command_models import (
     _MASO_MODEL_VARIANTS,
     _MAX_PENDING_QUEUE,
     _MAX_RECENT_RUNS,
-    _REACTION_TIMEOUT_SECONDS,
     _STATE_VERSION,
     DEFAULT_AI_COMMAND_ACK_EMOJI,
     DEFAULT_AI_COMMAND_DONE_EMOJI,
@@ -74,6 +73,7 @@ from claude_hub.services.feishu_ai_command_models import (
 )
 from claude_hub.services.feishu_ai_context import fetch_context_and_refs
 from claude_hub.services.feishu_ai_images import message_from_event, prepare_images
+from claude_hub.services.feishu_ai_reactions import add_reaction, remove_ack_reaction
 from claude_hub.services.feishu_bot import (
     FeishuMessageDedupStore,
     FeishuMessageEvent,
@@ -502,20 +502,25 @@ class FeishuAiCommandService:
         """Reconcile an interrupted command using durable dispatch/output evidence."""
         with self._lock:
             state = self._load_state()
-            if any(
-                isinstance(r, Mapping) and r.get("message_id") == message_id
-                for r in (state.get("recent_runs") or [])
-            ):
-                self.dequeue_pending_command(message_id)
-                return False
             item = self.get_pending_command(message_id)
             if item is None:
                 return False
-            cfg = FeishuAiCommandConfig.from_mapping(state.get("config") or {})
-            dedup_key = f"ai_cmd:{cfg.owner_open_id or 'owner'}:{message_id}"
             dispatch_state = str(item.get("dispatch_state") or "not_started")
+            if dispatch_state == "cleanup_reaction":
+                return True
+            reply_id = str(item.get("reply_message_id") or item.get("ack_message_id") or message_id)
+            if any(
+                isinstance(r, Mapping) and r.get("message_id") in (message_id, reply_id)
+                for r in (state.get("recent_runs") or [])
+            ):
+                return self._finish_reconciled_command(message_id, item)
+            cfg = FeishuAiCommandConfig.from_mapping(state.get("config") or {})
+            dedup_keys = [
+                f"ai_cmd:{cfg.owner_open_id or 'owner'}:{mid}" for mid in {message_id, reply_id}
+            ]
             if dispatch_state in {"not_started", "retired_retry_safe"}:
-                self._dedup.release(dedup_key)
+                for key in dedup_keys:
+                    self._dedup.release(key)
                 self.mark_pending_command_state(message_id, "queued", dispatch_state="not_started")
                 return True
             if dispatch_state == "turn_completed" and isinstance(item.get("answer"), str):
@@ -539,12 +544,13 @@ class FeishuAiCommandService:
                 )
                 return True
             # Turn retirement is uncertain: preserve the dedup claim and do not replay.
-            self._dedup.finish(
-                dedup_key,
-                "interrupted_uncertain",
-                stage="ai_command",
-                reason=f"uncertain_turn_retirement:{ev_state}",
-            )
+            for key in dedup_keys:
+                self._dedup.finish(
+                    key,
+                    "interrupted_uncertain",
+                    stage="ai_command",
+                    reason=f"uncertain_turn_retirement:{ev_state}",
+                )
             raw_msg = item.get("message")
             chat_id = str(raw_msg.get("chat_id") or "") if isinstance(raw_msg, Mapping) else ""
             thread_id = raw_msg.get("thread_id") if isinstance(raw_msg, Mapping) else None
@@ -568,8 +574,14 @@ class FeishuAiCommandService:
             )
             state["recent_runs"] = runs[:_MAX_RECENT_RUNS]
             self._save_state(state)
-            self.dequeue_pending_command(message_id)
-            return False
+            return self._finish_reconciled_command(message_id, item)
+
+    def _finish_reconciled_command(self, message_id: str, item: Mapping[str, Any]) -> bool:
+        if item.get("ack_reaction_id"):
+            self.mark_pending_command_state(message_id, "queued", dispatch_state="cleanup_reaction")
+            return True
+        self.dequeue_pending_command(message_id)
+        return False
 
     def dequeue_pending_command(self, message_id: str) -> None:
         """Remove a completed/handled command from the durable pending queue."""
@@ -813,8 +825,12 @@ class FeishuAiCommandService:
         message: FeishuUserMessage,
         parsed: ParsedAiCommand,
         cfg: FeishuAiCommandConfig,
+        *,
+        provisional: bool = False,
     ) -> str:
-        return await feishu_ai_workspace.ensure_execution_tab(self, message, parsed, cfg)
+        return await feishu_ai_workspace.ensure_execution_tab(
+            self, message, parsed, cfg, provisional=provisional
+        )
 
     @staticmethod
     def _channel_key(message: FeishuUserMessage, parsed: ParsedAiCommand) -> str:
@@ -1026,18 +1042,27 @@ class FeishuAiCommandService:
             if not self._matches_owner_sender(message.sender_open_id, cfg):
                 return self._skip_result(message, dry_run=dry_run, reason="sender_not_owner")
 
+        pending_message_id = message.message_id
+        pending_item = None if dry_run else self.get_pending_command(pending_message_id)
+        resuming_completed = bool(
+            pending_item
+            and pending_item.get("dispatch_state") == "turn_completed"
+            and isinstance(pending_item.get("answer"), str)
+        )
+        replay = pending_item if resuming_completed and pending_item is not None else {}
+        provider = replay.get("provider", cfg.provider)
         # Refresh the catalog before resolving an explicit model or effort; the
         # capability endpoint may not have been opened in this process.
-        if cfg.provider == AgentType.MASO or "maso" in message.text.lower():
+        if provider == AgentType.MASO or "maso" in message.text.lower():
             await _async_provider_model_options()
 
         try:
             parsed = parse_ai_command(
                 message.text,
                 prefix=cfg.prefix,
-                default_provider=cfg.provider,
-                default_model=cfg.model,
-                default_reasoning_effort=cfg.reasoning_effort,
+                default_provider=provider,
+                default_model=replay.get("model", cfg.model),
+                default_reasoning_effort=replay.get("reasoning_effort", cfg.reasoning_effort),
                 footer=cfg.footer,
             )
         except ValueError as exc:
@@ -1047,13 +1072,10 @@ class FeishuAiCommandService:
 
         if parsed is None:
             return self._skip_result(message, dry_run=dry_run, reason="prefix_not_matched")
-
-        pending_item = None if dry_run else self.get_pending_command(message.message_id)
-        resuming_completed = bool(
-            pending_item
-            and pending_item.get("dispatch_state") == "turn_completed"
-            and isinstance(pending_item.get("answer"), str)
-        )
+        if replay.get("reply_message_id"):
+            message = replace(
+                message, message_id=replay["reply_message_id"], chat_id=replay["reply_chat_id"]
+            )
         user_client = self.build_user_client(cfg)
         (
             message,
@@ -1080,10 +1102,15 @@ class FeishuAiCommandService:
             )
         ack_reaction_id: str | None = (
             str(pending_item["ack_reaction_id"])
-            if resuming_completed and pending_item and pending_item.get("ack_reaction_id")
+            if pending_item and pending_item.get("ack_reaction_id")
             else None
         )
-        reply_in_thread = bool(message.thread_id) or cfg.reply_in_thread
+        ack_message_id = str((pending_item or {}).get("ack_message_id") or message.message_id)
+        reply_in_thread = bool(
+            replay.get("reply_in_thread", message.thread_id or cfg.reply_in_thread)
+        )
+        execution_message = message
+        interim_text, interim_post = "", {}
         status_val = "completed"
         reason_val = ""
         tab_id: str | None = (
@@ -1093,13 +1120,13 @@ class FeishuAiCommandService:
         )
         interim_receipt = FeishuReplyReceipt()
         final_receipt = FeishuReplyReceipt()
-        dispatch_entered = False
-        final_reply_started = False
+        dispatch_entered = final_reply_started = False
         retryable_unsent = False
         held_channel_lock: asyncio.Lock | None = None
+        held_publication_lock: asyncio.Lock | None = None
         turn_completed = resuming_completed
-        answer = str(pending_item["answer"]) if resuming_completed and pending_item else ""
-
+        answer = str(replay.get("answer", ""))
+        result: AiCommandExecutionResult | None = None
         try:
             if dry_run:
                 context_msgs = list(seeded_context or [])
@@ -1107,8 +1134,9 @@ class FeishuAiCommandService:
                 if message.text:
                     texts.append(message.text)
                 refs = extract_context_references(texts)
-                interim_text = build_interim_reply_text(parsed, refs, footer=cfg.footer)
-                interim_post = build_ai_post_payload(interim_text, footer=cfg.footer)
+                if cfg.send_interim_reply:
+                    interim_text = build_interim_reply_text(parsed, refs, footer=cfg.footer)
+                    interim_post = build_ai_post_payload(interim_text, footer=cfg.footer)
                 preview_final = ensure_ai_footer(
                     f"[Dry-run preview] Will dispatch to provider={parsed.provider.value}, "
                     f"model={parsed.model or '(default)'}, "
@@ -1160,17 +1188,15 @@ class FeishuAiCommandService:
                     thread_id=pending_item.get("thread_id"),
                 )
             else:
-                if cfg.ack_emoji:
-                    try:
-                        async with asyncio.timeout(_REACTION_TIMEOUT_SECONDS):
-                            ack_reaction_id = await user_client.add_reaction_as_user(
-                                message.message_id, cfg.ack_emoji
-                            )
-                    except Exception:
-                        logger.warning(
-                            "Failed to add %s reaction on %s",
-                            cfg.ack_emoji,
-                            message.message_id,
+                if cfg.ack_emoji and not ack_reaction_id:
+                    ack_message_id = message.message_id
+                    ack_reaction_id = await add_reaction(user_client, ack_message_id, cfg.ack_emoji)
+                    if ack_reaction_id:
+                        self.mark_pending_command_state(
+                            pending_message_id,
+                            "in_flight",
+                            ack_reaction_id=ack_reaction_id,
+                            ack_message_id=message.message_id,
                         )
                 context_msgs, refs = await self._fetch_context_and_refs(
                     user_client, message, cfg, seeded_context=seeded_context
@@ -1178,31 +1204,36 @@ class FeishuAiCommandService:
                 attachments, image_metadata = await prepare_images(
                     user_client, message, context_msgs
                 )
-                interim_text = build_interim_reply_text(parsed, refs, footer=cfg.footer)
-                interim_post = build_ai_post_payload(interim_text, footer=cfg.footer)
-                interim_receipt = await self._reply_ai_command(
-                    user_client,
-                    message.message_id,
-                    interim_post,
-                    chat_id=message.chat_id,
-                    reply_in_thread=reply_in_thread,
-                    uuid=bounded_message_uuid(message.message_id, "interim"),
-                )
-
-                if (
-                    not isinstance(interim_receipt.message_id, str)
-                    or not interim_receipt.message_id.strip()
-                ):
-                    raise FeishuDeliveryUncertainError(
-                        "Feishu interim reply message identity is unavailable; delivery may have occurred"
+                if cfg.send_interim_reply:
+                    interim_text = build_interim_reply_text(parsed, refs, footer=cfg.footer)
+                    interim_post = build_ai_post_payload(interim_text, footer=cfg.footer)
+                    interim_receipt = await self._reply_ai_command(
+                        user_client,
+                        message.message_id,
+                        interim_post,
+                        chat_id=message.chat_id,
+                        reply_in_thread=reply_in_thread,
+                        uuid=bounded_message_uuid(message.message_id, "interim"),
                     )
+
+                    if (
+                        not isinstance(interim_receipt.message_id, str)
+                        or not interim_receipt.message_id.strip()
+                    ):
+                        raise FeishuDeliveryUncertainError(
+                            "Feishu interim reply message identity is unavailable; delivery may have occurred"
+                        )
                 execution_message = feishu_ai_workspace.execution_message(
                     message, interim_receipt.thread_id, reply_in_thread=reply_in_thread
                 )
-                held_channel_lock = await feishu_ai_workspace.acquire_execution_lock(
-                    self, execution_message
+                provisional = reply_in_thread and not execution_message.thread_id
+                if not provisional:
+                    held_channel_lock = await feishu_ai_workspace.acquire_execution_lock(
+                        self, execution_message
+                    )
+                tab_id = await self._ensure_execution_tab(
+                    execution_message, parsed, cfg, provisional=provisional
                 )
-                tab_id = await self._ensure_execution_tab(execution_message, parsed, cfg)
                 prompt = build_ai_dispatch_prompt(message, parsed, context_msgs, refs)
                 turn_id = f"feishu-ai-{message.message_id}"
                 turn_metadata = {
@@ -1219,15 +1250,20 @@ class FeishuAiCommandService:
                 }
                 dispatch_entered = True
                 self.mark_pending_command_state(
-                    message.message_id,
+                    pending_message_id,
                     "in_flight",
                     dispatch_state="dispatched",
-                    message=message.to_dict(),
+                    reply_message_id=message.message_id,
+                    reply_chat_id=message.chat_id,
                     tab_id=tab_id,
                     turn_id=turn_id,
                     ack_reaction_id=ack_reaction_id,
                     interim_message_id=interim_receipt.message_id,
                     thread_id=execution_message.thread_id,
+                    reply_in_thread=reply_in_thread,
+                    provider=parsed.provider.value,
+                    model=parsed.model,
+                    reasoning_effort=parsed.reasoning_effort,
                     refs=refs.to_dict(),
                     interim_text=interim_text,
                     interim_post=interim_post,
@@ -1242,13 +1278,22 @@ class FeishuAiCommandService:
                 )
                 turn_completed = True
                 self.mark_pending_command_state(
-                    message.message_id,
+                    pending_message_id,
                     "in_flight",
                     dispatch_state="turn_completed",
                     answer=answer,
                 )
             if resuming_completed:
-                held_channel_lock = await feishu_ai_workspace.acquire_execution_lock(self, message)
+                execution_message = feishu_ai_workspace.execution_message(
+                    message, interim_receipt.thread_id, reply_in_thread=reply_in_thread
+                )
+                if not reply_in_thread or execution_message.thread_id:
+                    held_channel_lock = await feishu_ai_workspace.acquire_execution_lock(
+                        self, execution_message
+                    )
+            held_publication_lock = await feishu_ai_workspace.acquire_thread_publication_lock(
+                self, execution_message, reply_in_thread
+            )
             final_text = ensure_ai_footer(answer, footer=cfg.footer)
             final_post = build_ai_post_payload(final_text, footer=cfg.footer)
             final_reply_started = True
@@ -1268,7 +1313,7 @@ class FeishuAiCommandService:
                     "Feishu final reply message identity is unavailable; delivery may have occurred"
                 )
             effective_thread_id = feishu_ai_workspace.bind_reply_thread(
-                self, message, parsed, tab_id, interim_receipt, final_receipt, reply_in_thread
+                self, execution_message, parsed, tab_id, final_receipt.thread_id, reply_in_thread
             )
             result = self._done_result(
                 message,
@@ -1286,14 +1331,12 @@ class FeishuAiCommandService:
                 interim_message_id=interim_receipt.message_id,
                 final_message_id=final_receipt.message_id,
             )
-            self._record_run(result, source=source)
             return result
 
         except FeishuUserScopeError as exc:
             status_val, reason_val = "scope_blocked", str(exc)
             logger.error("Feishu /ai command blocked by missing scope: %s", exc)
             result = self._done_result(message, status=status_val, reason=reason_val, parsed=parsed)
-            self._record_run(result, source=source)
             return result
 
         except asyncio.CancelledError as exc:
@@ -1303,21 +1346,21 @@ class FeishuAiCommandService:
                     self, message, parsed, tab_id, interim_receipt, reply_in_thread
                 )
                 self.mark_pending_command_state(
-                    message.message_id,
+                    pending_message_id,
                     "interrupted",
                     dispatch_state="turn_completed",
                     answer=answer,
                 )
             elif not dispatch_entered:
                 self.mark_pending_command_state(
-                    message.message_id, "interrupted", dispatch_state="not_started"
+                    pending_message_id, "interrupted", dispatch_state="not_started"
                 )
                 for dk in (dedup_claim_key, *extra_dedup_keys):
                     self._dedup.release(dk)
             elif type(exc).__name__ == "ExternalDispatchRetired":
                 status_val, reason_val = "cancelled", "retired_retry_safe"
                 self.mark_pending_command_state(
-                    message.message_id,
+                    pending_message_id,
                     "interrupted",
                     dispatch_state="retired_retry_safe",
                 )
@@ -1325,7 +1368,7 @@ class FeishuAiCommandService:
                     self._dedup.release(dk)
             else:
                 self.mark_pending_command_state(
-                    message.message_id, "interrupted", dispatch_state="uncertain"
+                    pending_message_id, "interrupted", dispatch_state="uncertain"
                 )
             raise
 
@@ -1346,6 +1389,12 @@ class FeishuAiCommandService:
                 )
                 error_post = build_ai_post_payload(error_text, footer=cfg.footer)
                 try:
+                    if held_publication_lock is None:
+                        held_publication_lock = (
+                            await feishu_ai_workspace.acquire_thread_publication_lock(
+                                self, execution_message, reply_in_thread
+                            )
+                        )
                     final_receipt = await self._reply_ai_command(
                         user_client,
                         message.message_id,
@@ -1353,6 +1402,14 @@ class FeishuAiCommandService:
                         chat_id=message.chat_id,
                         reply_in_thread=reply_in_thread,
                         uuid=bounded_message_uuid(message.message_id, "error"),
+                    )
+                    feishu_ai_workspace.bind_reply_thread(
+                        self,
+                        execution_message,
+                        parsed,
+                        tab_id,
+                        final_receipt.thread_id,
+                        reply_in_thread,
                     )
                 except Exception as fallback_exc:
                     retryable_unsent = (
@@ -1375,37 +1432,27 @@ class FeishuAiCommandService:
                 interim_message_id=interim_receipt.message_id,
                 final_message_id=final_receipt.message_id,
             )
-            self._record_run(result, source=source)
             return result
 
         finally:
+            if held_publication_lock is not None:
+                held_publication_lock.release()
             if held_channel_lock is not None:
                 held_channel_lock.release()
             if not dry_run and not (status_val == "cancelled" and turn_completed):
+                done_emoji = cfg.done_emoji if status_val == "completed" else ""
                 if ack_reaction_id:
-                    try:
-                        async with asyncio.timeout(_REACTION_TIMEOUT_SECONDS):
-                            await user_client.delete_reaction_as_user(
-                                message.message_id, ack_reaction_id
-                            )
-                    except Exception:
-                        logger.debug(
-                            "Could not remove ack reaction %s on %s",
-                            ack_reaction_id,
-                            message.message_id,
-                        )
-                if status_val == "completed" and cfg.done_emoji:
-                    try:
-                        async with asyncio.timeout(_REACTION_TIMEOUT_SECONDS):
-                            await user_client.add_reaction_as_user(
-                                message.message_id, cfg.done_emoji
-                            )
-                    except Exception:
-                        logger.warning(
-                            "Failed to add %s reaction on %s",
-                            cfg.done_emoji,
-                            message.message_id,
-                        )
+                    removed = await remove_ack_reaction(
+                        user_client, ack_message_id, ack_reaction_id
+                    )
+                    self.mark_pending_command_state(
+                        pending_message_id,
+                        "interrupted" if status_val == "cancelled" else "in_flight",
+                        ack_reaction_id=None if removed else ack_reaction_id,
+                        cleanup_done_emoji="" if removed else done_emoji,
+                    )
+                if done_emoji and (not ack_reaction_id or removed):
+                    await add_reaction(user_client, message.message_id, done_emoji)
                 if status_val != "cancelled":
                     for dk in (dedup_claim_key, *extra_dedup_keys):
                         if retryable_unsent:
@@ -1417,6 +1464,8 @@ class FeishuAiCommandService:
                             stage="ai_command",
                             reason=reason_val or None,
                         )
+            if result is not None:
+                self._record_run(result, source=source)
 
     async def handle_ws_event(self, event: FeishuMessageEvent) -> bool:
         """Handle a WebSocket ``FeishuMessageEvent`` if it matches the owner's ``/ai`` command."""

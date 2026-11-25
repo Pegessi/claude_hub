@@ -27,6 +27,8 @@ from claude_hub.services.feishu_ai_command import (
     get_feishu_ai_command_service,
     parse_ai_command,
 )
+from claude_hub.services.feishu_ai_command_models import _MAX_PENDING_QUEUE
+from claude_hub.services.feishu_ai_reactions import add_reaction, remove_ack_reaction
 from claude_hub.services.feishu_realtime_events import (
     FeishuRealtimeEventRouter,
     get_feishu_realtime_event_router,
@@ -41,6 +43,10 @@ from claude_hub.services.feishu_web_journal import WebPushJournal
 from claude_hub.services.feishu_web_replay import WebPositionReplay
 
 logger = logging.getLogger(__name__)
+
+_REACTION_CLEANUP_MAX_ATTEMPTS = 3
+_REACTION_CLEANUP_RETRY_SECONDS = 30
+_REACTION_CLEANUP_WORKERS = 2
 
 
 @contextmanager
@@ -163,6 +169,8 @@ class FeishuAiPoller:
         self._cached_user_client: Any = None
         self._cached_client_key: tuple[str, str, str] | None = None
         self._worker_tasks: set[asyncio.Task[None]] = set()
+        self._reaction_cleanup_tasks: set[asyncio.Task[None]] = set()
+        self._thread_replays: dict[asyncio.Task[None], str] = {}
         self._in_flight_ids: set[str] = set()
         self._search_msg_cache: OrderedDict[str, FeishuUserMessage | None] = OrderedDict()
         self._wake_event = asyncio.Event()
@@ -815,14 +823,60 @@ class FeishuAiPoller:
             except asyncio.TimeoutError:
                 pass
 
+    async def _retry_reaction_cleanup(
+        self, msg: FeishuUserMessage, pending: Mapping[str, Any]
+    ) -> bool:
+        attempts = int(pending.get("cleanup_attempts") or 0)
+        if attempts < _REACTION_CLEANUP_MAX_ATTEMPTS:
+            attempts += 1
+            self._service.mark_pending_command_state(
+                msg.message_id,
+                "queued",
+                cleanup_attempts=attempts,
+                cleanup_retry_at=time.time() + _REACTION_CLEANUP_RETRY_SECONDS,
+            )
+            try:
+                cfg = await self._service.aget_config()
+                client = self._service.build_user_client(cfg)
+                if await remove_ack_reaction(
+                    client,
+                    str(pending.get("ack_message_id") or msg.message_id),
+                    pending["ack_reaction_id"],
+                ):
+                    if done_emoji := pending.get("cleanup_done_emoji"):
+                        await add_reaction(
+                            client,
+                            str(pending.get("reply_message_id") or msg.message_id),
+                            done_emoji,
+                        )
+                    return True
+            except Exception:
+                logger.warning(
+                    "Could not prepare /ai reaction cleanup for %s", msg.message_id, exc_info=True
+                )
+        if attempts >= _REACTION_CLEANUP_MAX_ATTEMPTS:
+            logger.warning("Exhausted /ai reaction cleanup attempts for %s", msg.message_id)
+            return True
+        return False
+
     def _spawn_command_worker(
         self,
         msg: FeishuUserMessage,
         *,
         source: str,
         seeded_context: list[FeishuUserMessage] | None,
+        publishes_recovered_thread: bool = False,
+        pending: Mapping[str, Any] | None = None,
     ) -> asyncio.Task[None] | None:
         if msg.message_id in self._in_flight_ids:
+            return None
+        if pending is None:
+            pending = self._service.get_pending_command(msg.message_id) or {}
+        cleanup_only = pending.get("dispatch_state") == "cleanup_reaction"
+        if cleanup_only and (
+            len(self._reaction_cleanup_tasks) >= _REACTION_CLEANUP_WORKERS
+            or float(pending.get("cleanup_retry_at") or 0) > time.time()
+        ):
             return None
         self._in_flight_ids.add(msg.message_id)
 
@@ -830,6 +884,16 @@ class FeishuAiPoller:
             started_dispatch = False
             completed_terminal = False
             try:
+                if cleanup_only:
+                    completed_terminal = await self._retry_reaction_cleanup(msg, pending)
+                    return
+                if msg.thread_id:
+                    replays = [
+                        asyncio.shield(task)
+                        for task, chat_id in self._thread_replays.items()
+                        if chat_id == msg.chat_id
+                    ]
+                    await asyncio.gather(*replays, return_exceptions=True)
                 async with self._dispatch_sem:
                     started_dispatch = True
                     self._service.mark_pending_command_state(msg.message_id, "in_flight")
@@ -849,7 +913,7 @@ class FeishuAiPoller:
                     self._service.mark_pending_command_state(msg.message_id, "interrupted")
                 raise
             except Exception:
-                completed_terminal = True
+                completed_terminal = not cleanup_only
                 self._commands_failed += 1
                 logger.warning(
                     "Feishu /ai background command execution failed for %s",
@@ -858,12 +922,27 @@ class FeishuAiPoller:
                 )
             finally:
                 if completed_terminal:
-                    self._service.dequeue_pending_command(msg.message_id)
+                    remaining = self._service.get_pending_command(msg.message_id) or {}
+                    if not cleanup_only and remaining.get("ack_reaction_id"):
+                        self._service.mark_pending_command_state(
+                            msg.message_id,
+                            "queued",
+                            dispatch_state="cleanup_reaction",
+                            cleanup_retry_at=time.time() + _REACTION_CLEANUP_RETRY_SECONDS,
+                        )
+                    else:
+                        self._service.dequeue_pending_command(msg.message_id)
                 self._in_flight_ids.discard(msg.message_id)
 
         task = asyncio.create_task(_runner(), name=f"feishu-ai-cmd-{msg.message_id}")
         self._worker_tasks.add(task)
         task.add_done_callback(self._worker_tasks.discard)
+        if cleanup_only:
+            self._reaction_cleanup_tasks.add(task)
+            task.add_done_callback(self._reaction_cleanup_tasks.discard)
+        if publishes_recovered_thread:
+            self._thread_replays[task] = msg.chat_id
+            task.add_done_callback(self._thread_replays.pop)
         return task
 
     def _schedule_durable_pending_queue(
@@ -871,16 +950,11 @@ class FeishuAiPoller:
     ) -> tuple[list[asyncio.Task[None]], list[str]]:
         spawned: list[asyncio.Task[None]] = []
         scheduled_ids: list[str] = []
-        entries = self._service.list_pending_commands()
-        # Dispatch proven-unstarted (`queued`) jobs before interrupted in-flight jobs
-        ordered = sorted(
-            enumerate(entries),
-            key=lambda pair: (
-                0 if str(pair[1].get("state") or "queued") == "queued" else 1,
-                pair[0],
-            ),
+        ready: list[tuple[FeishuUserMessage, dict[str, Any], bool]] = []
+        entries = sorted(
+            self._service.list_pending_commands(), key=lambda row: row.get("state") != "queued"
         )
-        for _, entry in ordered:
+        for entry in entries:
             raw_msg = entry.get("message")
             if not isinstance(raw_msg, Mapping):
                 continue
@@ -891,6 +965,17 @@ class FeishuAiPoller:
             if cmd_state in {"in_flight", "interrupted"}:
                 if not self._service.reconcile_interrupted_command(msg.message_id):
                     continue
+                entry = self._service.get_pending_command(msg.message_id) or entry
+            publishes_thread = (
+                entry.get("dispatch_state") == "turn_completed"
+                and entry.get("reply_in_thread", True)
+                and not (msg.thread_id or entry.get("thread_id"))
+            )
+            ready.append((msg, entry, publishes_thread))
+
+        # A queued follow-up may have arrived after Feishu accepted a reply whose
+        # thread binding was lost on exit. Register its chat's replay first.
+        for msg, entry, publishes_thread in sorted(ready, key=lambda row: not row[2]):
             raw_ctx = entry.get("seeded_context")
             seeded: list[FeishuUserMessage] | None = None
             if isinstance(raw_ctx, list):
@@ -902,7 +987,13 @@ class FeishuAiPoller:
                     if parsed is not None
                 ]
             source = str(entry.get("source") or "poller")
-            task = self._spawn_command_worker(msg, source=source, seeded_context=seeded)
+            task = self._spawn_command_worker(
+                msg,
+                source=source,
+                seeded_context=seeded,
+                publishes_recovered_thread=publishes_thread,
+                pending=entry,
+            )
             if task is not None:
                 spawned.append(task)
                 scheduled_ids.append(msg.message_id)
@@ -1172,7 +1263,11 @@ class FeishuAiPoller:
             return []
 
         spawned_tasks, processed_ids = self._schedule_durable_pending_queue()
-        if len(self._service.list_pending_commands()) >= 256:
+        queued_commands = sum(
+            row.get("dispatch_state") != "cleanup_reaction"
+            for row in self._service.list_pending_commands()
+        )
+        if queued_commands >= _MAX_PENDING_QUEUE:
             if spawned_tasks:
                 await asyncio.wait(spawned_tasks, timeout=0.05)
             self._last_error = "pending_queue_backpressure"

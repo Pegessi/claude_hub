@@ -413,6 +413,7 @@ class FeishuAiCommandConfig:
     done_emoji: str = DEFAULT_AI_COMMAND_DONE_EMOJI
     footer: str = DEFAULT_AI_COMMAND_FOOTER
     reply_in_thread: bool = True
+    send_interim_reply: bool = False
     send_mode: str = DEFAULT_AI_COMMAND_SEND_MODE
     web_bot_chat_ids: dict[str, str] = field(default_factory=dict)
 
@@ -479,6 +480,7 @@ class FeishuAiCommandConfig:
             for k, v in mappings.items()
         ):
             raise ValueError("web_bot_chat_ids must map numeric Web chat IDs to oc_ IDs")
+        done_emoji = data.get("done_emoji")
         kw: dict[str, Any] = {
             "enabled": bool(data.get("enabled", False)),
             "prefix": prefix,
@@ -494,9 +496,12 @@ class FeishuAiCommandConfig:
             "max_active_chats": max_active,
             "max_context_messages": max_ctx,
             "ack_emoji": s("ack_emoji", DEFAULT_AI_COMMAND_ACK_EMOJI),
-            "done_emoji": s("done_emoji", DEFAULT_AI_COMMAND_DONE_EMOJI),
+            "done_emoji": (
+                DEFAULT_AI_COMMAND_DONE_EMOJI if done_emoji is None else str(done_emoji).strip()
+            ),
             "footer": s("footer", DEFAULT_AI_COMMAND_FOOTER),
             "reply_in_thread": bool(data.get("reply_in_thread", True)),
+            "send_interim_reply": bool(data.get("send_interim_reply", False)),
             "send_mode": raw_send_mode,
             "web_bot_chat_ids": dict(mappings),
         }

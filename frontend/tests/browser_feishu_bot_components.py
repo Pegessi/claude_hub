@@ -111,7 +111,7 @@ async def main(browser_run: BrowserRun) -> None:
         "max_active_chats": 10,
         "max_context_messages": 20,
         "ack_emoji": "OnIt",
-        "done_emoji": "DONE",
+        "send_interim_reply": False,
         "footer": "> 🤖 AI 代答，仅供参考",
         "reply_in_thread": True,
     }
@@ -1233,6 +1233,12 @@ async def main(browser_run: BrowserRun) -> None:
             "cli_imported"
         )
 
+        done_reaction = settings.get_by_test_id("feishu-ai-done-emoji-input")
+        progress_reply = settings.get_by_test_id("feishu-ai-send-interim-input")
+        await expect(done_reaction).to_have_value("DONE")
+        await expect(progress_reply).not_to_be_checked()
+        await done_reaction.fill("")
+        await progress_reply.check()
         await settings.get_by_test_id("feishu-ai-save-btn").click()
         await expect(
             settings.get_by_text("/ai command settings saved.", exact=True)
@@ -1243,6 +1249,7 @@ async def main(browser_run: BrowserRun) -> None:
             if call["method"] == "PATCH" and call["path"] == "/api/feishu/bot/ai-command"
         ]
         assert len(ai_patches) == 3
+        assert ai_patches[0]["done_emoji"] == "DONE"
         assert ai_patches[0]["provider"] == "maso"
         assert ai_patches[0]["model"] == "example-model-dedfefd51120"
         assert ai_patches[0]["reasoning_effort"] == "default"
@@ -1257,6 +1264,10 @@ async def main(browser_run: BrowserRun) -> None:
         assert ai_patches[2]["watch_chats"] == ["oc_chat_1", "oc_chat_2"]
         assert ai_patches[2]["owner_open_id"] == "ou_imported"
         assert ai_patches[2]["app_id"] == "cli_imported"
+        assert ai_patches[2]["done_emoji"] == ""
+        assert ai_patches[2]["send_interim_reply"] is True
+        await expect(done_reaction).to_have_value("")
+        await expect(progress_reply).to_be_checked()
         await page.screenshot(path=str(output / "feishu-ai-command-desktop.png"), full_page=True)
         await settings.locator("footer").get_by_role("button", name="Close", exact=True).click()
         await expect(settings).to_have_count(0)

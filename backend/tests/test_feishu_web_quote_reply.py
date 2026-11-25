@@ -335,7 +335,14 @@ async def test_thread_interim_and_error_http400_never_start_agent(
             tab_creator=create_tab,
             turn_dispatcher=dispatch,
         )
-        service.update_config({"enabled": True, "owner_open_id": "30000", "ack_emoji": ""})
+        service.update_config(
+            {
+                "enabled": True,
+                "owner_open_id": "30000",
+                "ack_emoji": "",
+                "send_interim_reply": True,
+            }
+        )
         parent = replace(normalized, message_id="10000", parent_id=None, text="original message")
         result = await service.handle_message(normalized, seeded_context=[parent, normalized])
     assert result.status == "failed" and result.tab_id is None

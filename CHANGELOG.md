@@ -43,6 +43,10 @@
 - Toggle personal-account Feishu events in Dot, Feishu settings, or the CLI and see connection and replay health.
 - Apply runtime changes immediately while keeping personal `/ai` and the Web session's CLI patrol suppression independent.
 - Suppress Bot conversations, automated senders, and signed personal `/ai` replies before they wake Dot.
+### feat(feishu): show a busy reaction while /ai runs
+
+- Default to a busy reaction on the command message, then remove it after the reply. Progress replies are opt-in. Successful replies add `DONE` by default, and an empty completion reaction setting disables it.
+- Isolate new group topics by command message until Feishu returns the topic ID. Preserve session routing and busy-reaction cleanup when recovering a completed turn.
 
 ### feat(feishu): route Dot events through Web position replay
 

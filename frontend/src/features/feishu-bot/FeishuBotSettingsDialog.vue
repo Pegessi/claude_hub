@@ -180,7 +180,7 @@
                 class="source-chip"
               >{{ aiTokenChipLabel }}</span>
             </div>
-            <p>Detect your own <code>{{ aiEdit.prefix || '/ai' }} &lt;instruction&gt;</code> messages, react <code>{{ aiEdit.ack_emoji }}</code> &rarr; <code>{{ aiEdit.done_emoji }}</code>, and reply as your personal Feishu account (or configured bot fallback when <code>im:message.send_as_user</code> is not granted).</p>
+            <p>Detect your own <code>{{ aiEdit.prefix || '/ai' }} &lt;instruction&gt;</code> messages, show a busy reaction while processing, and reply as your personal Feishu account (or configured bot fallback when <code>im:message.send_as_user</code> is not granted).</p>
           </div>
         </div>
 
@@ -413,7 +413,17 @@
                 v-model="aiEdit.done_emoji"
                 class="ch-input"
                 :disabled="busy || !aiCommandLoaded"
-                placeholder="DONE"
+                placeholder="None when empty"
+                data-testid="feishu-ai-done-emoji-input"
+              >
+            </label>
+            <label class="field">
+              <span class="field-label">Send progress reply</span>
+              <input
+                v-model="aiEdit.send_interim_reply"
+                type="checkbox"
+                :disabled="busy || !aiCommandLoaded"
+                data-testid="feishu-ai-send-interim-input"
               >
             </label>
             <label class="field">
@@ -878,6 +888,7 @@ const aiEdit = reactive<FeishuAiCommandConfig>({
   done_emoji: 'DONE',
   footer: '> 🤖 AI 代答，仅供参考',
   reply_in_thread: true,
+  send_interim_reply: false,
 })
 const aiProviderOptions = computed<FeishuAiCommandProvider[]>(() => (
   aiCapabilities.value?.providers?.length
@@ -1124,11 +1135,13 @@ function applyAiCommandStatus(
   if (payload.capabilities) aiCapabilities.value = payload.capabilities
   if (!payload.config) return
 
-  const nextWatchText = (payload.config.watch_chats ?? []).join(', ')
+  const config = { ...payload.config, done_emoji: payload.config.done_emoji ?? 'DONE' }
+
+  const nextWatchText = (config.watch_chats ?? []).join(', ')
   const prev = aiServerSnapshot.value
 
   if (!options.preserveDraft || !prev) {
-    Object.assign(aiEdit, payload.config)
+    Object.assign(aiEdit, config)
     aiWatchChatsText.value = nextWatchText
     aiTupleConflict.value = null
   } else {
@@ -1138,20 +1151,20 @@ function applyAiCommandStatus(
       || aiEdit.reasoning_effort !== prev.reasoning_effort
     )
     const serverTupleChanged = (
-      payload.config.provider !== prev.provider
-      || payload.config.model !== prev.model
-      || payload.config.reasoning_effort !== prev.reasoning_effort
+      config.provider !== prev.provider
+      || config.model !== prev.model
+      || config.reasoning_effort !== prev.reasoning_effort
     )
     if (!tupleDirty) {
-      aiEdit.provider = payload.config.provider
-      aiEdit.model = payload.config.model
-      aiEdit.reasoning_effort = payload.config.reasoning_effort
+      aiEdit.provider = config.provider
+      aiEdit.model = config.model
+      aiEdit.reasoning_effort = config.reasoning_effort
       aiTupleConflict.value = null
     } else if (serverTupleChanged) {
       aiTupleConflict.value = {
-        provider: payload.config.provider,
-        model: payload.config.model,
-        reasoning_effort: payload.config.reasoning_effort,
+        provider: config.provider,
+        model: config.model,
+        reasoning_effort: config.reasoning_effort,
       }
     }
 
@@ -1168,24 +1181,25 @@ function applyAiCommandStatus(
       'done_emoji',
       'footer',
       'reply_in_thread',
+      'send_interim_reply',
     ]
     for (const key of scalarKeys) {
       const currentVal = aiEdit[key]
       const prevVal = prev[key]
       const isIdentityKey = key === 'owner_open_id' || key === 'app_id'
       if (currentVal === prevVal || (isIdentityKey && !String(currentVal ?? '').trim())) {
-        ;(aiEdit as Record<string, unknown>)[key] = payload.config[key]
+        ;(aiEdit as Record<string, unknown>)[key] = config[key]
       }
     }
     if (aiWatchChatsText.value === aiServerWatchChatsText.value) {
       aiWatchChatsText.value = nextWatchText
-      aiEdit.watch_chats = [...(payload.config.watch_chats ?? [])]
+      aiEdit.watch_chats = [...(config.watch_chats ?? [])]
     }
   }
 
   aiServerSnapshot.value = {
-    ...payload.config,
-    watch_chats: [...(payload.config.watch_chats ?? [])],
+    ...config,
+    watch_chats: [...(config.watch_chats ?? [])],
   }
   aiServerWatchChatsText.value = nextWatchText
 }
@@ -1332,9 +1346,10 @@ async function saveAiCommand() {
       watch_chats: watchChats,
       poll_interval_seconds: Number(aiEdit.poll_interval_seconds) || 15,
       ack_emoji: aiEdit.ack_emoji.trim() || 'OnIt',
-      done_emoji: aiEdit.done_emoji.trim() || 'DONE',
+      done_emoji: aiEdit.done_emoji.trim(),
       footer: aiEdit.footer.trim() || '> 🤖 AI 代答，仅供参考',
       reply_in_thread: aiEdit.reply_in_thread,
+      send_interim_reply: aiEdit.send_interim_reply,
     })
     if (closed || current !== viewEpoch) return false
     applyAiCommandStatus(next, { preserveDraft: false })

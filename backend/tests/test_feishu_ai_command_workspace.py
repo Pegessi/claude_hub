@@ -1127,10 +1127,12 @@ async def test_web_session_and_agent_workspace_integrated_ai_command(tmp_path: P
         assert managed_dispatches == [
             ("sess-1", "ws-pinned-integrated", "feishu-ai-7400000000000000888")
         ]
-        assert ("7400000000000000888", REACT_ON_IT) in reactions_added
-        assert ("7400000000000000888", REACT_DONE) in reactions_added
-        assert len(sent_messages) == 2
-        final_text = sent_messages[1]["content"]["richText"]["innerText"]
+        assert reactions_added == [
+            ("7400000000000000888", REACT_ON_IT),
+            ("7400000000000000888", REACT_DONE),
+        ]
+        assert len(sent_messages) == 1
+        final_text = sent_messages[0]["content"]["richText"]["innerText"]
         assert "Agent Workspace 与 Web Session 联合验证通过。" in final_text
         assert "🤖 AI 代答，仅供参考" in final_text
     finally:
@@ -1266,28 +1268,56 @@ async def test_legacy_maso_switch_rolls_back_on_tailer_failure(monkeypatch):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("concurrent", [False, True])
 @pytest.mark.parametrize(
-    ("reply_in_thread", "interims", "finals", "incoming", "expected"),
+    ("reply_in_thread", "send_interim", "interims", "finals", "incoming", "expected"),
     [
-        (True, ["omt_first"] * 2, ["omt_first"] * 2, [None, "omt_first"], 1),
-        (True, ["omt_first", "omt_second"], ["omt_first", "omt_second"], [None, None], 2),
-        (False, ["omt_ignored"] * 2, ["omt_ignored"] * 2, [None, None], 1),
-        (True, [None, None], [None, None], [None, None], 1),
-        (True, [None, "omt_final"], ["omt_final"] * 2, [None, "omt_final"], 1),
-        (True, [None, None], ["omt_first", "omt_second"], [None, None], 2),
+        (True, True, ["omt_first"] * 2, ["omt_first"] * 2, [None, "omt_first"], 1),
+        (
+            True,
+            True,
+            ["omt_first", "omt_second"],
+            ["omt_first", "omt_second"],
+            [None, None],
+            2,
+        ),
+        (False, True, ["omt_ignored"] * 2, ["omt_ignored"] * 2, [None, None], 1),
+        (True, False, [None, None], [None, None], [None, None], 2),
+        (True, True, [None, "omt_final"], ["omt_final"] * 2, [None, "omt_final"], 1),
+        (True, False, [None, None], ["omt_first", "omt_second"], [None, None], 2),
+        (True, False, [None, None], ["omt_final"] * 2, [None, "omt_final"], 1),
+        (False, False, [None, None], [None, None], [None, None], 1),
     ],
 )
 async def test_reply_created_thread_session_identity(
-    tmp_path: Path, reply_in_thread, interims, finals, incoming, expected, concurrent
+    tmp_path: Path,
+    reply_in_thread,
+    send_interim,
+    interims,
+    finals,
+    incoming,
+    expected,
+    concurrent,
 ) -> None:
-    from claude_hub.services.feishu_bot import FeishuMessageDedupStore, FeishuReplyReceipt
+    from claude_hub.services.feishu_bot import (
+        FeishuMessageDedupStore,
+        FeishuReplyReceipt,
+    )
 
     manager = _FakeWorkspaceManager()
     dispatches = []
-    final_started, second_interim, release_final = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    final_started, second_ack, release_final = (
+        asyncio.Event(),
+        asyncio.Event(),
+        asyncio.Event(),
+    )
+    second_dispatched = asyncio.Event()
+    replies = []
 
     async def dispatch(session, prompt, turn_id, visible, metadata):
         thread = metadata["thread_id"]
-        assert service._channel_locks[f"oc_ws_chat:{thread or 'main'}"].locked()
+        if thread or not reply_in_thread:
+            assert service._channel_locks[f"oc_ws_chat:{thread or 'main'}"].locked()
+        if metadata["message_id"] == "om_ws_1":
+            second_dispatched.set()
         dispatches.append((session.id, session.tab_id, thread))
         return "answer"
 
@@ -1304,7 +1334,9 @@ async def test_reply_created_thread_session_identity(
         async def list_messages(self, **kwargs):
             return []
 
-        async def add_reaction_as_user(self, *args):
+        async def add_reaction_as_user(self, message_id, emoji):
+            if message_id == "om_ws_1":
+                second_ack.set()
             return "reaction"
 
         async def delete_reaction_as_user(self, *args):
@@ -1316,8 +1348,7 @@ async def test_reply_created_thread_session_identity(
             if concurrent and is_final and index == 0:
                 final_started.set()
                 await release_final.wait()
-            if not is_final and index == 1:
-                second_interim.set()
+            replies.append((index, is_final))
             threads = finals if is_final else interims
             return FeishuReplyReceipt(
                 message_id=f"reply-{kwargs['uuid']}", thread_id=threads[index]
@@ -1333,6 +1364,7 @@ async def test_reply_created_thread_session_identity(
             "model": "gpt-5.4",
             "cwd": str(tmp_path),
             "reply_in_thread": reply_in_thread,
+            "send_interim_reply": send_interim,
         }
     )
     if concurrent:
@@ -1340,13 +1372,15 @@ async def test_reply_created_thread_session_identity(
             first = asyncio.create_task(service.handle_message(_message("om_ws_0", incoming[0])))
             await final_started.wait()
             second = asyncio.create_task(service.handle_message(_message("om_ws_1", incoming[1])))
-            await second_interim.wait()
-            initial_threads = [
-                thread or (interim if reply_in_thread else None)
-                for thread, interim in zip(incoming, interims)
-            ]
-            if initial_threads[0] == initial_threads[1]:
-                assert len(dispatches) == 1
+            await second_ack.wait()
+            if reply_in_thread and not any(incoming) and not any(interims):
+                await second_dispatched.wait()
+                assert {
+                    "oc_ws_chat:main:codex:pending:om_ws_0",
+                    "oc_ws_chat:main:codex:pending:om_ws_1",
+                } <= service._load_state()["channel_tabs"].keys()
+            elif not reply_in_thread or incoming[1] == finals[0] or interims[1] == finals[0]:
+                assert not second_dispatched.is_set()
             release_final.set()
             results = list(await asyncio.gather(first, second))
     else:
@@ -1355,6 +1389,9 @@ async def test_reply_created_thread_session_identity(
             for index, thread in enumerate(incoming)
         ]
     assert [result.status for result in results] == ["completed", "completed"]
+    assert sorted(replies) == [
+        (i, final) for i in range(2) for final in ([False, True] if send_interim else [True])
+    ]
     assert len(manager.provision_calls) == expected
     assert len({entry[0] for entry in dispatches}) == expected
     assert len({result.tab_id for result in results}) == expected
@@ -1365,7 +1402,10 @@ async def test_reply_created_thread_session_identity(
     ]
     assert [result.thread_id for result in results] == effective
     for index, thread in enumerate(effective):
-        record = channels[f"oc_ws_chat:{thread or 'main'}:codex"]
+        key = f"oc_ws_chat:{thread or 'main'}:codex"
+        if reply_in_thread and not thread:
+            key += f":pending:om_ws_{index}"
+        record = channels[key]
         assert (record["session_id"], record["tab_id"]) == dispatches[index][:2]
     if all(effective):
         assert "oc_ws_chat:main:codex" not in channels
@@ -1379,40 +1419,73 @@ async def test_reply_created_thread_session_identity(
 
 
 @pytest.mark.asyncio
-async def test_final_only_thread_recovery_keeps_session_private(tmp_path: Path) -> None:
+@pytest.mark.parametrize("crash_during_dispatch", [False, True])
+async def test_final_only_thread_recovery_keeps_session_private(
+    tmp_path: Path, crash_during_dispatch: bool
+) -> None:
+    from dataclasses import replace
+    from datetime import datetime, timezone
     from unittest.mock import AsyncMock
 
-    from claude_hub.services.feishu_bot import FeishuMessageDedupStore, FeishuReplyReceipt
+    from claude_hub.models import AgentStreamEvent, AgentStreamEventType
+    from claude_hub.services.agent_stream.store import AgentStreamStore
+    from claude_hub.services.feishu_ai_poller import FeishuAiPoller
+    from claude_hub.services.feishu_bot import (
+        FeishuMessageDedupStore,
+        FeishuReplyReceipt,
+    )
 
     manager = _FakeWorkspaceManager()
     dispatched = []
+    durable_answer = asyncio.Event()
 
-    async def dispatch(session, *args):
+    async def dispatch(session, prompt, turn_id, visible, metadata):
         dispatched.append(session.id)
+        if crash_during_dispatch and metadata["message_id"] == "om_ws_0":
+            await AgentStreamStore(session.workspace_id, session.id).append(
+                AgentStreamEvent(
+                    stream_sequence=0,
+                    session_id=session.id,
+                    tab_id=session.tab_id,
+                    agent_type=AgentType.CODEX,
+                    type=AgentStreamEventType.TURN_COMPLETED,
+                    turn_id=turn_id,
+                    created_at=datetime.now(timezone.utc),
+                    payload={"status": "completed", "final_text": "answer"},
+                )
+            )
+            durable_answer.set()
+            await asyncio.Event().wait()
         return "answer"
 
     service = _make_service(tmp_path, fake_manager=manager, managed_dispatcher=dispatch)
     service._dedup = FeishuMessageDedupStore(tmp_path / "dedup.json")
     final_started = asyncio.Event()
-    attempts = 0
+    replay_started, release_replay = asyncio.Event(), asyncio.Event()
+    recovering = False
 
     async def reply(message_id, *args, **kwargs):
-        nonlocal attempts
         thread = None
         if "final" in kwargs["uuid"]:
             if message_id == "om_ws_0":
-                attempts += 1
-                if attempts == 1:
+                if recovering:
+                    replay_started.set()
+                    await release_replay.wait()
+                else:
                     final_started.set()
                     await asyncio.Event().wait()
             thread = "omt_first" if message_id == "om_ws_0" else "omt_second"
         return FeishuReplyReceipt(message_id=f"reply-{kwargs['uuid']}", thread_id=thread)
 
+    async def add_reaction(message_id, emoji):
+        assert emoji in {"OnIt", "DONE"}
+        return f"reaction-{message_id}"
+
     client: Any = SimpleNamespace(
         resolve_record=lambda: SimpleNamespace(open_id="ou_owner"),
         require_send_as_user_scope=lambda **kwargs: None,
         list_messages=AsyncMock(return_value=[]),
-        add_reaction_as_user=AsyncMock(return_value="reaction"),
+        add_reaction_as_user=AsyncMock(side_effect=add_reaction),
         delete_reaction_as_user=AsyncMock(),
         reply_as_user=reply,
     )
@@ -1427,24 +1500,247 @@ async def test_final_only_thread_recovery_keeps_session_private(tmp_path: Path) 
             "reply_in_thread": True,
         }
     )
-    first_message = _message("om_ws_0")
+    first_message = replace(_message("om_ws_0"), text="/ai --effort xhigh inspect")
     service.enqueue_pending_command(first_message)
     first = asyncio.create_task(service.handle_message(first_message))
     async with asyncio.timeout(5):
-        await final_started.wait()
+        await (durable_answer if crash_during_dispatch else final_started).wait()
+    pending = service.get_pending_command("om_ws_0")
+    assert pending is not None and pending["state"] == "in_flight"
+    assert pending["dispatch_state"] == (
+        "dispatched" if crash_during_dispatch else "turn_completed"
+    )
+    assert not pending["interim_message_id"]
+    assert pending["ack_reaction_id"] == "reaction-om_ws_0"
     first.cancel()
     with pytest.raises(asyncio.CancelledError):
         await first
-    pending = service.get_pending_command("om_ws_0")
-    assert pending is not None and pending["dispatch_state"] == "turn_completed"
+    # Restore the pre-cancellation row to simulate a process exit with no cleanup.
+    service.mark_pending_command_state(
+        "om_ws_0",
+        "in_flight",
+        dispatch_state=pending["dispatch_state"],
+        ack_reaction_id=pending["ack_reaction_id"],
+    )
+    client.delete_reaction_as_user.reset_mock()
+    service = _make_service(tmp_path, fake_manager=manager, managed_dispatcher=dispatch)
+    service._dedup = FeishuMessageDedupStore(tmp_path / "dedup.json")
+    service._user_client_factory = lambda cfg: client
     assert "oc_ws_chat:main:codex" not in service._load_state()["channel_tabs"]
     second = await service.handle_message(_message("om_ws_1"))
-    resumed = await service.handle_message(first_message)
-    assert second.status == resumed.status == "completed"
-    assert (resumed.tab_id, second.tab_id) == ("tab-1", "tab-2")
-    assert dispatched == ["sess-1", "sess-2"]
+    assert second.status == "completed" and second.tab_id == "tab-2"
+    # Feishu may already expose the topic before the restarted poller replays
+    # the first reply. Change defaults to verify recovery uses the original
+    # session's provider and reply mode.
+    service.update_config({"provider": "claude", "reply_in_thread": False})
+    followup = replace(
+        _message("om_ws_2", "omt_first"),
+        text="/ai --provider codex --model gpt-5.4 --effort xhigh follow up",
+    )
+    service.enqueue_pending_command(followup)
+    recovering = True
+    poller = FeishuAiPoller(service)
+    workers, ids = poller._schedule_durable_pending_queue()
+    assert ids == ["om_ws_0", "om_ws_2"]
+    async with asyncio.timeout(5):
+        await replay_started.wait()
+        assert dispatched == ["sess-1", "sess-2"]
+        release_replay.set()
+        await asyncio.gather(*workers)
+    assert dispatched == ["sess-1", "sess-2", "sess-1"]
+    assert {run["status"] for run in service.get_recent_runs()} == {"completed"}
+    assert not service.list_pending_commands()
     channels = service._load_state()["channel_tabs"]
     assert channels["oc_ws_chat:omt_first:codex"]["session_id"] == "sess-1"
     assert channels["oc_ws_chat:omt_second:codex"]["session_id"] == "sess-2"
     assert len(channels) == 2
-    assert not service._channel_locks["oc_ws_chat:main"].locked()
+    assert not service._channel_locks["oc_ws_chat:publish-thread"].locked()
+    client.delete_reaction_as_user.assert_any_await("om_ws_0", "reaction-om_ws_0")
+    assert client.add_reaction_as_user.await_count == 6
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("crash_before_dispatch", [True, False])
+async def test_restart_cleans_persisted_busy_reaction(
+    tmp_path: Path, crash_before_dispatch: bool
+) -> None:
+    from unittest.mock import AsyncMock
+
+    from claude_hub.services.feishu_ai_poller import FeishuAiPoller
+    from claude_hub.services.feishu_bot import FeishuMessageDedupStore, FeishuReplyReceipt
+
+    manager = _FakeWorkspaceManager()
+    checkpoint = asyncio.Event()
+    dispatches: list[str] = []
+
+    async def interrupt_at_checkpoint(*args, **kwargs):
+        checkpoint.set()
+        await asyncio.Future()
+
+    async def dispatch(session, *args):
+        dispatches.append(session.id)
+        if not crash_before_dispatch and len(dispatches) == 1:
+            await interrupt_at_checkpoint()
+        return "answer"
+
+    client: Any = SimpleNamespace(
+        resolve_record=lambda: SimpleNamespace(open_id="ou_owner"),
+        require_send_as_user_scope=lambda **kwargs: None,
+        list_messages=AsyncMock(return_value=[]),
+        add_reaction_as_user=AsyncMock(return_value="rx_original"),
+        delete_reaction_as_user=AsyncMock(),
+        reply_as_user=AsyncMock(return_value=FeishuReplyReceipt(message_id="om_final")),
+    )
+
+    def make_service():
+        service = _make_service(tmp_path, fake_manager=manager, managed_dispatcher=dispatch)
+        service._dedup = FeishuMessageDedupStore(tmp_path / "dedup.json")
+        service._user_client_factory = lambda cfg: client
+        return service
+
+    service = make_service()
+    service.update_config({"enabled": True, "owner_open_id": "ou_owner", "provider": "codex"})
+    message = _message("om_interrupted")
+    service.enqueue_pending_command(message)
+    if crash_before_dispatch:
+        service._fetch_context_and_refs = AsyncMock(side_effect=interrupt_at_checkpoint)  # type: ignore[method-assign]
+    original = FeishuAiPoller(service)
+    workers, _ = original._schedule_durable_pending_queue()
+    async with asyncio.timeout(5):
+        await checkpoint.wait()
+    saved = service.get_pending_command(message.message_id)
+    assert saved is not None and saved["state"] == "in_flight"
+    assert saved["ack_reaction_id"] == "rx_original"
+    assert saved.get("dispatch_state") == (None if crash_before_dispatch else "dispatched")
+
+    # Restore the persisted crash snapshot after stopping the original test worker.
+    workers[0].cancel()
+    await asyncio.gather(*workers, return_exceptions=True)
+    service.mark_pending_command_state(
+        message.message_id, "in_flight", **{k: v for k, v in saved.items() if k != "state"}
+    )
+    if crash_before_dispatch:
+        service.mark_pending_command_state(message.message_id, "in_flight", dispatch_state=None)
+    client.delete_reaction_as_user.reset_mock()
+    restarted = make_service()
+    poller = FeishuAiPoller(restarted)
+    client.delete_reaction_as_user.side_effect = [RuntimeError("temporary failure"), None]
+    recovery, _ = poller._schedule_durable_pending_queue()
+    await asyncio.gather(*recovery)
+    assert restarted.list_pending_commands()[0]["dispatch_state"] == "cleanup_reaction"
+    client.add_reaction_as_user.assert_awaited_once_with(message.message_id, "OnIt")
+    assert poller._schedule_durable_pending_queue() == ([], [])
+    restarted.mark_pending_command_state(message.message_id, "queued", cleanup_retry_at=0)
+    recovered, _ = poller._schedule_durable_pending_queue()
+    await asyncio.gather(*recovered)
+
+    assert not restarted.list_pending_commands()
+    assert len(dispatches) == 1
+    assert client.add_reaction_as_user.await_count == (2 if crash_before_dispatch else 1)
+    if crash_before_dispatch:
+        client.add_reaction_as_user.assert_awaited_with(message.message_id, "DONE")
+    assert client.reply_as_user.await_count == int(crash_before_dispatch)
+    client.delete_reaction_as_user.assert_awaited_with(message.message_id, "rx_original")
+    assert client.delete_reaction_as_user.await_count == 2
+    assert restarted.get_recent_runs()[0]["status"] == (
+        "completed" if crash_before_dispatch else "interrupted_uncertain"
+    )
+    assert not restarted._dedup.claim(f"ai_cmd:ou_owner:{message.message_id}")
+
+
+@pytest.mark.asyncio
+async def test_permanent_reaction_cleanup_does_not_block_polling(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    import time
+    from unittest.mock import AsyncMock
+
+    from claude_hub.services.feishu_ai_poller import FeishuAiPoller
+    from claude_hub.services.feishu_bot import FeishuMessageDedupStore, FeishuReplyReceipt
+    from claude_hub.services.feishu_user_client import FeishuMessagePage
+
+    cleanup_started, release_cleanup, fresh_dispatched = (
+        asyncio.Event(),
+        asyncio.Event(),
+        asyncio.Event(),
+    )
+    fresh = _message("om_fresh")
+    calls: list[str] = []
+
+    async def delete_reaction(message_id, reaction_id):
+        if message_id == "om_permanent":
+            calls.append(reaction_id)
+            cleanup_started.set()
+            await release_cleanup.wait()
+            raise RuntimeError("reaction message was deleted")
+
+    async def dispatch(session, prompt, turn_id, visible, metadata):
+        assert metadata["message_id"] == fresh.message_id
+        fresh_dispatched.set()
+        return "answer"
+
+    service = _make_service(
+        tmp_path, fake_manager=_FakeWorkspaceManager(), managed_dispatcher=dispatch
+    )
+    service._dedup = FeishuMessageDedupStore(tmp_path / "dedup.json")
+    client: Any = SimpleNamespace(
+        resolve_record=lambda: SimpleNamespace(open_id="ou_owner"),
+        require_send_as_user_scope=lambda **kwargs: None,
+        list_messages_page=AsyncMock(return_value=FeishuMessagePage((fresh,), False, "")),
+        list_messages=AsyncMock(return_value=[]),
+        add_reaction_as_user=AsyncMock(return_value="rx_fresh"),
+        delete_reaction_as_user=delete_reaction,
+        reply_as_user=AsyncMock(return_value=FeishuReplyReceipt(message_id="om_final")),
+    )
+    service._user_client_factory = lambda cfg: client
+    service.update_config(
+        {"enabled": True, "owner_open_id": "ou_owner", "watch_chats": [fresh.chat_id]}
+    )
+    service.set_watermark(fresh.chat_id, 1)
+    state = service._load_state()
+    state["pending_queue"] = [
+        {
+            "message": _message(mid).to_dict(),
+            "state": "queued",
+            "dispatch_state": "cleanup_reaction",
+            "ack_reaction_id": "rx_original",
+            "cleanup_retry_at": due,
+            "cleanup_done_emoji": "DONE",
+        }
+        for mid, due in [
+            ("om_permanent", 0),
+            *((f"om_cooldown_{i}", time.time() + 3600) for i in range(256)),
+        ]
+    ]
+    service._save_state(state)
+
+    poller = FeishuAiPoller(service, max_concurrent_dispatches=1)
+    try:
+        async with asyncio.timeout(5):
+            assert fresh.message_id in await poller.poll_once()
+            await cleanup_started.wait()
+            await fresh_dispatched.wait()
+    finally:
+        release_cleanup.set()
+        await poller.wait_for_inflight()
+    assert client.reply_as_user.await_count == 1
+    assert len(service.list_pending_commands()) == 257
+
+    # Recreating the poller preserves both the delay and the attempt budget.
+    for completed_attempts in (1, 2):
+        poller = FeishuAiPoller(service)
+        pending = service.get_pending_command("om_permanent")
+        assert pending is not None and pending["cleanup_attempts"] == completed_attempts
+        assert pending["cleanup_retry_at"] > time.time()
+        assert poller._schedule_durable_pending_queue() == ([], [])
+        service.mark_pending_command_state("om_permanent", "queued", cleanup_retry_at=0)
+        cleanup, _ = poller._schedule_durable_pending_queue()
+        await asyncio.gather(*cleanup)
+    assert service.get_pending_command("om_permanent") is None
+    assert calls == ["rx_original"] * 3
+    assert [call.args for call in client.add_reaction_as_user.await_args_list] == [
+        (fresh.message_id, "OnIt"),
+        (fresh.message_id, "DONE"),
+    ]
+    assert "Exhausted /ai reaction cleanup attempts for om_permanent" in caplog.text
+    assert poller._schedule_durable_pending_queue() == ([], [])

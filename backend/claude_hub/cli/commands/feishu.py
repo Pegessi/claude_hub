@@ -529,8 +529,17 @@ def feishu_ai_command_status(ctx: click.Context) -> None:
     help="Maximum thread/chat context messages to fetch (1-100).",
 )
 @click.option("--ack-emoji", default=None, help="Initial reaction emoji (default: OnIt).")
-@click.option("--done-emoji", default=None, help="Completion reaction emoji (default: DONE).")
+@click.option(
+    "--done-emoji",
+    default=None,
+    help="Completion reaction emoji (default: DONE; empty disables it).",
+)
 @click.option("--footer", default=None, help="Reply footer appended to /ai posts.")
+@click.option(
+    "--send-interim-reply/--no-send-interim-reply",
+    default=None,
+    help="Send a progress reply before the final answer (default: off).",
+)
 @click.option(
     "--reply-in-thread/--no-reply-in-thread",
     default=None,
@@ -569,6 +578,7 @@ def feishu_ai_command_configure(
     done_emoji: Optional[str],
     footer: Optional[str],
     reply_in_thread: Optional[bool],
+    send_interim_reply: Optional[bool],
     send_mode: Optional[str],
     import_lark_cli: bool,
 ) -> None:
@@ -608,6 +618,8 @@ def feishu_ai_command_configure(
         patch_body["done_emoji"] = done_emoji
     if footer is not None:
         patch_body["footer"] = footer
+    if send_interim_reply is not None:
+        patch_body["send_interim_reply"] = send_interim_reply
     if reply_in_thread is not None:
         patch_body["reply_in_thread"] = reply_in_thread
     if send_mode is not None:
