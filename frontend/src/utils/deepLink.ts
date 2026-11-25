@@ -20,6 +20,21 @@ export function parseTabDeepLink(search: string): string | null {
 }
 
 /**
+ * Return a relative URL with only the `tab` query parameter removed, preserving
+ * other query parameters (e.g. workspace layout/scope) and any hash fragment.
+ */
+export function stripTabDeepLink(locationLike: {
+  pathname: string
+  search: string
+  hash?: string
+}): string {
+  const params = new URLSearchParams(locationLike.search)
+  params.delete('tab')
+  const query = params.toString()
+  return `${locationLike.pathname}${query ? `?${query}` : ''}${locationLike.hash ?? ''}`
+}
+
+/**
  * Build the share text for a tab: the clean deep link on the first line (so it
  * stays clickable and paste-able into a browser), followed by a short hint that
  * teaches an AI agent how to resolve the link to the conversation.

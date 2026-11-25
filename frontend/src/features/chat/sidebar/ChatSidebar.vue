@@ -238,7 +238,7 @@
         <span
           v-if="!sidebarCollapsed || isMobile"
           class="chat-sidebar__archived-label"
-        >Archived ({{ archivedTabs.length }})</span>
+        >Archived ({{ archivedCount }})</span>
       </button>
     </div>
 
@@ -289,7 +289,11 @@ import { nextTick, ref, computed, watch, onUnmounted, toRef } from 'vue'
 import { storeToRefs } from 'pinia'
 import { useTerminalStore } from '@/stores/terminalStore'
 import { useAppStore } from '@/stores/appStore'
-import { buildChatSidebarGroups, buildChatSidebarStatusGroups } from '@/utils/chatGroups'
+import {
+  buildChatSidebarGroups,
+  buildChatSidebarStatusGroups,
+  classifyChatStatusBucket,
+} from '@/utils/chatGroups'
 import { useTabStatus } from '@/composables/useTabStatus'
 import { useViewport } from '@/composables/useViewport'
 import { useEdgeSwipeDrawer } from '@/composables/useEdgeSwipeDrawer'
@@ -323,9 +327,11 @@ const {
   activeTabId,
   sidebarCollapsed,
   archivedTabs,
+  archivedManualTabs,
   agentStatuses,
   mobileDrawerOpen,
 } = storeToRefs(store)
+const archivedCount = computed(() => (archivedManualTabs?.value ?? archivedTabs.value).length)
 const {
   toggleSidebar,
   setActiveTab,
@@ -373,9 +379,16 @@ const {
   getTabActivityTime,
 } = useTabStatus(agentStatuses)
 
+const STATUS_NEEDS_YOU_GROUP_KEY = 'status:needs_you'
 const groupByMode = ref<'cwd' | 'status'>('cwd')
 function setGroupByMode(next: 'cwd' | 'status') {
   groupByMode.value = next
+  // Never keep `Needs you` silently hidden behind a stale collapse when entering Status view.
+  if (next === 'status' && collapsedGroups.value.has(STATUS_NEEDS_YOU_GROUP_KEY)) {
+    const updated = new Set(collapsedGroups.value)
+    updated.delete(STATUS_NEEDS_YOU_GROUP_KEY)
+    collapsedGroups.value = updated
+  }
 }
 
 const statusesByTabId = computed<Record<string, TerminalAgentStatus | undefined>>(() => {
@@ -407,12 +420,37 @@ const { sidebarWidth, sidebarStyle, isResizing, startResize, resetSidebarWidth, 
 const { renamingTabId, renamingTabName, setRenameInputRef, startRename, cancelRename, handleRenameTab } =
   useSidebarRename(store.updateTab)
 
+const needsYouTabIds = computed(() => {
+  const ids: string[] = []
+  for (const tab of chatTabs.value) {
+    if (pinnedChatIds.value.has(tab.id)) continue
+    if (classifyChatStatusBucket(tab, statusesByTabId.value[tab.id]) === 'needs_you') {
+      ids.push(tab.id)
+    }
+  }
+  return ids
+})
+
+let seenNeedsYouIds = new Set<string>()
+watch(needsYouTabIds, (nextIds) => {
+  const hasNewArrival = nextIds.some(id => !seenNeedsYouIds.has(id))
+  seenNeedsYouIds = new Set(nextIds)
+  if (hasNewArrival && collapsedGroups.value.has(STATUS_NEEDS_YOU_GROUP_KEY)) {
+    const next = new Set(collapsedGroups.value)
+    next.delete(STATUS_NEEDS_YOU_GROUP_KEY)
+    collapsedGroups.value = next
+  }
+}, { immediate: true })
+
 function toggleGroup(cwd: string) {
   const next = new Set(collapsedGroups.value)
   if (next.has(cwd)) {
     next.delete(cwd)
   } else {
     next.add(cwd)
+    if (cwd === STATUS_NEEDS_YOU_GROUP_KEY) {
+      seenNeedsYouIds = new Set(needsYouTabIds.value)
+    }
   }
   collapsedGroups.value = next
 }

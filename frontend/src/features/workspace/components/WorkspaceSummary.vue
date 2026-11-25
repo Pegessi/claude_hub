@@ -1,20 +1,5 @@
 <template>
   <div
-    v-if="error"
-    class="workspace-error"
-  >
-    <span>{{ error }}</span>
-    <button
-      type="button"
-      class="workspace-error__close"
-      aria-label="关闭错误提示"
-      @click="dismissWorkspaceErrors"
-    >
-      ×
-    </button>
-  </div>
-
-  <div
     v-if="activeWorkspaceId"
     class="workspace-summary-strip"
   >
@@ -48,8 +33,6 @@ import {
   useWorkspaceLessonsContext,
 } from '../context'
 const {
-  error,
-  dismissWorkspaceErrors,
   activeWorkspaceId,
   workspaceAgents,
   reviewerAgents,
@@ -129,15 +112,6 @@ const {
   color: var(--ch-color-text);
   font-size: 11px;
   padding: 4px 9px;
-}
-</style>
-
-<style scoped>
-.workspace-error {
-  padding: 8px 16px;
-  background: var(--ch-color-danger-border);
-  color: var(--ch-color-danger-text);
-  font-size: 13px;
 }
 </style>
 

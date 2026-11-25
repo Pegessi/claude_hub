@@ -12,7 +12,7 @@
       v-if="group.pinned"
       type="button"
       class="chat-sidebar__group-header chat-sidebar__pinned-header"
-      title="Pins are saved on this Hub. Click to collapse"
+      :title="`Pins are saved on this Hub. Click to ${group.collapsed ? 'expand' : 'collapse'}`"
       data-pointer-drop="group"
       :aria-expanded="!group.collapsed"
       :aria-controls="`chat-group-${group.key}`"
@@ -43,7 +43,7 @@
       data-pointer-drop="group"
       :aria-expanded="!group.collapsed"
       :aria-controls="`chat-group-${group.key}`"
-      :title="group.statusBucket ? `${group.label}. Click to collapse` : `${group.cwd}. Click to collapse; drag to reorder workspaces`"
+      :title="group.statusBucket ? `${group.label}. Click to ${group.collapsed ? 'expand' : 'collapse'}` : `${group.cwd}. Click to ${group.collapsed ? 'expand' : 'collapse'}; drag to reorder workspaces`"
       @pointerdown="emit('group-pointerdown', $event, group)"
       @click="emit('group-click', group.cwd)"
     >
@@ -69,7 +69,13 @@
         class="chat-sidebar__group-label"
         :title="group.label || group.cwd"
       >{{ group.label || cwdLabel(group.cwd) }}</span>
-      <span class="chat-sidebar__group-count">{{ group.tabs.length }}</span>
+      <span
+        class="chat-sidebar__group-count"
+        :class="{
+          'chat-sidebar__group-count--alert':
+            group.statusBucket === 'needs_you' && group.collapsed && group.tabs.length > 0,
+        }"
+      >{{ group.tabs.length }}</span>
       <svg
         class="chat-sidebar__group-chevron"
         :class="{ collapsed: group.collapsed }"
@@ -225,6 +231,15 @@ const emit = defineEmits<{
 .chat-sidebar__group-count {
   font-size: var(--ch-font-size-xs);
   color: var(--ch-color-text-subtle);
+  font-variant-numeric: tabular-nums;
+}
+
+.chat-sidebar__group-count--alert {
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--ch-color-warning-bg);
+  color: var(--ch-color-warning);
+  font-weight: 600;
 }
 
 .chat-sidebar__group-chevron {

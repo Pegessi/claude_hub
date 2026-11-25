@@ -111,7 +111,7 @@ async def main(browser_run: BrowserRun) -> None:
         ARCH,
         status="completed",
         closed=True,
-        summary="Found two failing edge cases.",
+        summary="Found two failing edge cases. Inspected parser tokens and fallback recovery paths.",
         created_at="2026-11-03T10:01:00Z",
         close_reason="completed",
     )
@@ -323,6 +323,44 @@ async def main(browser_run: BrowserRun) -> None:
         await expect(arch_row).to_contain_text("archived review")
         await expect(arch_row).to_contain_text("Found two failing edge cases.")
         await expect(arch_row).to_contain_text("View")
+
+        # Verify 2x3 grid geometry: time and View share the right column edge,
+        # row 1 sits cleanly above row 2, and a long summary never collides with View.
+        dot_box = await arch_row.locator(".subagent-dot").bounding_box()
+        line_box = await arch_row.locator(".subagent-line").bounding_box()
+        time_box = await arch_row.locator(".subagent-time").bounding_box()
+        summary_box = await arch_row.locator(".subagent-summary").bounding_box()
+        action_box = await arch_row.locator(".subagent-action").bounding_box()
+        assert dot_box and line_box and time_box and summary_box and action_box, (
+            dot_box,
+            line_box,
+            time_box,
+            summary_box,
+            action_box,
+        )
+        time_right = time_box["x"] + time_box["width"]
+        action_right = action_box["x"] + action_box["width"]
+        assert abs(time_right - action_right) <= 1.5, (time_box, action_box)
+        line_cy = line_box["y"] + line_box["height"] / 2
+        dot_cy = dot_box["y"] + dot_box["height"] / 2
+        time_cy = time_box["y"] + time_box["height"] / 2
+        assert abs(line_cy - dot_cy) <= 3.0 and abs(line_cy - time_cy) <= 3.0, (
+            dot_box,
+            line_box,
+            time_box,
+        )
+        summary_cy = summary_box["y"] + summary_box["height"] / 2
+        action_cy = action_box["y"] + action_box["height"] / 2
+        assert abs(summary_cy - action_cy) <= 3.0, (summary_box, action_box)
+        assert summary_box["x"] + summary_box["width"] <= action_box["x"] + 0.5, (
+            summary_box,
+            action_box,
+        )
+        assert time_box["y"] + time_box["height"] <= action_box["y"] + 1.5, (
+            time_box,
+            action_box,
+        )
+
         await page.screenshot(path=str(output / "00-dock-popover.png"))
         await page.keyboard.press("Escape")
         await expect(popover).to_have_count(0)

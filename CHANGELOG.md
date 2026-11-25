@@ -7,6 +7,12 @@
 
 ## Released
 
+### fix(chat): align sub-agent dock rows, route managed Chat unarchive, and prevent hidden Needs you sessions
+
+- Refactor `ChatSubagentRow` into a 2×3 CSS Grid so the timestamp and `View ›` action align to a shared right edge without overlapping the summary line, and fade the narrow gutter rail action via `opacity` instead of `display: none` to prevent hover layout jitter.
+- Route managed Chat `unarchiveTab` and `deleteTab` calls through the Workspace session APIs, fail closed when Workspace session identity is missing, clear stale `?tab=` query parameters after tab switches or failed deep-link restores (without interfering with attachment preview history), remove duplicate full-width error banners in `App.vue` and `WorkspaceSummary.vue`, and separate Personal vs. Workspace tabs in `ArchivedSessionsPanel` and the sidebar archive counter.
+- Auto-expand a collapsed `Needs you` group in the Status sidebar view when switching back to Status or when a new unread/waiting session arrives, fix collapsed group header tooltips (`Click to expand`), and highlight the collapsed `Needs you` count badge.
+
 ### feat(feedback): replace board reaper task with silent turn and inline bilingual top-3 lessons
 
 - Replace board-visible `WorkspaceTask(internal_kind="feedback_reaper")` dispatch with a single-flight silent background ephemeral Chat turn using public-safe MASO catalog selection (`CLAUDE_HUB_FEEDBACK_MODEL` / `CLAUDE_HUB_PATROL_MODEL` / advertised lightweight high-reasoning model) with read-only CLI fallback and guaranteed ephemeral session archival.

@@ -30,3 +30,30 @@ test('handleDeepLink guards the success toast behind the restore result', () => 
   assert.ok(guarded, 'expected an if (restored) block in handleDeepLink')
   assert.match(guarded[1], /Restored archived session/)
 })
+
+test('App clears stale ?tab= deep links on failure, not-found, and tab switch without breaking attachment preview', () => {
+  assert.match(appSource, /function clearTabQueryParam\(\)/)
+  assert.match(appSource, /stripTabDeepLink\(window\.location\)/)
+  assert.match(appSource, /window\.history\.replaceState\(window\.history\.state, '', nextUrl\)/)
+  assert.match(appSource, /if \(window\.history\.state\?\.attachmentPreview\) return/)
+  assert.match(appSource, /if \(linkedTabId && linkedTabId !== tabId\)/)
+})
+
+test('App and WorkspaceSummary do not duplicate toast errors in full-width banners', () => {
+  const workspaceSummary = readFileSync(
+    new URL('../src/features/workspace/components/WorkspaceSummary.vue', import.meta.url),
+    'utf8',
+  )
+  assert.doesNotMatch(appSource, /class="error-banner"/)
+  assert.doesNotMatch(workspaceSummary, /class="workspace-error"/)
+})
+
+test('ArchivedSessionsPanel gates close on restore result and separates Personal vs Workspace tabs', () => {
+  const panelSource = readFileSync(
+    new URL('../src/components/ArchivedSessionsPanel.vue', import.meta.url),
+    'utf8',
+  )
+  assert.match(panelSource, /const restored = await unarchiveTab\(tabId\)\s+if \(restored\) emit\('close'\)/)
+  assert.match(panelSource, /archivedManualTabs/)
+  assert.match(panelSource, /archivedManagedTabs/)
+})

@@ -11,7 +11,8 @@ import { RESTART_STORAGE_KEY } from '@/utils/serviceRestart'
 const STORAGE_KEY_MODE = 'claude_hub_app_mode'
 
 export const useAppStore = defineStore('app', () => {
-  const mode = ref<AppMode>((readStoredValue(STORAGE_KEY_MODE) as AppMode) || 'terminal')
+  const storedMode = readStoredValue(STORAGE_KEY_MODE)
+  const mode = ref<AppMode>(storedMode === 'workspace' ? 'workspace' : 'terminal')
   const preference = ref(readThemePreference())
   const systemQuery = window.matchMedia('(prefers-color-scheme: dark)')
   const systemDark = ref(systemQuery.matches)

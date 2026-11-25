@@ -11,7 +11,7 @@ const source = readFileSync(
 const { outputText } = ts.transpileModule(source, {
   compilerOptions: { module: ts.ModuleKind.ES2022, target: ts.ScriptTarget.ES2020 },
 })
-const { buildTabLink, buildTabShareText, parseTabDeepLink } = await import(
+const { buildTabLink, buildTabShareText, parseTabDeepLink, stripTabDeepLink } = await import(
   `data:text/javascript;base64,${Buffer.from(outputText).toString('base64')}`
 )
 
@@ -77,4 +77,19 @@ test('share text delegates transcript retrieval to raw stream events without fil
   const text = buildTabShareText('native-goal-tab')
   assert.match(text, /\/api\/workspaces\/tabs\/native-goal-tab\/stream\/events\?since_sequence=-1&limit=5000/)
   assert.doesNotMatch(text, /goal-status|goal-checkpoint|saniti[sz]e|strip/i)
+})
+
+test('stripTabDeepLink removes only the tab query param while preserving other params and hash', () => {
+  assert.equal(
+    stripTabDeepLink({ pathname: '/', search: '?tab=abc-123', hash: '' }),
+    '/',
+  )
+  assert.equal(
+    stripTabDeepLink({ pathname: '/app/', search: '?foo=1&tab=abc-123&bar=2', hash: '#sec' }),
+    '/app/?foo=1&bar=2#sec',
+  )
+  assert.equal(
+    stripTabDeepLink({ pathname: '/', search: '?foo=1', hash: '#keep' }),
+    '/?foo=1#keep',
+  )
 })

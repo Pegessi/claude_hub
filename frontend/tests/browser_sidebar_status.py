@@ -360,6 +360,30 @@ async def main(browser_run: BrowserRun) -> None:
             )
             await shot("00-desktop-status.png")
 
+            # Status view: collapsing Needs you highlights the hidden count
+            # badge, and returning to Status view auto-expands Needs you so
+            # unread finished sessions never appear missing.
+            status_btn = sidebar.locator(".chat-sidebar__view-btn", has_text="Status")
+            folders_btn = sidebar.locator(".chat-sidebar__view-btn", has_text="Folders")
+            await status_btn.click()
+            needs_you = sidebar.locator('.chat-sidebar__group[data-group-key="status:needs_you"]')
+            needs_you_header = needs_you.locator(".chat-sidebar__group-header")
+            await expect(needs_you_header).to_have_attribute("aria-expanded", "true")
+            await expect(
+                needs_you.locator(f'.chat-sidebar__item[data-tab-id="{DONE}"]')
+            ).to_be_visible()
+            await needs_you_header.click()
+            await expect(needs_you_header).to_have_attribute("aria-expanded", "false")
+            await expect(needs_you.locator(".chat-sidebar__group-count--alert")).to_be_visible()
+            await shot("00b-status-needs-you-collapsed.png")
+            await folders_btn.click()
+            await status_btn.click()
+            await expect(needs_you_header).to_have_attribute("aria-expanded", "true")
+            await expect(
+                needs_you.locator(f'.chat-sidebar__item[data-tab-id="{DONE}"]')
+            ).to_be_visible()
+            await folders_btn.click()
+
             # Compare two real active tabs, not a hand-edited data attribute.
             # A game skin must retain the waiting cue as well as its active ring.
             report["game_waiting_indicators"] = []

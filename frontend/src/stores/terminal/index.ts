@@ -11,6 +11,11 @@ import type {
 } from '@/types'
 import { groupChatsByCwd, moveCwdGroup, moveTabById } from '@/utils/chatGroups'
 import {
+  isManagedChatTab,
+  resolveTabDeletePath,
+  resolveTabUnarchivePath,
+} from '@/utils/managedChatSurface'
+import {
   API_BASE,
   LAYOUT_CONFIGS,
   STORAGE_KEY_LAYOUT,
@@ -67,6 +72,12 @@ export const useTerminalStore = defineStore('terminal', () => {
   // Soft-deleted tabs. Kept separately from `tabs` (which only holds active
   // tabs) so the archive browser can list them without polluting the grid.
   const archivedTabs = ref<TerminalTab[]>([])
+  const archivedManualTabs = computed(() =>
+    archivedTabs.value.filter(tab => !isManagedChatTab(tab) && !tab.workspace_role)
+  )
+  const archivedManagedTabs = computed(() =>
+    archivedTabs.value.filter(tab => isManagedChatTab(tab) || Boolean(tab.workspace_role))
+  )
   const isLoadingArchived = ref(false)
 
   const activeTab = computed(() => tabs.value.find(tab => tab.id === activeTabId.value) || null)
@@ -464,7 +475,7 @@ export const useTerminalStore = defineStore('terminal', () => {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(data),
       })
-      if (!response.ok) throw new Error('Failed to update tab')
+      if (!response.ok) throw await tabRequestError(response, 'Failed to update tab')
       const updatedTab = await response.json()
       invalidateTabSnapshots()
       const index = tabs.value.findIndex(tab => tab.id === tabId)
@@ -482,10 +493,14 @@ export const useTerminalStore = defineStore('terminal', () => {
   async function deleteTab(tabId: string) {
     isLoading.value = true
     try {
-      const response = await fetch(`${API_BASE}/tabs/${tabId}`, {
+      const targetTab =
+        tabs.value.find(tab => tab.id === tabId) ??
+        archivedTabs.value.find(tab => tab.id === tabId)
+      const url = resolveTabDeletePath(API_BASE, tabId, targetTab)
+      const response = await fetch(url, {
         method: 'DELETE',
       })
-      if (!response.ok) throw new Error('Failed to delete tab')
+      if (!response.ok) throw await tabRequestError(response, 'Failed to delete tab')
       invalidateTabSnapshots()
       tabs.value = tabs.value.filter(tab => tab.id !== tabId)
       discardQueuedChat(tabId)
@@ -536,7 +551,7 @@ export const useTerminalStore = defineStore('terminal', () => {
       const response = await fetch(`${API_BASE}/tabs/${tabId}/archive`, {
         method: 'POST',
       })
-      if (!response.ok) throw new Error('Failed to archive tab')
+      if (!response.ok) throw await tabRequestError(response, 'Failed to archive tab')
       invalidateTabSnapshots()
       tabs.value = tabs.value.filter(tab => tab.id !== tabId)
       discardQueuedChat(tabId)
@@ -574,7 +589,11 @@ export const useTerminalStore = defineStore('terminal', () => {
   async function unarchiveTab(tabId: string): Promise<boolean> {
     isLoading.value = true
     try {
-      const response = await fetch(`${API_BASE}/tabs/${tabId}/unarchive`, {
+      const targetTab =
+        archivedTabs.value.find(tab => tab.id === tabId) ??
+        tabs.value.find(tab => tab.id === tabId)
+      const url = resolveTabUnarchivePath(API_BASE, tabId, targetTab)
+      const response = await fetch(url, {
         method: 'POST',
       })
       if (!response.ok) throw await tabRequestError(response, 'Failed to unarchive tab')
@@ -760,6 +779,8 @@ export const useTerminalStore = defineStore('terminal', () => {
     toggleMobileDrawer,
     selectMobileTab,
     archivedTabs,
+    archivedManualTabs,
+    archivedManagedTabs,
     isLoadingArchived,
     fetchTabs,
     fetchAgentStatuses,

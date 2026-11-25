@@ -29,6 +29,34 @@
               </button>
             </div>
 
+            <div
+              v-if="archivedManagedTabs.length > 0"
+              class="archive-panel__scope"
+              role="tablist"
+              aria-label="Archived session source"
+            >
+              <button
+                type="button"
+                role="tab"
+                class="archive-panel__scope-btn"
+                :class="{ active: archiveScope === 'personal' }"
+                :aria-selected="archiveScope === 'personal'"
+                @click="setArchiveScope('personal')"
+              >
+                Personal ({{ archivedManualTabs.length }})
+              </button>
+              <button
+                type="button"
+                role="tab"
+                class="archive-panel__scope-btn"
+                :class="{ active: archiveScope === 'workspace' }"
+                :aria-selected="archiveScope === 'workspace'"
+                @click="setArchiveScope('workspace')"
+              >
+                Workspace ({{ archivedManagedTabs.length }})
+              </button>
+            </div>
+
             <div class="archive-panel__body">
               <div
                 v-if="isLoadingArchived"
@@ -38,12 +66,18 @@
               </div>
               <template v-else>
                 <div
-                  v-for="tab in archivedTabs"
+                  v-for="tab in visibleArchivedTabs"
                   :key="tab.id"
                   class="archive-item"
                 >
                   <div class="archive-item__info">
                     <span class="archive-item__name">{{ tab.name || 'Untitled' }}</span>
+                    <span
+                      v-if="tab.workspace_name || tab.workspace_role"
+                      class="archive-item__meta"
+                    >
+                      {{ [tab.workspace_name, tab.workspace_role].filter(Boolean).join(' · ') }}
+                    </span>
                     <span
                       class="archive-item__cwd"
                       :title="tab.cwd || ''"
@@ -82,10 +116,10 @@
                 </div>
 
                 <div
-                  v-if="archivedTabs.length === 0"
+                  v-if="visibleArchivedTabs.length === 0"
                   class="archive-panel__empty"
                 >
-                  No archived sessions.
+                  {{ archiveScope === 'workspace' ? 'No archived workspace agents.' : 'No archived sessions.' }}
                 </div>
               </template>
             </div>
@@ -97,7 +131,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, watch, onUnmounted } from 'vue'
+import { computed, ref, watch, onUnmounted } from 'vue'
 import { storeToRefs } from 'pinia'
 import LoadingButton from '@/components/LoadingButton.vue'
 import { useTerminalStore } from '@/stores/terminalStore'
@@ -112,17 +146,26 @@ const emit = defineEmits<{
 }>()
 
 const store = useTerminalStore()
-const { archivedTabs, isLoadingArchived } = storeToRefs(store)
+const { archivedManualTabs, archivedManagedTabs, isLoadingArchived } = storeToRefs(store)
 const { unarchiveTab, permanentDeleteTab, fetchArchivedTabs } = store
 
+const archiveScope = ref<'personal' | 'workspace'>('personal')
+const visibleArchivedTabs = computed(() =>
+  archiveScope.value === 'workspace' ? archivedManagedTabs.value : archivedManualTabs.value
+)
 const pendingRestoreId = ref<string | null>(null)
 const confirmDeleteId = ref<string | null>(null)
+
+function setArchiveScope(next: 'personal' | 'workspace') {
+  archiveScope.value = next
+  confirmDeleteId.value = null
+}
 
 async function restore(tabId: string) {
   pendingRestoreId.value = tabId
   try {
-    await unarchiveTab(tabId)
-    emit('close')
+    const restored = await unarchiveTab(tabId)
+    if (restored) emit('close')
   } finally {
     pendingRestoreId.value = null
   }
@@ -142,6 +185,7 @@ watch(
   () => props.open,
   isOpen => {
     if (isOpen) {
+      archiveScope.value = 'personal'
       confirmDeleteId.value = null
       void fetchArchivedTabs()
       window.addEventListener('keydown', handleKeydown)
@@ -218,6 +262,40 @@ onUnmounted(() => {
   color: var(--ch-color-text);
 }
 
+.archive-panel__scope {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 2px;
+  margin: 10px 12px 0;
+  padding: 2px;
+  border: 1px solid var(--ch-color-border-muted);
+  border-radius: var(--ch-radius-md);
+  background: var(--ch-color-surface-sunken);
+}
+
+.archive-panel__scope-btn {
+  padding: 5px 8px;
+  border: none;
+  border-radius: var(--ch-radius-sm);
+  background: transparent;
+  color: var(--ch-color-text-muted);
+  font-size: var(--ch-font-size-xs);
+  font-weight: 500;
+  cursor: pointer;
+  transition:
+    background var(--ch-motion-fast),
+    color var(--ch-motion-fast);
+}
+
+.archive-panel__scope-btn:hover {
+  color: var(--ch-color-text);
+}
+
+.archive-panel__scope-btn.active {
+  background: var(--ch-color-surface-control);
+  color: var(--ch-color-text-strong);
+}
+
 .archive-panel__body {
   flex: 1;
   min-height: 0;
@@ -259,6 +337,14 @@ onUnmounted(() => {
   font-size: var(--ch-font-size-sm);
   font-weight: 600;
   color: var(--ch-color-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.archive-item__meta {
+  font-size: var(--ch-font-size-xs);
+  color: var(--ch-color-accent);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

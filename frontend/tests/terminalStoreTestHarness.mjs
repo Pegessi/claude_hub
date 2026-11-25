@@ -17,6 +17,7 @@ function moduleUrl(text, replacements = {}) {
 }
 
 const chatGroupsUrl = moduleUrl(await source('utils/chatGroups.ts'))
+const managedChatSurfaceUrl = moduleUrl(await source('utils/managedChatSurface.ts'))
 const reconnectUrl = moduleUrl(await source('utils/terminalReconnect.ts'), { vue: vueUrl })
 const helpersUrl = moduleUrl(await source('stores/terminal/helpers.ts'))
 const notificationsUrl = moduleUrl(await source('stores/notifications.ts'), { vue: vueUrl })
@@ -36,6 +37,7 @@ const storeUrl = moduleUrl(await source('stores/terminal/index.ts'), {
   pinia: piniaUrl,
   vue: vueUrl,
   '@/utils/chatGroups': chatGroupsUrl,
+  '@/utils/managedChatSurface': managedChatSurfaceUrl,
   './helpers': helpersUrl,
   './agentStatusPolling': statusUrl,
   './mobileDrawer': mobileDrawerUrl,
@@ -46,4 +48,5 @@ const storeUrl = moduleUrl(await source('stores/terminal/index.ts'), {
 })
 
 export const chatGroupsModuleUrl = chatGroupsUrl
+export const managedChatSurfaceModuleUrl = managedChatSurfaceUrl
 export const { useTerminalStore } = await import(storeUrl)

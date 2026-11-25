@@ -407,14 +407,17 @@ onBeforeUnmount(() => {
   list-style: none;
 }
 
-/* The rail is narrow: the action label only appears on hover/focus. */
+/* The rail is narrow: fade the action label in on hover/focus without shifting columns. */
 .subagent-rail :deep(.subagent-action) {
-  display: none;
+  opacity: 0;
+  transition:
+    opacity var(--ch-motion-fast),
+    color var(--ch-motion-fast);
 }
 
-.subagent-rail :deep(.subagent-row:hover .subagent-action),
+.subagent-rail :deep(.subagent-row:hover:not(:disabled) .subagent-action),
 .subagent-rail :deep(.subagent-row:focus-visible .subagent-action) {
-  display: inline;
+  opacity: 1;
 }
 
 .subagent-rail .is-history {
@@ -517,7 +520,8 @@ onBeforeUnmount(() => {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .subagent-dock-pill {
+  .subagent-dock-pill,
+  .subagent-rail :deep(.subagent-action) {
     transition: none;
   }
 

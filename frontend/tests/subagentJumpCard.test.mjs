@@ -101,6 +101,17 @@ test('list shows Active first and a collapsible Earlier with unified View action
   // A row is inert only when neither action exists: both Hub and native
   // children open the pane's unified detail window.
   assert.match(rows, /:disabled="!chip\.canJump && !chip\.canOpen"/)
+  // Row uses a 2x3 CSS grid so time and View share one right-aligned column
+  // and the summary stays within column 2 without colliding with View.
+  assert.match(rows, /class="subagent-row"[\s\S]*?:class="\{ 'has-aside': hasAside \}"/)
+  assert.match(rows, /grid-template-columns: 7px minmax\(0, 1fr\) auto;/)
+  assert.match(rows, /\.subagent-summary \{[\s\S]*?grid-column: 2;[\s\S]*?grid-row: 2;/)
+  assert.match(rows, /\.subagent-time \{[\s\S]*?grid-column: 3;[\s\S]*?grid-row: 1;[\s\S]*?justify-self: end;/)
+  assert.match(rows, /\.subagent-action \{[\s\S]*?grid-column: 3;[\s\S]*?grid-row: 2;[\s\S]*?justify-self: end;/)
+  // Narrow right-gutter rail hides View with opacity rather than display: none
+  // so hovering never shifts the row layout horizontally.
+  assert.match(dockPill, /\.subagent-rail :deep\(\.subagent-action\) \{[\s\S]*?opacity: 0;/)
+  assert.doesNotMatch(dockPill, /\.subagent-rail :deep\(\.subagent-action\) \{[\s\S]*?display:\s*none/)
 })
 
 test('native sub-agents join the same dock as Hub children', () => {

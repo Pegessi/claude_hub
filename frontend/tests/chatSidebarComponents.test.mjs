@@ -173,3 +173,67 @@ test('sidebar defaults to Folders view and manually switches to Status view', as
   assert.equal(textOf(find(root, hasClass('chat-sidebar__group-label'))), 'Done')
   app.unmount()
 })
+
+test('collapsed Needs you auto-expands on new arrival and when switching back to Status view', async t => {
+  installBrowser(t)
+  const unreadA = { ...testTab, id: 'u-1', name: 'mr 4504 fix', is_unread: true }
+  const unreadB = { ...testTab, id: 'u-2', name: 'llmserver bernard', is_unread: true }
+  const store = fakeStore()
+  store.chatTabs = ref([unreadA])
+  store.archivedManualTabs = ref([testTab])
+  store.archivedTabs = ref([
+    testTab,
+    { ...testTab, id: 'managed-arch', managed_session_id: 'ws-1', workspace_role: 'orchestrator' },
+  ])
+  setStore(store)
+  const root = { children: [] }
+  const app = makeRenderer().createApp({ setup: () => () => h(Sidebar) })
+  app.mount(root)
+
+  const textOf = node => (node?.text ?? (node?.children ?? []).map(c => c.text ?? '').join('')).trim()
+  // Archived button counts personal/manual archived tabs rather than background Workspace sessions.
+  const archiveBtn = find(root, hasClass('chat-sidebar__archived-btn'))
+  assert.match(textOf(archiveBtn), /Archived \(1\)/)
+
+  // Switch to Status view -> Needs you is visible and expanded.
+  const switcher = find(root, hasClass('chat-sidebar__view-switch'))
+  const [foldersBtn, statusBtn] = (switcher?.children ?? []).filter(node => node.tag === 'button')
+  statusBtn.attributes.onClick()
+  await nextTick()
+
+  const findGroup = key => find(root, node => node.attributes?.['data-group-key'] === key)
+  let needsYouGroup = findGroup('status:needs_you')
+  assert.ok(needsYouGroup, 'expected Needs you group')
+  let header = find(needsYouGroup, hasClass('chat-sidebar__group-header'))
+  assert.equal(header.attributes['aria-expanded'], true)
+  assert.match(header.attributes.title, /Click to collapse/)
+  assert.equal(find(needsYouGroup, hasClass('chat-sidebar__group-count--alert')), null)
+
+  // User collapses Needs you -> badge switches to alert pill and title flips to Click to expand.
+  header.attributes.onClick()
+  await nextTick()
+  needsYouGroup = findGroup('status:needs_you')
+  header = find(needsYouGroup, hasClass('chat-sidebar__group-header'))
+  assert.equal(header.attributes['aria-expanded'], false)
+  assert.match(header.attributes.title, /Click to expand/)
+  assert.ok(find(needsYouGroup, hasClass('chat-sidebar__group-count--alert')))
+
+  // A new unread session arrives in Needs you -> group automatically re-expands.
+  store.chatTabs.value = [unreadA, unreadB]
+  await nextTick()
+  needsYouGroup = findGroup('status:needs_you')
+  header = find(needsYouGroup, hasClass('chat-sidebar__group-header'))
+  assert.equal(header.attributes['aria-expanded'], true)
+
+  // Collapse again, switch to Folders, then switch back to Status -> Needs you expands again.
+  header.attributes.onClick()
+  await nextTick()
+  assert.equal(find(findGroup('status:needs_you'), hasClass('chat-sidebar__group-header')).attributes['aria-expanded'], false)
+  foldersBtn.attributes.onClick()
+  await nextTick()
+  statusBtn.attributes.onClick()
+  await nextTick()
+  assert.equal(find(findGroup('status:needs_you'), hasClass('chat-sidebar__group-header')).attributes['aria-expanded'], true)
+
+  app.unmount()
+})

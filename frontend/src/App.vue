@@ -116,18 +116,6 @@
         </div>
       </div>
       <div
-        v-if="error"
-        class="error-banner"
-      >
-        <span>{{ error }}</span>
-        <button
-          class="error-close"
-          @click="clearError"
-        >
-          ×
-        </button>
-      </div>
-      <div
         v-show="mode === 'terminal'"
         class="terminal-mode-shell"
       >
@@ -213,7 +201,7 @@ import LoginView from '@/views/LoginView.vue'
 import { useAppStore } from '@/stores/appStore'
 import { useTerminalStore } from '@/stores/terminalStore'
 import { useAuthStore } from '@/stores/authStore'
-import { parseTabDeepLink } from '@/utils/deepLink'
+import { parseTabDeepLink, stripTabDeepLink } from '@/utils/deepLink'
 import { isAttachmentNavigation } from '@/utils/attachmentHistory'
 import { isMobileOrCoarseViewport, MODAL_SURFACE_SELECTOR, syncModalViewportScroll } from '@/utils/mobileInputFocus'
 import { useViewport } from '@/composables/useViewport'
@@ -221,7 +209,7 @@ import { useViewport } from '@/composables/useViewport'
 const appStore = useAppStore()
 const store = useTerminalStore()
 const authStore = useAuthStore()
-const { tabs, error, activePane, activePaneIsChat } = storeToRefs(store)
+const { tabs, activePane, activePaneIsChat } = storeToRefs(store)
 const {
   mode,
   feishuBotSettingsVisible,
@@ -232,13 +220,14 @@ const {
 const archivePanelOpen = ref(false)
 const terminalMainColumn = ref<HTMLElement | null>(null)
 const { isMobile } = useViewport()
+let initialDeepLinkResolved = false
+let resolvingDeepLink = false
 
-// Clear all error-type notifications from the terminal store toast stack.
-function clearError() {
-  const ids = store.notifications
-    .filter(n => n.type === 'error')
-    .map(n => n.id)
-  for (const id of ids) store.dismissNotification(id)
+function clearTabQueryParam() {
+  if (typeof window === 'undefined') return
+  if (!parseTabDeepLink(window.location.search)) return
+  const nextUrl = stripTabDeepLink(window.location)
+  window.history.replaceState(window.history.state, '', nextUrl)
 }
 
 async function retryCheckAuth() {
@@ -248,10 +237,18 @@ async function retryCheckAuth() {
   }
 }
 
-// Expose active pane tab ID for mobile controls.
+// Expose active pane tab ID for mobile controls, and clear stale ?tab= deep
+// link parameters once the user (or background retirement) moves away from the
+// deep-linked tab so a later refresh never re-triggers an old tab/unarchive.
 watch(() => activePane.value?.tabId || null, (tabId) => {
   if (typeof window !== 'undefined') {
     window.__claudeHub.activePaneTabId = tabId
+  }
+  if (!initialDeepLinkResolved || resolvingDeepLink || typeof window === 'undefined') return
+  if (window.history.state?.attachmentPreview) return
+  const linkedTabId = parseTabDeepLink(window.location.search)
+  if (linkedTabId && linkedTabId !== tabId) {
+    clearTabQueryParam()
   }
 }, { immediate: true })
 
@@ -516,6 +513,10 @@ async function handleDeepLink() {
         message: 'Restored archived session',
         autoDismissMs: 4000,
       })
+    } else {
+      // Clear a failed ?tab= deep link so reloading on another session does not
+      // repeatedly retry and surface the same restore error.
+      clearTabQueryParam()
     }
     return
   }
@@ -526,12 +527,21 @@ async function handleDeepLink() {
     autoDismissMs: 4000,
   })
   // Clean the stale ?tab param so a refresh doesn't re-trigger the warning.
-  window.history.replaceState(null, '', window.location.pathname)
+  clearTabQueryParam()
+}
+
+async function runDeepLink() {
+  resolvingDeepLink = true
+  try {
+    await handleDeepLink()
+  } finally {
+    resolvingDeepLink = false
+  }
 }
 
 function handleHistoryNavigation(event: PopStateEvent) {
   if (isAttachmentNavigation(event)) return
-  void handleDeepLink()
+  void runDeepLink()
 }
 
 onMounted(async () => {
@@ -539,8 +549,17 @@ onMounted(async () => {
   await authStore.checkAuth()
   if (!authStore.authEnabled || !authStore.authRequired || authStore.isAuthenticated) {
     await store.fetchTabs()
-    void store.fetchArchivedTabs()
-    await handleDeepLink()
+    const linkedTabId = parseTabDeepLink(window.location.search)
+    const archivedFetchedByDeepLink = Boolean(
+      linkedTabId && !store.tabs.some(tab => tab.id === linkedTabId),
+    )
+    await runDeepLink()
+    initialDeepLinkResolved = true
+    if (!archivedFetchedByDeepLink) {
+      void store.fetchArchivedTabs()
+    }
+  } else {
+    initialDeepLinkResolved = true
   }
   // Set up mobile viewport sync
   setupMobileViewportSync()
