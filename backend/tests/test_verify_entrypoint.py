@@ -36,6 +36,7 @@ keys = (
     "CLAUDE_CONFIG_DIR", "COREPACK_ENABLE_NETWORK", "COREPACK_ENABLE_AUTO_PIN",
     "PYTEST_ADDOPTS", "PYTEST_PLUGINS", "PYTEST_DISABLE_PLUGIN_AUTOLOAD", "COVERAGE_FILE",
     "GOAL_UI_REVIEW_URL", "CLAUDE_HUB_RUN_CHAT_SIDEBAR_E2E",
+    "HTTP_PROXY", "NO_PROXY", "no_proxy",
     "PYTHONPATH", "PYTHONHOME", "PYTHONUSERBASE", "UV_ENV_FILE", "UV_PROJECT_ENVIRONMENT",
 )
 with open(os.environ["VERIFY_LOG"], "a", encoding="utf-8") as handle:
@@ -59,6 +60,8 @@ if name == "uv":
     )
     if tail[:1] == ["-m"] and len(tail) >= 2:
         operation = tail[1]
+    elif tail and Path(tail[0]).name == "check_verify_shards.py":
+        operation = "shards"
     elif tail and Path(tail[0]).name == "check_backend_environment.py":
         if tail[1:] != ["--root", str(project.parent)]:
             raise SystemExit(94)
@@ -172,6 +175,12 @@ class VerifyFixture:
                 == ["run", "--offline", "--no-sync", "--no-config", "--no-env-file", "--project"]
                 and row["args"][7:11] == ["python", "-I", "-m", operation]
             )
+            or (
+                operation == "shards"
+                and row["tool"] == "uv"
+                and len(row["args"]) > 9
+                and Path(row["args"][9]).name == "check_verify_shards.py"
+            )
             or (row["tool"] == "pnpm" and row["args"] == ["run", operation])
         ]
 
@@ -242,6 +251,7 @@ def verify_fixture(tmp_path: Path) -> Generator[VerifyFixture, None, None]:
         "TEST_PNPM_VERSION": "9.9.9",
         "DECLARED_PNPM_VERSION": "9.9.9",
         "CLAUDE_HUB_VERIFY_ARTIFACT_ROOT": str(artifacts),
+        "CLAUDE_HUB_VERIFY_SHARDS": "1",
         "CLAUDE_HUB_PROVIDER_NETWORK_MODE": "caller-fixture-mode",
     }
     for key in (
@@ -291,6 +301,8 @@ def test_all_continues_after_failure(verify_fixture: VerifyFixture) -> None:
         "frontend-build",
     ):
         assert f"==> {target}" in output
+    assert output.index("==> backend-tests") < output.index("==> backend-types")
+    assert output.index("==> backend-types") < output.index("==> docs")
     assert "<== FAIL backend-types" in output
     assert "<== PASS backend-tests" in output
     assert "<== PASS frontend-build" in output
@@ -392,6 +404,73 @@ def test_local_version_warning_does_not_hide_failed_check(
     assert result.returncode == 7
     assert "noncanonical toolchain" in result.stderr
     assert len(verify_fixture.calls("mypy")) == 1
+
+
+def test_backend_tests_preserves_proxy_and_excludes_loopback(verify_fixture: VerifyFixture) -> None:
+    result = verify_fixture.run(
+        "backend-tests",
+        "--",
+        "tests/example.py",
+        HTTP_PROXY="http://proxy.example:8080",
+        NO_PROXY="upper.example",
+        no_proxy="lower.example",
+    )
+    assert result.returncode == 0, result.stderr
+    env = verify_fixture.calls("pytest")[0]["env"]
+    assert env["HTTP_PROXY"] == "http://proxy.example:8080"
+    assert env["NO_PROXY"] == env["no_proxy"]
+    assert set(env["NO_PROXY"].split(",")) == {
+        "upper.example",
+        "lower.example",
+        "localhost",
+        "127.0.0.1",
+        "::1",
+    }
+
+
+def test_backend_tests_preserves_proxy_wildcard(verify_fixture: VerifyFixture) -> None:
+    result = verify_fixture.run("backend-tests", "--", "tests/example.py", NO_PROXY="*")
+    assert result.returncode == 0, result.stderr
+    env = verify_fixture.calls("pytest")[0]["env"]
+    assert env["NO_PROXY"] == env["no_proxy"] == "*"
+
+
+def test_default_shards_and_failure_reach_runner(verify_fixture: VerifyFixture) -> None:
+    result = verify_fixture.run(
+        "backend-tests", CLAUDE_HUB_VERIFY_SHARDS="3", FAIL_CHECK="shards", FAIL_STATUS="7"
+    )
+    assert result.returncode == 7
+    calls = verify_fixture.calls("shards")
+    assert len(calls) == 1
+    assert calls[0]["args"][-2:] == ["--workers", "3"]
+    assert not verify_fixture.calls("pytest")
+
+
+def test_unsupported_platform_uses_serial_default(verify_fixture: VerifyFixture) -> None:
+    fake_bin = Path(verify_fixture.env["PATH"].split(os.pathsep)[0])
+    _executable(fake_bin / "uname", "#!/bin/sh\necho Darwin\n")
+    result = verify_fixture.run("backend-tests", CLAUDE_HUB_VERIFY_SHARDS="auto")
+    assert result.returncode == 0, result.stderr
+    assert len(verify_fixture.calls("pytest")) == 1
+    assert not verify_fixture.calls("shards")
+
+
+@pytest.mark.parametrize("value", ["0", "65", "-1", "abc"])
+def test_invalid_shard_count_fails_before_pytest(verify_fixture: VerifyFixture, value: str) -> None:
+    result = verify_fixture.run("backend-tests", CLAUDE_HUB_VERIFY_SHARDS=value)
+    assert result.returncode != 0
+    assert "CLAUDE_HUB_VERIFY_SHARDS" in result.stderr
+    assert not verify_fixture.calls("pytest")
+    assert not verify_fixture.calls("shards")
+
+
+def test_focused_tests_do_not_use_shards(verify_fixture: VerifyFixture) -> None:
+    result = verify_fixture.run(
+        "backend-tests", "--", "tests/example.py", CLAUDE_HUB_VERIFY_SHARDS="3"
+    )
+    assert result.returncode == 0, result.stderr
+    assert len(verify_fixture.calls("pytest")) == 1
+    assert not verify_fixture.calls("shards")
 
 
 def test_all_local_version_mismatch_runs_checks(verify_fixture: VerifyFixture) -> None:

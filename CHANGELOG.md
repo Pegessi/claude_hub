@@ -7,6 +7,10 @@
 
 ## Released
 
+### perf: speed up backend verification
+
+- Run the default backend suite in isolated, coverage-merged shards on supported hosts; preserve focused single-process runs and bypass proxies for loopback tests.
+
 ### fix(cursor): recover transient ACP interruptions
 
 - Delay transient turn errors until recovery and RPC outcome are known, and retain startup timeout diagnostics.

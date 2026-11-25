@@ -207,7 +207,10 @@ def test_structural_index_failure_is_quarantined(state_root: Path) -> None:
     assert "structural validation failed" in _read_marker(markers[0])["events"][0]["reason"]
 
 
-def test_repeated_corrupt_loads_never_overwrite_quarantine(state_root: Path) -> None:
+def test_repeated_corrupt_loads_never_overwrite_quarantine(
+    state_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(WorkspaceManager, "_quarantine_timestamp", staticmethod(lambda: "fixed"))
     index_file = state_root / "index.json"
     first = b"corrupt-one"
     index_file.write_bytes(first)
@@ -219,6 +222,10 @@ def test_repeated_corrupt_loads_never_overwrite_quarantine(state_root: Path) -> 
 
     entries = _quarantine_entries(state_root)
     assert len(entries) == 2
+    assert {path.name for path in entries} == {
+        "index.json.corrupt-fixed",
+        "index.json.corrupt-fixed-1",
+    }
     contents = {path.read_bytes() for path in entries}
     assert contents == {first, second}
 

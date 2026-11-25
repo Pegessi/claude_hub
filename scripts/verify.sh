@@ -31,6 +31,9 @@ Targets:
   browser-mocks    Run the isolated mocked browser checks (explicit only)
   all              Run standard targets; browser, staged and merge checks are explicit
 
+The default backend suite uses isolated parallel shards on Linux when CPU capacity
+allows. CLAUDE_HUB_VERIFY_SHARDS=1 selects serial execution; set a positive
+integer to choose the shard count. Focused arguments always run serially.
 Only backend-tests accepts focused pytest arguments after --.
 merge-decisions requires an explicit full merge SHA; its record covers that merge only. The default and
 all/CI retain the default scope; focused results are labeled, not a default-suite pass.
@@ -207,13 +210,55 @@ run_backend_tests() {
   run_backend_pytest backend-tests "$scope" "" 0 "${pytest_args[@]}"
 }
 
+backend_sharding_supported() {
+  [[ "$(uname -s)" == Linux ]] || return 1
+  # Probe in a disposable process: the supervisor needs child adoption,
+  # anchored waitid and readable direct-child membership for safe cleanup.
+  python3 -I -c '
+import ctypes, os
+assert hasattr(os, "waitid") and hasattr(os, "WNOWAIT")
+open(f"/proc/self/task/{os.getpid()}/children").read()
+assert ctypes.CDLL(None, use_errno=True).prctl(36, 1, 0, 0, 0) == 0
+' >/dev/null 2>&1
+}
+
+backend_shard_count() {
+  local requested="${CLAUDE_HUB_VERIFY_SHARDS:-auto}" cpus=1
+  if [[ "$requested" == auto ]]; then
+    if [[ "$(uname -s)" == Linux ]] && command -v nproc >/dev/null 2>&1; then
+      cpus="$(nproc)"
+      if (( cpus > 4 )); then
+        cpus=$((cpus - 3))
+        (( cpus <= 8 )) || cpus=8
+      else
+        cpus=1
+      fi
+    fi
+    if (( cpus > 1 )) && ! backend_sharding_supported; then
+      printf 'WARNING: backend shard process isolation unavailable; using serial tests.\n' >&2
+      cpus=1
+    fi
+    printf "%s\n" "$cpus"
+  else
+    [[ "$requested" =~ ^[1-9][0-9]?$ ]] && (( requested <= 64 )) || \
+      fail "CLAUDE_HUB_VERIFY_SHARDS must be auto or an integer from 1 to 64"
+    if (( requested > 1 )) && ! backend_sharding_supported; then
+      fail "parallel backend shards need Linux child adoption and /proc; use CLAUDE_HUB_VERIFY_SHARDS=1"
+    fi
+    printf "%s\n" "$requested"
+  fi
+}
+
 run_backend_pytest() {
   local target="$1" scope="$2" runtime_tmp="$3" require_junit="$4"
   shift 4
   [[ -z "${CLAUDE_HUB_TEST_BACKEND_URL:-}" ]] || fail \
     "$target must not use an external backend"
   local evidence runtime status pytest_status log_status report_status=0 junit_status=0
-  local pytest_log_fd junit_log_fd
+  local pytest_log_fd junit_log_fd shards=1
+  if [[ "$scope" == default ]]; then
+    shards="$(backend_shard_count)" || return $?
+  fi
   local -a pipeline_status=() pytest_args=("$@")
   evidence="$_CLAUDE_HUB_VERIFY_EVIDENCE"
   runtime="$_CLAUDE_HUB_VERIFY_RUNTIME/pytest"
@@ -226,7 +271,7 @@ run_backend_pytest() {
   printf 'Backend test target: %s; scope: %s; evidence: %s; TMPDIR: %s\n' \
     "$target" "$scope" "$evidence" "$runtime_tmp"
   {
-    printf 'target=%s\nscope=%s\nruntime_tmp=%s\n' "$target" "$scope" "$runtime_tmp"
+    printf 'target=%s\nscope=%s\nruntime_tmp=%s\nshards=%s\n' "$target" "$scope" "$runtime_tmp" "$shards"
     printf 'e2e_timeout_scale_input=%s\n' "${CLAUDE_HUB_E2E_TIMEOUT_SCALE:-1}"
     printf 'pytest_arg=%q\n' "${pytest_args[@]}"
     git -C "$ROOT" rev-parse HEAD
@@ -247,6 +292,14 @@ run_backend_pytest() {
     export CLAUDE_HUB_HOME="$runtime/hub" CLAUDE_HUB_STATE_ROOT="$runtime/state"
     export CLAUDE_HUB_TMUX_SOCKET="ch-verify-$$-${RANDOM}"
     export COVERAGE_FILE="$evidence/.coverage"
+    # Keep configured proxy exclusions and ensure all loopback traffic is direct.
+    # Some clients prefer lowercase and others uppercase, so align both.
+    if [[ "${NO_PROXY:-}" == "*" || "${no_proxy:-}" == "*" ]]; then
+      export NO_PROXY="*" no_proxy="*"
+    else
+      export NO_PROXY="${NO_PROXY:+$NO_PROXY,}${no_proxy:+$no_proxy,}localhost,127.0.0.1,::1"
+      export no_proxy="$NO_PROXY"
+    fi
     # Test selection and plugin changes must be explicit, not inherited silently.
     unset PYTEST_ADDOPTS PYTEST_PLUGINS PYTEST_DISABLE_PLUGIN_AUTOLOAD
     if [[ "$scope" == default ]]; then
@@ -257,7 +310,12 @@ run_backend_pytest() {
     unset CLAUDE_HUB_ALLOW_LIVE_RUNTIME CLAUDE_HUB_TOKEN CLAUDE_HUB_BASE_URL
     unset ANTHROPIC_API_KEY OPENAI_API_KEY CLAUDE_CODE_OAUTH_TOKEN
     cd "$ROOT/backend"
-    backend_python -m pytest "${pytest_args[@]}"
+    if (( shards > 1 )); then
+      backend_python "$ROOT/scripts/check_verify_shards.py" --backend "$ROOT/backend" \
+        --runtime "$runtime" --evidence "$evidence" --workers "$shards"
+    else
+      backend_python -m pytest "${pytest_args[@]}"
+    fi
   ) 2>&1 | tee -i "/dev/fd/$pytest_log_fd" || pipeline_status=("${PIPESTATUS[@]}")
   exec {pytest_log_fd}>&-
   # A full disk can make tee/report writes fail too. Do not relabel that as
@@ -436,7 +494,9 @@ run_all() {
   local running=0 finished=0 total=0 elapsed status wallclock
   local -a targets=(docs checkout-safety backend-format backend-types backend-tests \
     frontend-lint frontend-types frontend-tests frontend-build)
-  local -a pending=("${targets[@]}")
+  # Start the long targets first while retaining stable reporting order.
+  local -a pending=(backend-tests backend-types backend-format docs checkout-safety \
+    frontend-lint frontend-types frontend-tests frontend-build)
   local -A reported=()
   local logdir started
   # Independent targets share no files, ports or runtime homes, and the slowest
