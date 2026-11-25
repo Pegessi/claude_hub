@@ -279,9 +279,11 @@ async def wait_code_block_state(
 ) -> list[dict[str, Any]]:
     """Read the affordance state once the fade transition has settled."""
     state: list[dict[str, Any]] = []
-    for _ in range(24):
+    for _ in range(40):
         state = await blocks.evaluate_all(CODE_BLOCK_STATE)
-        measured = [round(row["hint_opacity"] or 0, 2) for row in state]
+        # The assertions below require exact CSS endpoints. Rounding can
+        # accept an in-flight transition (e.g. 0.99858) before it settles.
+        measured = [row["hint_opacity"] for row in state]
         if measured == expected_opacity:
             return state
         await page.wait_for_timeout(50)

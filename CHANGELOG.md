@@ -7,6 +7,11 @@
 
 ## Released
 
+### test: stabilize mocked browser acceptance
+
+- Wait for exact Markdown code fade endpoints and verify that the restored HTML
+  preview link can receive a click in both documents before opening it.
+
 ### fix(cursor): recover empty ACP sessions
 
 - Replace an unrecoverable empty ACP shell after a restart while preserving fail-closed recovery for conversations with history.

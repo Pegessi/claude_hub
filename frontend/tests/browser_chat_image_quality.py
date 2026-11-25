@@ -933,6 +933,7 @@ async def check_html_preview(page, context, output: Path, report: dict) -> None:
     await expect(source.locator("script, img, style, iframe")).to_have_count(0)
     await expect(iframe).to_be_hidden()
     await dialog.get_by_role("button", name="Copy", exact=True).click()
+    await expect(dialog.get_by_role("status")).to_have_text("Copied")
     assert await page.evaluate("window.__copiedCode.at(-1)") == source_text
     await dialog.get_by_role("button", name="Show preview", exact=True).click()
     await expect(iframe).to_be_visible()
@@ -946,10 +947,36 @@ async def check_html_preview(page, context, output: Path, report: dict) -> None:
     external = frame.get_by_role("link", name="External reference", exact=True)
     await expect(external).to_have_attribute("target", "_blank")
     assert "noopener" in (await external.get_attribute("rel") or "").split()
-    # Copy feedback changes header height while the scrolled iframe is hidden.
-    # Re-establish the restored link's visible position before native input.
     await external.scroll_into_view_if_needed()
     await expect(external).to_be_in_viewport()
+    # Give both documents time to present the restored iframe before native input.
+    next_paint = (
+        "() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))"
+    )
+    await page.evaluate(next_paint)
+    await frame.evaluate(next_paint)
+    # Poll through read-only evaluations so the sandbox's CSP stays in force.
+    deadline = asyncio.get_running_loop().time() + 5
+    while asyncio.get_running_loop().time() < deadline:
+        link_hit = await external.evaluate("""link => {
+                const rect = link.getBoundingClientRect()
+                return link.contains(document.elementFromPoint(
+                    rect.x + rect.width / 2, rect.y + rect.height / 2
+                ))
+            }""")
+        box = await external.bounding_box()
+        if (
+            link_hit
+            and box
+            and await iframe.evaluate(
+                "(frame, {x, y}) => document.elementFromPoint(x, y) === frame",
+                {"x": box["x"] + box["width"] / 2, "y": box["y"] + box["height"] / 2},
+            )
+        ):
+            break
+        await asyncio.sleep(0.05)
+    else:
+        raise AssertionError("Restored HTML preview link did not become hittable")
     assert not report["html_explicit_external_requests"]
     async with context.expect_page() as opened:
         await external.click()
