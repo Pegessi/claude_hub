@@ -28,7 +28,7 @@ from claude_hub.services.feishu_ai_command import (
     parse_ai_command,
 )
 from claude_hub.services.feishu_ai_command_models import _MAX_PENDING_QUEUE
-from claude_hub.services.feishu_ai_reactions import remove_ack_reaction
+from claude_hub.services.feishu_ai_reactions import add_reaction, remove_ack_reaction
 from claude_hub.services.feishu_realtime_events import (
     FeishuRealtimeEventRouter,
     get_feishu_realtime_event_router,
@@ -800,11 +800,18 @@ class FeishuAiPoller:
             )
             try:
                 cfg = await self._service.aget_config()
+                client = self._service.build_user_client(cfg)
                 if await remove_ack_reaction(
-                    self._service.build_user_client(cfg),
+                    client,
                     str(pending.get("ack_message_id") or msg.message_id),
                     pending["ack_reaction_id"],
                 ):
+                    if done_emoji := pending.get("cleanup_done_emoji"):
+                        await add_reaction(
+                            client,
+                            str(pending.get("reply_message_id") or msg.message_id),
+                            done_emoji,
+                        )
                     return True
             except Exception:
                 logger.warning(

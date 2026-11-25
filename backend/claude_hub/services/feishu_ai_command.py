@@ -1072,7 +1072,6 @@ class FeishuAiCommandService:
 
         if parsed is None:
             return self._skip_result(message, dry_run=dry_run, reason="prefix_not_matched")
-
         if replay.get("reply_message_id"):
             message = replace(
                 message, message_id=replay["reply_message_id"], chat_id=replay["reply_chat_id"]
@@ -1107,8 +1106,9 @@ class FeishuAiCommandService:
             else None
         )
         ack_message_id = str((pending_item or {}).get("ack_message_id") or message.message_id)
-        reply_in_thread = bool(message.thread_id) or cfg.reply_in_thread
-        reply_in_thread = bool(replay.get("reply_in_thread", reply_in_thread))
+        reply_in_thread = bool(
+            replay.get("reply_in_thread", message.thread_id or cfg.reply_in_thread)
+        )
         execution_message = message
         interim_text, interim_post = "", {}
         status_val = "completed"
@@ -1120,14 +1120,12 @@ class FeishuAiCommandService:
         )
         interim_receipt = FeishuReplyReceipt()
         final_receipt = FeishuReplyReceipt()
-        dispatch_entered = False
-        final_reply_started = False
+        dispatch_entered = final_reply_started = False
         retryable_unsent = False
         held_channel_lock: asyncio.Lock | None = None
         held_publication_lock: asyncio.Lock | None = None
         turn_completed = resuming_completed
-        answer = str(pending_item["answer"]) if resuming_completed and pending_item else ""
-
+        answer = str(replay.get("answer", ""))
         result: AiCommandExecutionResult | None = None
         try:
             if dry_run:
@@ -1442,16 +1440,19 @@ class FeishuAiCommandService:
             if held_channel_lock is not None:
                 held_channel_lock.release()
             if not dry_run and not (status_val == "cancelled" and turn_completed):
-                if ack_reaction_id and await remove_ack_reaction(
-                    user_client, ack_message_id, ack_reaction_id
-                ):
+                done_emoji = cfg.done_emoji if status_val == "completed" else ""
+                if ack_reaction_id:
+                    removed = await remove_ack_reaction(
+                        user_client, ack_message_id, ack_reaction_id
+                    )
                     self.mark_pending_command_state(
                         pending_message_id,
                         "interrupted" if status_val == "cancelled" else "in_flight",
-                        ack_reaction_id=None,
+                        ack_reaction_id=None if removed else ack_reaction_id,
+                        cleanup_done_emoji="" if removed else done_emoji,
                     )
-                if status_val == "completed" and cfg.done_emoji:
-                    await add_reaction(user_client, message.message_id, cfg.done_emoji)
+                if done_emoji and (not ack_reaction_id or removed):
+                    await add_reaction(user_client, message.message_id, done_emoji)
                 if status_val != "cancelled":
                     for dk in (dedup_claim_key, *extra_dedup_keys):
                         if retryable_unsent:

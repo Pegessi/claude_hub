@@ -34,3 +34,7 @@ Cleanup-only entries allow three retry attempts with a 30-second delay.
 They use two worker slots reserved for reaction cleanup and are excluded
 from the command intake limit. Exhaustion logs the affected message ID
 and removes the cleanup entry.
+
+When busy-reaction deletion fails after a successful reply, the cleanup entry
+retains the completion reaction. It adds `DONE` after a confirmed deletion. A
+failed command or exhausted deletion retries leave no completion reaction.

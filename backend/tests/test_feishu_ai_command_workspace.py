@@ -1628,6 +1628,7 @@ async def test_restart_cleans_persisted_busy_reaction(
     recovery, _ = poller._schedule_durable_pending_queue()
     await asyncio.gather(*recovery)
     assert restarted.list_pending_commands()[0]["dispatch_state"] == "cleanup_reaction"
+    client.add_reaction_as_user.assert_awaited_once_with(message.message_id, "OnIt")
     assert poller._schedule_durable_pending_queue() == ([], [])
     restarted.mark_pending_command_state(message.message_id, "queued", cleanup_retry_at=0)
     recovered, _ = poller._schedule_durable_pending_queue()
@@ -1636,6 +1637,8 @@ async def test_restart_cleans_persisted_busy_reaction(
     assert not restarted.list_pending_commands()
     assert len(dispatches) == 1
     assert client.add_reaction_as_user.await_count == (2 if crash_before_dispatch else 1)
+    if crash_before_dispatch:
+        client.add_reaction_as_user.assert_awaited_with(message.message_id, "DONE")
     assert client.reply_as_user.await_count == int(crash_before_dispatch)
     client.delete_reaction_as_user.assert_awaited_with(message.message_id, "rx_original")
     assert client.delete_reaction_as_user.await_count == 2
@@ -1702,6 +1705,7 @@ async def test_permanent_reaction_cleanup_does_not_block_polling(
             "dispatch_state": "cleanup_reaction",
             "ack_reaction_id": "rx_original",
             "cleanup_retry_at": due,
+            "cleanup_done_emoji": "DONE",
         }
         for mid, due in [
             ("om_permanent", 0),
@@ -1734,5 +1738,9 @@ async def test_permanent_reaction_cleanup_does_not_block_polling(
         await asyncio.gather(*cleanup)
     assert service.get_pending_command("om_permanent") is None
     assert calls == ["rx_original"] * 3
+    assert [call.args for call in client.add_reaction_as_user.await_args_list] == [
+        (fresh.message_id, "OnIt"),
+        (fresh.message_id, "DONE"),
+    ]
     assert "Exhausted /ai reaction cleanup attempts for om_permanent" in caplog.text
     assert poller._schedule_durable_pending_queue() == ([], [])
