@@ -12,6 +12,20 @@ const policy = await import(`data:text/javascript;base64,${Buffer.from(outputTex
 
 const goal = status => ({ status })
 
+test('only idle Hub protocol failures expose explicit completion without changing terminality', () => {
+  const failed = {
+    status: 'failed', execution_owner: 'hub_managed', dispatch_state: 'idle',
+    status_message: 'assistant response omitted a valid trailing goal-status signal',
+  }
+  assert.equal(policy.canCompleteGoal(failed), true)
+  assert.equal(policy.isGoalTerminal(failed.status), true)
+  for (const patch of [
+    { status: 'cancelled' }, { status: 'complete' }, { status_message: 'turn ended with status failed' },
+    { execution_owner: 'provider_native' }, { dispatch_state: 'uncertain' },
+    { current_turn_id: 'turn' }, { pending_step_id: 'step' }, { strict_review_in_progress: true },
+  ]) assert.equal(policy.canCompleteGoal({ ...failed, ...patch }), false)
+})
+
 test('only an active Goal prevents switching into Plan mode', () => {
   assert.equal(policy.goalBlocksPlan(goal('active')), true)
   for (const state of ['paused', 'blocked', 'usageLimited', 'budgetLimited', 'complete', 'cancelled', 'failed']) {

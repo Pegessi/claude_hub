@@ -302,6 +302,7 @@ async def complete_goal(
     try:
         manager = get_goal_manager()
         goal = manager.get(goal_id)
+        _direct_chat_tab(goal.tab_id)
         _cancel_restart_for_mutation(goal, body.client_request_id)
         async with get_goal_admission_lock(goal.tab_id):
             return await manager.complete(goal_id, body.client_request_id)

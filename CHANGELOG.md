@@ -7,6 +7,14 @@
 
 ## Released
 
+### fix(goals): recover missing completion signals without false failure
+
+- Accept protocol-only Markdown wrappers while rejecting inline quotations and trailing prose.
+- Preserve full Markdown and nested-tag context before applying the protocol output budget; quoted/indented blocks and fences opened before the tail window cannot complete a Goal or latch the watchdog.
+- Treat Goal tags as protocol rather than HTML blocks, retain invalid outer-tag nesting, and take checkpoint/plan metadata only from the whitespace-contiguous terminal envelope.
+- Repair missing status signals once, preserve the original evidence for Strict review, and request input rather than fail or infer completion when recovery remains ambiguous.
+- Allow explicit completion of idle historical protocol failures on desktop and phone, without reopening real execution failures or claiming an automatic review pass.
+
 ### fix(maso): archive remote sessions with Hub lifecycle
 
 - Synchronize confirmed MASO HTTP identities after Tab and Workspace

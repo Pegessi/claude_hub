@@ -95,6 +95,72 @@ def test_goal_api_rejects_non_direct_chat(goal_client: TestClient, monkeypatch) 
     assert response.status_code == 400
 
 
+def test_legacy_protocol_failure_can_be_explicitly_completed_with_strict_history(goal_client):
+    from claude_hub.services.goal_signals import MISSING_GOAL_SIGNAL_MESSAGE
+
+    manager = goal_api.get_goal_manager()
+    goal = manager.create(
+        "tab-1", GoalRunCreate(objective="Verify", client_request_id="legacy", strict_review=True)
+    )
+    goal.status = GoalRunStatus.FAILED
+    goal.status_message = MISSING_GOAL_SIGNAL_MESSAGE
+    goal.turns_completed = 2
+    goal.completed_turn_ids = ["interrupted", "delivered"]
+    manager.store.put(goal)
+    body = {"client_request_id": "human-override"}
+    for _ in range(2):
+        response = goal_client.post(f"/api/goals/{goal.id}/complete", json=body)
+        assert response.status_code == 200, response.text
+        result = response.json()
+        assert result["status"] == "complete"
+        assert result["status_message"].startswith("Manually completed by user")
+        assert result["strict_review_rounds"] == 0
+        assert result["completed_turn_ids"] == goal.completed_turn_ids
+    assert goal_client.get("/api/tabs/tab-1/goal/current").json()["status"] == "complete"
+
+
+@pytest.mark.parametrize(
+    "patch",
+    [
+        {"status_message": "turn ended with status failed"},
+        {"status": GoalRunStatus.CANCELLED},
+        {"dispatch_state": GoalDispatchState.UNCERTAIN},
+        {"current_turn_id": "unknown"},
+        {"pending_step_id": "pending"},
+        {"strict_review_in_progress": True},
+    ],
+)
+def test_manual_completion_does_not_reclassify_other_failures(goal_client, patch):
+    from claude_hub.services.goal_signals import MISSING_GOAL_SIGNAL_MESSAGE
+
+    manager = goal_api.get_goal_manager()
+    goal = manager.create("tab-1", GoalRunCreate(objective="Verify", client_request_id="legacy"))
+    goal.status = GoalRunStatus.FAILED
+    goal.status_message = MISSING_GOAL_SIGNAL_MESSAGE
+    goal = goal.model_copy(update=patch)
+    manager.store.put(goal)
+    response = goal_client.post(
+        f"/api/goals/{goal.id}/complete", json={"client_request_id": "override"}
+    )
+    assert response.status_code == 409
+
+
+def test_manual_completion_cannot_revive_an_old_failure_after_replacement(goal_client):
+    from claude_hub.services.goal_signals import MISSING_GOAL_SIGNAL_MESSAGE
+
+    manager = goal_api.get_goal_manager()
+    old = manager.create("tab-1", GoalRunCreate(objective="Old", client_request_id="old"))
+    old.status = GoalRunStatus.FAILED
+    old.status_message = MISSING_GOAL_SIGNAL_MESSAGE
+    manager.store.put(old)
+    new = manager.create("tab-1", GoalRunCreate(objective="New", client_request_id="new"))
+    response = goal_client.post(
+        f"/api/goals/{old.id}/complete", json={"client_request_id": "override"}
+    )
+    assert response.status_code == 409
+    assert manager.current("tab-1").id == new.id
+
+
 def test_goal_api_rejects_create_while_chat_turn_is_running(
     goal_client: TestClient, monkeypatch
 ) -> None:

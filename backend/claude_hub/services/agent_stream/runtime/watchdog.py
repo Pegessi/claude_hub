@@ -7,6 +7,7 @@ import time
 from typing import Any, Dict, Optional
 
 from ....models import AgentRuntimeStatus, AgentStreamEvent, AgentStreamEventType
+from ...goal_signals import parse_goal_signal
 from ..activity_labels import (
     FAILED_TURN_DETAIL,
     IDLE_DETAIL,
@@ -143,10 +144,10 @@ class WatchdogMixin(SessionState):
             or transport.goal_completion_requires_provider_event
         ):
             return
-        tail = self._assistant_text[-self._deps._GOAL_TAIL_SCAN_CHARS :]
-        if "goal-status" not in tail:
-            return
-        if self._deps._GOAL_STATUS_TERMINAL_RE.search(tail):
+        # The parser needs the opening fence/tag/line even when it is outside
+        # the returned protocol budget. Every non-signal must clear the latch,
+        # including afterthoughts that push the old status out of that window.
+        if parse_goal_signal(self._assistant_text) is not None:
             if self._goal_terminal_at is None:
                 self._goal_terminal_at = time.monotonic()
         else:

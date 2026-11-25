@@ -50,6 +50,40 @@ class _MultiStageTransport(ProviderSession):
         raise AssertionError("this test never submits a provider turn")
 
 
+@pytest.mark.parametrize(
+    "text,accepted",
+    [
+        (
+            'Done.\n```xml\n<goal-status state="complete">verified</goal-status>\n```',
+            True,
+        ),
+        ('Example: <goal-status state="complete">quoted</goal-status>', False),
+        ('```xml\n<goal-status state="complete">unclosed fence</goal-status>', False),
+        (
+            '<goal-status state="complete">verified</goal-status>\nAn afterthought.',
+            False,
+        ),
+    ],
+    ids=["closed-wrapper", "inline-quote", "open-wrapper", "afterthought"],
+)
+@pytest.mark.asyncio
+async def test_one_shot_watchdog_uses_the_same_safe_signal_parser(text, accepted):
+    session = _session()
+    transport = _MultiStageTransport(session)
+    transport.goal_completion_requires_provider_event = False
+    tailer = SessionTailer(
+        workspace_id=session.workspace_id,
+        session_id=session.id,
+        adapter=ClaudeJsonlAdapter(),
+        session_getter=lambda: session,
+        native_transport=transport,
+    )
+    tailer._goal_protocol_turn = True
+    tailer._assistant_text = text
+    tailer._note_assistant_text(transport)
+    assert (tailer._goal_terminal_at is not None) == accepted
+
+
 @pytest.mark.asyncio
 async def test_multistage_goal_cannot_synthesize_even_with_a_preexisting_terminal_latch(
     monkeypatch,
@@ -82,7 +116,9 @@ async def test_multistage_goal_cannot_synthesize_even_with_a_preexisting_termina
 
 
 @pytest.mark.asyncio
-async def test_dot_yield_keeps_facade_patch_lookup_inside_the_admission_guard(monkeypatch) -> None:
+async def test_dot_yield_keeps_facade_patch_lookup_inside_the_admission_guard(
+    monkeypatch,
+) -> None:
     import claude_hub.services.goal_run as goal_run
 
     session = _session()

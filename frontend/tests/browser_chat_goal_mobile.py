@@ -8,6 +8,7 @@ All APIs are mocked. No Hub backend or provider is contacted.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import sys
 from pathlib import Path
@@ -98,6 +99,9 @@ async def main(browser_run: BrowserRun) -> None:
         "boundary": "Real SPA rendering with mocked APIs; no backend or provider traffic.",
     }
     current_goal = dict(GOAL)
+    reject_complete = False
+    complete_requested = asyncio.Event()
+    complete_release = asyncio.Event()
     failure: BaseException | None = None
     page = None
 
@@ -166,7 +170,29 @@ async def main(browser_run: BrowserRun) -> None:
                     body = current_goal
                 elif path == "/api/goals/goal-mobile/pause" and request.method == "POST":
                     report["goal_actions"].append("pause")
-                    current_goal = {**current_goal, "status": "paused", "dispatch_state": "idle"}
+                    current_goal = {
+                        **current_goal,
+                        "status": "paused",
+                        "dispatch_state": "idle",
+                    }
+                    body = current_goal
+                elif path == "/api/goals/goal-mobile/complete" and request.method == "POST":
+                    assert request.post_data_json.get("client_request_id")
+                    report["goal_actions"].append("complete")
+                    if reject_complete:
+                        await route.fulfill(
+                            status=409,
+                            content_type="application/json",
+                            body=json.dumps({"detail": "Goal changed; reload before completing"}),
+                        )
+                        return
+                    complete_requested.set()
+                    await complete_release.wait()
+                    current_goal = {
+                        **current_goal,
+                        "status": "complete",
+                        "status_message": "Manually completed by user; automatic verification was not claimed",
+                    }
                     body = current_goal
                 elif path.endswith("/view"):
                     body = {"ok": True}
@@ -223,7 +249,10 @@ async def main(browser_run: BrowserRun) -> None:
                 timeout=2000,
             )
             sheet_box = await sheet.bounding_box()
-            report["sheet_geometry"] = {"initial": initial_sheet_box, "settled": sheet_box}
+            report["sheet_geometry"] = {
+                "initial": initial_sheet_box,
+                "settled": sheet_box,
+            }
             assert sheet_box and sheet_box["y"] + sheet_box["height"] <= PHONE["height"] + 1
             assert sheet_box["height"] <= PHONE["height"] * 0.86 + 1, sheet_box
             # Every action is on screen and easy to tap, however long the Goal is.
@@ -232,7 +261,10 @@ async def main(browser_run: BrowserRun) -> None:
                 button = sheet.get_by_role("button", name=label, exact=True)
                 await expect(button).to_be_in_viewport()
                 box = await button.bounding_box()
-                assert box and box["height"] >= TAP_TARGET and box["width"] >= 120, (label, box)
+                assert box and box["height"] >= TAP_TARGET and box["width"] >= 120, (
+                    label,
+                    box,
+                )
             # The long text scrolls inside the sheet; the actions stay put.
             text = sheet.locator(".goal-status-details-body")
             scrolls = await text.evaluate("node => node.scrollHeight > node.clientHeight + 100")
@@ -333,6 +365,85 @@ async def main(browser_run: BrowserRun) -> None:
             await expect(dialog.locator("#goal-dialog-objective")).to_be_focused()
             await page.keyboard.press("Escape")
             await expect(dialog).not_to_be_visible()
+
+            # The historical protocol-only failure has a human override on
+            # both layouts; ordinary failures/native ownership remain terminal.
+            protocol_failure = {
+                **GOAL,
+                "status": "failed",
+                "execution_owner": "hub_managed",
+                "dispatch_state": "idle",
+                "strict_review": True,
+                "strict_review_rounds": 0,
+                "status_message": "assistant response omitted a valid trailing goal-status signal",
+            }
+            for viewport in (PHONE, {"width": 1280, "height": 900}):
+                await page.set_viewport_size(viewport)
+                current_goal = dict(protocol_failure)
+                await page.reload(wait_until="domcontentloaded")
+                await expect(bar).to_have_attribute("data-status", "failed")
+                if viewport == PHONE:
+                    await bar.locator(".goal-status-summary").click()
+                    controls = page.get_by_role("dialog", name="Chat Goal details")
+                else:
+                    controls = bar
+                complete = controls.get_by_role("button", name="Complete", exact=True)
+                await expect(complete).to_be_enabled()
+                await expect(
+                    controls.get_by_role("button", name="Resume", exact=True)
+                ).to_have_count(0)
+                await expect(
+                    controls.get_by_role("button", name="Edit Goal", exact=True)
+                ).to_have_count(0)
+                reject_complete = True
+                await complete.click()
+                await expect(bar).to_have_attribute("data-error", "")
+                await expect(bar).to_have_attribute("data-status", "failed")
+                reject_complete = False
+                await page.reload(wait_until="domcontentloaded")
+                await expect(bar).to_have_attribute("data-status", "failed")
+                complete_requested.clear()
+                complete_release.clear()
+                # Phone sheet and desktop action are keyboard reachable.
+                if viewport == PHONE:
+                    await bar.locator(".goal-status-summary").click()
+                    controls = page.get_by_role("dialog", name="Chat Goal details")
+                else:
+                    controls = bar
+                complete = controls.get_by_role("button", name="Complete", exact=True)
+                await complete.focus()
+                await page.keyboard.press("Enter")
+                await asyncio.wait_for(complete_requested.wait(), timeout=5)
+                await expect(bar).to_have_attribute("aria-busy", "true")
+                if viewport == PHONE:
+                    await bar.locator(".goal-status-summary").click()
+                await expect(complete).to_be_disabled()
+                complete_release.set()
+                await expect(bar).to_have_attribute("data-status", "complete")
+                await page.reload(wait_until="domcontentloaded")
+                await expect(bar).to_have_attribute("data-status", "complete")
+                assert current_goal["strict_review_rounds"] == 0
+                assert current_goal["checkpoint"] == GOAL["checkpoint"]
+                for patch in (
+                    {"status_message": "turn ended with status failed"},
+                    {"execution_owner": "provider_native"},
+                    {"status": "cancelled"},
+                    {"dispatch_state": "uncertain"},
+                ):
+                    current_goal = {**protocol_failure, **patch}
+                    await page.reload(wait_until="domcontentloaded")
+                    await expect(bar).to_have_attribute("data-status", current_goal["status"])
+                    if viewport == PHONE:
+                        await bar.locator(".goal-status-summary").click()
+                        controls = page.get_by_role("dialog", name="Chat Goal details")
+                    else:
+                        controls = bar
+                    await expect(
+                        controls.get_by_role("button", name="Complete", exact=True)
+                    ).to_have_count(0)
+            report["failed_goal_override"] = (
+                "phone/desktop, conflict, busy, reload, identity and negative controls passed"
+            )
 
             assert not report["unknown_requests"], report["unknown_requests"]
             assert not report["page_errors"], report["page_errors"]

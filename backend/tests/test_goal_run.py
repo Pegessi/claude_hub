@@ -224,13 +224,15 @@ async def test_turn_signal_continues_only_after_state_is_persisted(tmp_path: Pat
 
 
 @pytest.mark.asyncio
-async def test_turn_missing_signal_fails_closed_and_usage_is_unavailable(tmp_path: Path) -> None:
+async def test_turn_missing_signal_without_transport_parks_and_usage_is_unavailable(
+    tmp_path: Path,
+) -> None:
     manager = controller(tmp_path)
     goal = manager.create("tab-1", request())
     arm_goal(manager, goal.id, "turn-1")
     result = await manager.on_turn_completed("tab-1", "turn-1", "complete", "plain prose")
     assert result is not None
-    assert result.status == GoalRunStatus.FAILED
+    assert result.status == GoalRunStatus.BLOCKED
     assert result.usage_quality == GoalUsageQuality.UNAVAILABLE
     assert manager.get(goal.id).turns_completed == 1
 
@@ -430,7 +432,7 @@ async def test_latest_valid_checkpoint_is_injected_and_invalid_update_is_non_des
 
 
 @pytest.mark.asyncio
-async def test_final_status_parser_ignores_earlier_unclosed_opener(tmp_path: Path) -> None:
+async def test_final_status_parser_keeps_inline_outer_opener_context(tmp_path: Path) -> None:
     manager = controller(tmp_path)
     goal = manager.create("tab-1", request())
     arm_goal(manager, goal.id, "turn-1")
@@ -444,8 +446,9 @@ async def test_final_status_parser_ignores_earlier_unclosed_opener(tmp_path: Pat
     )
 
     assert result is not None
-    assert result.status == GoalRunStatus.PAUSED
-    assert result.status_message == "automatic continuation is not connected"
+    assert result.status == GoalRunStatus.BLOCKED
+    assert result.signal_recovery_attempts == 0  # No dispatch callback is connected.
+    assert result.completed_at is None
 
 
 @pytest.mark.asyncio

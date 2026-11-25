@@ -222,7 +222,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import type { ChatGoal } from '@/types'
-import { goalStatusLabel, goalStopRetryAction, isGoalTerminal } from '@/utils/chatGoalPolicy'
+import { canCompleteGoal, goalStatusLabel, goalStopRetryAction, isGoalTerminal } from '@/utils/chatGoalPolicy'
 
 const props = defineProps<{ goal: ChatGoal; busy?: boolean; error?: string | null }>()
 const emit = defineEmits<{ pause: []; resume: []; complete: []; clear: []; edit: []; refresh: [] }>()
@@ -277,6 +277,8 @@ const actions = computed<GoalAction[]>(() => {
   }
   if (!isGoalTerminal(goal.status)) {
     list.push({ key: 'edit', label: 'Edit Goal', disabled: busy || needsReconciliation.value, run: () => emit('edit') })
+  }
+  if (canCompleteGoal(goal)) {
     list.push({ key: 'complete', label: 'Complete', disabled: busy, run: () => emit('complete') })
   }
   list.push({ key: 'clear', label: 'Clear', disabled: busy, run: () => emit('clear'), tone: 'danger' })

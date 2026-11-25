@@ -9,23 +9,13 @@ from __future__ import annotations
 import re
 from typing import List, Optional, Tuple
 
-# Mirrors the Goal controller's terminal signal: a turn whose raw assistant
-# text ends with a complete ``goal-status`` block has produced the model-side
-# end of turn even if the provider never follows with a completion record.
-# Keep this aligned with the controller's trailing-signal contract: the same
-# raw text is handed to the Goal observer on a normal completion, so synthesis
-# must not accept an envelope the controller would itself reject.
-_GOAL_STATUS_TERMINAL_RE = re.compile(
-    r'<goal-status\s+state=["\'](?:continue|complete|blocked|needs_input)["\']\s*>'
-    r".*?</goal-status>\s*$",
-    re.IGNORECASE | re.DOTALL,
-)
-# Only scan the bounded tail of accumulated assistant text; the terminal signal
-# is required to be the trailing block of the turn. This must stay equal to the
-# Goal controller's own protocol window
-# (``_MAX_CHECKPOINT_JSON_CHARS + 4096`` in goal_run/controller.py), so the
-# tailer never recognizes an envelope that the controller cannot later see.
-_GOAL_TAIL_SCAN_CHARS = 64 * 1024 + 4096
+from ...goal_signals import GOAL_STATUS_RE, GOAL_TAIL_SCAN_CHARS
+
+# Compatibility exports for display callers. The controller and watchdog use
+# parse_goal_signal, including its block boundaries and Markdown normalization,
+# rather than treating a regex substring match as completion authority.
+_GOAL_STATUS_TERMINAL_RE = GOAL_STATUS_RE
+_GOAL_TAIL_SCAN_CHARS = GOAL_TAIL_SCAN_CHARS
 
 
 _STRICT_STATUS_OPENER_RE = re.compile(r'<goal-status\s+state=["\'][a-z_]+["\']\s*>', re.IGNORECASE)

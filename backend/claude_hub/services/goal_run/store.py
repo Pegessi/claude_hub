@@ -64,6 +64,8 @@ class GoalRunStore:
     def _persisted_goal(goal: GoalRun) -> dict[str, object]:
         payload = goal.model_dump(mode="json", exclude_none=True)
         payload["idempotency"] = dict(goal.idempotency)
+        if goal.signal_recovery_text is not None:
+            payload["signal_recovery_text"] = goal.signal_recovery_text
         return payload
 
     def list(self) -> list[GoalRun]:

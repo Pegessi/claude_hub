@@ -188,6 +188,10 @@ class GoalRun(BaseModel):
     checkpoint: GoalCheckpoint | None = None
     checkpoint_history: list[GoalCheckpoint] = Field(default_factory=list)
     checkpoint_warning: str | None = None
+    # One protocol-only repair per consecutive missing-signal episode. Retain
+    # bounded original evidence across restart/repair for the Strict reviewer.
+    signal_recovery_attempts: int = Field(default=0, ge=0, le=1)
+    signal_recovery_text: str | None = Field(default=None, max_length=16_000, exclude=True)
     status_message: str | None = None
     # User text that the next dispatched Goal turn must carry. It is cleared
     # only after provider acceptance, so an uncertain dispatch keeps it.
