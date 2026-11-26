@@ -10,7 +10,13 @@ from claude_hub.api import agent_stream as stream_api
 from claude_hub.api import goal_runs as goal_api
 from claude_hub.auth.dependencies import get_current_user
 from claude_hub.main import app
-from claude_hub.models import GoalDispatchState, GoalRunCreate, GoalRunStatus, SessionKind, User
+from claude_hub.models import (
+    GoalDispatchState,
+    GoalRunCreate,
+    GoalRunStatus,
+    SessionKind,
+    User,
+)
 from claude_hub.services.goal_run import GoalRunController, GoalRunStore
 from claude_hub.services.local_storage import read_document
 
@@ -253,7 +259,11 @@ async def _return_true() -> bool:
 
 def _attach_exact_question_owner(monkeypatch, tmp_path, stream_manager, mode):
     from claude_hub.services.agent_stream.question_answers import answers
-    from claude_hub.services.chat_message_inbox import ChatMessageInbox, InboxEvidence, InboxTarget
+    from claude_hub.services.chat_message_inbox import (
+        ChatMessageInbox,
+        InboxEvidence,
+        InboxTarget,
+    )
 
     session = SimpleNamespace(id="terminal-tab-tab-1", tab_id="tab-1")
     snapshot = {
@@ -735,3 +745,143 @@ async def test_goal_read_waits_for_in_progress_admission(goal_client, monkeypatc
         assert observed.status_code == 200
         assert observed.json()["dispatch_state"] == "dispatched"
         assert observed.json()["current_turn_id"] == created.json()["current_turn_id"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("verdict", ["PASS", "BLOCK", "ERROR"])
+async def test_review_steer_api_retains_images_across_request_contexts(
+    goal_client, monkeypatch, tmp_path, verdict
+):
+    from claude_hub.services.goal_run import StrictReviewOutcome
+    from claude_hub.services.goal_run.images import pending_goal_images
+
+    manager, sent, _ = _steerable_goal(monkeypatch, tmp_path)
+    started, release = asyncio.Event(), asyncio.Event()
+
+    async def review(goal, text, number):
+        started.set()
+        await release.wait()
+        if verdict == "ERROR":
+            raise RuntimeError("reviewer connection failed")
+        return StrictReviewOutcome(verdict, "Reviewed candidate", [], "test-reviewer")
+
+    async def capabilities(*args):
+        return SimpleNamespace(supports_images=True)
+
+    manager.set_strict_reviewer_callback(review)
+    monkeypatch.setattr(stream_api, "_capabilities_for", capabilities)
+    goal = await manager.create_and_start(
+        "tab-1",
+        GoalRunCreate(objective="Verify images", client_request_id="new", strict_review=True),
+    )
+    completion = asyncio.create_task(
+        manager.on_turn_completed(
+            "tab-1",
+            goal.current_turn_id,
+            "completed",
+            '<goal-status state="complete">Verified</goal-status>',
+        )
+    )
+    await asyncio.wait_for(started.wait(), 5)
+    second_image = {
+        **IMAGE,
+        "filename": "second.png",
+        "preview_is_original": False,
+        "preview_data_url": IMAGE["data_url"],
+    }
+    bodies = [
+        {
+            "text": "First instruction",
+            "attachments": [IMAGE],
+            "client_turn_id": "queued-one",
+            "delivery": "steer",
+        },
+        {
+            "text": "",
+            "attachments": [second_image],
+            "client_turn_id": "queued-two",
+            "delivery": "steer",
+        },
+        {
+            "text": "Third instruction",
+            "client_turn_id": "queued-three",
+            "delivery": "steer",
+        },
+    ]
+    url = "/api/workspaces/tabs/tab-1/stream/send"
+    try:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            for body in bodies:
+                response = await client.post(url, json=body)
+                assert response.status_code == 200, response.text
+                assert response.json()["goal_review_steer_accepted"] == body["client_turn_id"]
+                assert response.headers["X-Claude-Hub-Goal-Review-Steer-Accepted"] == "true"
+                assert (await client.post(url, json=body)).status_code == 200
+            saved = manager.get(goal.id)
+            assert saved.review_steer_turn_ids == [
+                "queued-one",
+                "queued-two",
+                "queued-three",
+            ]
+            assert saved.pending_image_count == 2
+            assert len(sent) == 1
+            assert not completion.done()
+            assert "data:image" not in json.dumps(read_document(tmp_path / "steer-goals.json"))
+            # The request context has ended; another task cannot consume these
+            # images until the controller explicitly scopes delayed dispatch.
+            with pytest.raises(ValueError, match="Reattach"):
+                pending_goal_images(saved)
+            conflict = await client.post(url, json={**bodies[0], "text": "Changed retry"})
+            assert conflict.status_code == 409
+            too_many = await client.post(
+                url,
+                json={
+                    **bodies[0],
+                    "client_turn_id": "overflow",
+                    "attachments": [IMAGE] * 9,
+                },
+            )
+            assert too_many.status_code == 422
+            assert manager.get(goal.id).pending_image_count == 2
+            release.set()
+            settled = await asyncio.wait_for(completion, 5)
+            assert settled.status == GoalRunStatus.ACTIVE
+            assert len(sent) == 2
+            payload, metadata = sent[-1]
+            assert [image.model_dump() for image in payload.attachments] == [
+                IMAGE | {"preview_data_url": None},
+                second_image,
+            ]
+            assert "First instruction" in payload.text and "Third instruction" in payload.text
+            assert (
+                "Reviewed candidate" in payload.text
+                if verdict != "ERROR"
+                else "reviewer connection failed" in payload.text
+            )
+            assert manager._review_steer_images == {}
+            # Receipts remain replayable even though the combined worker has a
+            # new turn id, and after Clear/replacement changes the current Goal.
+            for body in bodies:
+                assert (await client.post(url, json=body)).status_code == 200
+            assert len(sent) == 2
+            await manager.clear(goal.id, "clear")
+            for body in bodies:
+                receipt = await client.post(url, json=body)
+                assert receipt.status_code == 200
+                assert receipt.json()["goal_review_steer_accepted"] == body["client_turn_id"]
+            assert len(sent) == 2
+            replacement = await manager.create_and_start(
+                "tab-1",
+                GoalRunCreate(objective="New owner", client_request_id="replacement"),
+            )
+            for body in bodies:
+                assert (await client.post(url, json=body)).status_code == 200
+            conflict = await client.post(url, json={**bodies[0], "text": "Changed retry"})
+            assert conflict.status_code == 409
+            assert len(sent) == 3
+            assert manager.current("tab-1").id == replacement.id
+    finally:
+        release.set()
+        await completion

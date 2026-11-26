@@ -214,6 +214,9 @@ export interface ChatGoal {
   status_message?: string | null
   pending_image_count?: number
   pending_input?: string | null
+  /** Accepted review-queue receipts, not provider turn identities. */
+  review_steer_turn_ids?: string[]
+  pending_review_steer?: boolean
   resume_after_turn?: boolean
   /** Additive plan-scope approval; absent on Goals created before it shipped. */
   plan_first?: boolean

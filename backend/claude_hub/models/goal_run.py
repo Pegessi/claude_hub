@@ -198,6 +198,15 @@ class GoalRun(BaseModel):
     pending_input: str | None = Field(default=None, max_length=GOAL_STEER_INPUT_MAX_LENGTH)
     # Resumed while an ordinary Chat turn was running: dispatch once it ends.
     resume_after_turn: bool = False
+    # Bounded receipts for steers accepted by the review queue, not worker turns.
+    # Keep them after dispatch so HTTP retries and optimistic UI can reconcile.
+    pending_review_steer: bool = False
+    # Reattaching after uncertain delivery uses a new delivery ID, but must not
+    # append the unchanged recovery amendment again before the batch is sent.
+    pending_review_recovery_digest: str = ""
+    review_steer_turn_ids: list[str] = Field(
+        default_factory=list, max_length=GOAL_RECENT_TURN_IDS_LIMIT
+    )
     # Additive ``plan_first`` scope approval. The first Goal turn plans only and
     # parks on the existing needs_input pause; ``plan_pending`` says the next
     # dispatched turn is still the planning turn. ``plan_answered`` records that

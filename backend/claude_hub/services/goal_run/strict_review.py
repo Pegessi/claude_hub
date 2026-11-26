@@ -813,11 +813,11 @@ def parse_strict_review_output(
 
 
 def format_strict_review_feedback(round_record: GoalStrictReviewRound) -> str:
-    """Format blocking review findings for the next Hub-managed Goal continuation."""
+    """Format the completed review outcome for the next Goal continuation."""
     model_suffix = f" ({round_record.reviewer_model})" if round_record.reviewer_model else ""
     lines = [
         f"Strict cross-model review round {round_record.round_number} "
-        f"[{round_record.reviewer_provider}{model_suffix}] returned BLOCK:",
+        f"[{round_record.reviewer_provider}{model_suffix}] returned {round_record.verdict}:",
         f"Summary: {round_record.summary}",
     ]
     blocking = [f for f in round_record.findings if f.severity in {"P0", "P1"}]

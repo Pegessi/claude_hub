@@ -2971,6 +2971,7 @@ async def test_direct_tab_route_reuses_durable_tab_incarnation_and_rejects_repla
     goal_manager = SimpleNamespace(
         current=lambda _tab_id: None,
         refresh_current=AsyncMock(return_value=None),
+        store=SimpleNamespace(review_steer_receipt=lambda *_: None),
     )
     monkeypatch.setattr(goal_run_service, "get_goal_manager", lambda: goal_manager)
 

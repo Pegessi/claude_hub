@@ -1,6 +1,7 @@
 """Request-scoped Goal images: originals never enter the Goal JSON snapshot.
 
-Only the immediate dispatch can consume these bytes. An interrupted dispatch
+The controller may retain a bounded review-time batch until delayed dispatch.
+An interrupted dispatch
 retains a small marker and fails closed until the user reattaches the images.
 Accepted image previews use the ordinary shared Chat attachment LRU.
 """
@@ -53,3 +54,23 @@ def pending_goal_images(goal: GoalRun) -> list[ChatImageAttachment]:
             "Image delivery interrupted. Reattach images and steer the Goal to continue."
         )
     return supplied[2]
+
+
+def combine_review_images(
+    retained: list[ChatImageAttachment], incoming: list[ChatImageAttachment]
+) -> list[ChatImageAttachment]:
+    """Bound the combined batch; each request already passed attachment validation."""
+    images = retained + incoming
+    if len(images) > 10:
+        raise ValueError("Queued Goal images are limited to 10 attachments")
+    # Match the transport's 40 MiB original+preview limit without decoding the
+    # already-validated payload again while holding the Goal mutation lock.
+    size = 0
+    for image in images:
+        for url in (image.data_url, image.preview_data_url):
+            if url:
+                payload = url.split(",", 1)[1]
+                size += len(payload) * 3 // 4 - (len(payload) - len(payload.rstrip("=")))
+    if size > 40 * 1024 * 1024:
+        raise ValueError("Queued Goal images are limited to 40 MiB including previews")
+    return [image.model_copy(deep=True) for image in images]

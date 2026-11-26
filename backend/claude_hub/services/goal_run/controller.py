@@ -11,6 +11,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 from uuid import uuid4
 
+from ...models.chat_image import ChatImageAttachment
 from ...models.goal_run import (
     GOAL_CHECKPOINT_HISTORY_LIMIT,
     GOAL_PLAN_HELPERS_LIMIT,
@@ -32,12 +33,18 @@ from ...models.goal_run import (
     utc_now,
 )
 from ..goal_signals import parse_goal_signal
-from .images import image_fingerprint
+from .images import (
+    combine_review_images,
+    goal_image_input,
+    image_fingerprint,
+    pending_goal_images,
+)
 from .native import NativeGoalCoordinator
 from .policy import GoalPolicyError, can_complete_protocol_failure, ensure_unfinished
 from .store import GoalRunStore
 from .strict_review import (
     StrictReviewerCallback,
+    StrictReviewOutcome,
     evaluate_review_continuation,
     format_strict_review_feedback,
     run_subagent_strict_review,
@@ -200,12 +207,16 @@ def _strict_review_prompt(goal: GoalRun) -> str:
     if goal.strict_review_feedback:
         return (
             "Strict cross-model review is enabled for this Goal. Your previous completion "
-            "claim did not pass independent review:\n"
+            "claim received this independent review outcome:\n"
             f"{goal.strict_review_feedback}\n"
             "Guidance for addressing review feedback: fix genuine P0/P1 defects and re-run "
             "verification, or if a finding is a false positive, refute it with concrete "
             "code/runtime evidence in your response and <goal-checkpoint> rather than adding "
             "speculative defensive bloat.\n"
+            "Address any queued user input together with this outcome. Decide whether it "
+            "requires changes and fresh verification, or only an answer/non-code adjustment. "
+            "A PASS covers the reviewed candidate, not subsequent changes. Emit complete "
+            "only when ready; the strict review gate still applies.\n"
             "End of independent review feedback.\n\n"
         )
     return (
@@ -223,6 +234,19 @@ def _strict_review_prompt(goal: GoalRun) -> str:
         "unverified gaps honestly in <goal-checkpoint>, and refute any false-positive "
         "review claim with concrete code/runtime evidence rather than speculative bloat.\n\n"
     )
+
+
+def _append_pending_input(pending: str | None, text: str) -> str:
+    combined = (
+        pending + "\n\n--- Next user message ---\n\n" + text
+        if pending and text
+        else pending or text
+    )
+    if len(combined) > GOAL_STEER_INPUT_MAX_LENGTH:
+        raise ValueError(
+            f"Queued Goal steer messages are limited to {GOAL_STEER_INPUT_MAX_LENGTH} characters"
+        )
+    return combined
 
 
 def _pending_input_prompt(goal: GoalRun) -> str:
@@ -299,6 +323,7 @@ class GoalRunController:
         # acceptance, never for the HTTP/observer task that called dispatch.
         self._acceptances: dict[str, asyncio.Future[None]] = {}
         self._strict_review_tasks: dict[str, asyncio.Task[Any]] = {}
+        self._review_steer_images: dict[str, list[ChatImageAttachment]] = {}
 
     def _lock_for(self, goal_id: str) -> asyncio.Lock:
         return self._locks.setdefault(goal_id, asyncio.Lock())
@@ -388,6 +413,7 @@ class GoalRunController:
 
     async def _cancel_current(self, goal: GoalRun) -> GoalRun:
         was_reviewing = goal.strict_review_in_progress
+        self._review_steer_images.pop(goal.id, None)
         await self._cancel_strict_review(goal.id)
         if was_reviewing:
             async with self._lock_for(goal.id):
@@ -582,7 +608,8 @@ class GoalRunController:
     ) -> GoalRun:
         """Deliver user input as the next Goal turn without leaving Goal mode.
 
-        Any running Goal turn is interrupted first. The Goal is parked as paused
+        Strict review queues input without interruption. Otherwise, a running
+        Goal turn is interrupted first. The Goal is parked as paused
         while that happens so the interrupted turn's completion cannot pause or
         advance it; the input is persisted before cancellation and survives an
         uncertain stop for an explicit resume.
@@ -608,11 +635,43 @@ class GoalRunController:
                 existing = self.store.get(goal_id)
                 replay = existing.idempotency.get(client_request_id)
                 if replay is not None:
-                    if replay not in {"steer", operation}:
+                    if replay not in {"steer", operation, "review-" + operation}:
                         raise GoalPolicyError(
                             "client_request_id was already used for another mutation"
                         )
                     return existing
+
+                if existing.strict_review_in_progress and existing.status == GoalRunStatus.ACTIVE:
+                    # No await between validation, persistence and retaining the
+                    # originals: the review cannot finish halfway through enqueue.
+                    combined_text = _append_pending_input(existing.pending_input, text)
+                    incoming = pending_goal_images(
+                        existing.model_copy(
+                            update={
+                                "pending_image_count": image_count,
+                                "pending_image_fingerprint": image_digest,
+                            }
+                        )
+                    )
+                    images = combine_review_images(
+                        self._review_steer_images.get(goal_id, []), incoming
+                    )
+                    existing.pending_input = combined_text
+                    existing.pending_review_steer = True
+                    existing.pending_review_recovery_digest = ""
+                    existing.pending_image_count = len(images)
+                    existing.pending_image_fingerprint = image_fingerprint(images)
+                    existing.review_steer_turn_ids = (existing.review_steer_turn_ids + [turn_id])[
+                        -GOAL_RECENT_TURN_IDS_LIMIT:
+                    ]
+                    existing.status_message = (
+                        "User input queued; waiting for strict cross-model review to finish"
+                    )
+                    existing.idempotency[client_request_id] = "review-" + operation
+                    queued = self.store.put(existing)
+                    if images:
+                        self._review_steer_images[goal_id] = images
+                    return queued
 
                 def apply(goal: GoalRun) -> None:
                     ensure_unfinished(goal)
@@ -621,7 +680,26 @@ class GoalRunController:
                         GoalRunStatus.BLOCKED,
                     } and not (goal.status == GoalRunStatus.PAUSED and goal.pending_image_count):
                         raise GoalPolicyError("Resume the Goal before steering it")
+                    recovering_review = (
+                        goal.status == GoalRunStatus.PAUSED
+                        and goal.pending_image_count
+                        and goal.pending_review_steer
+                    )
+                    recovery_digest = hashlib.sha256(text.encode()).hexdigest() if text else ""
+                    if recovering_review:
+                        pending_input = (
+                            goal.pending_input
+                            if recovery_digest
+                            and recovery_digest == goal.pending_review_recovery_digest
+                            else _append_pending_input(goal.pending_input, text)
+                        )
+                        if recovery_digest:
+                            goal.pending_review_recovery_digest = recovery_digest
+                    else:
+                        pending_input = text
+                        goal.pending_review_recovery_digest = ""
                     was_blocked = goal.status == GoalRunStatus.BLOCKED
+                    goal.pending_review_steer = bool(recovering_review)
                     goal.status = GoalRunStatus.PAUSED
                     goal.paused_at = utc_now()
                     goal.status_message = "steering the Goal with a new message"
@@ -629,7 +707,7 @@ class GoalRunController:
                         raise GoalPolicyError(
                             "Reattach images before steering the interrupted Goal"
                         )
-                    goal.pending_input = text
+                    goal.pending_input = pending_input
                     goal.signal_recovery_attempts = 0
                     goal.signal_recovery_text = None
                     goal.pending_image_count = image_count
@@ -845,6 +923,7 @@ class GoalRunController:
 
         task: asyncio.Task[Any] = asyncio.create_task(_invoke_reviewer())
         self._strict_review_tasks[goal_id] = task
+        review_error = False
         try:
             outcome = await task
         except asyncio.CancelledError:
@@ -864,16 +943,15 @@ class GoalRunController:
                 raise
             return latest
         except Exception as exc:
-            async with self._lock_for(goal_id):
-                latest = self.store.get(goal_id)
-                if not latest.strict_review_in_progress or latest.status != GoalRunStatus.ACTIVE:
-                    return latest
-                latest.strict_review_in_progress = False
-                latest.strict_review_subagent_id = None
-                latest.dispatch_state = GoalDispatchState.IDLE
-                latest.status = GoalRunStatus.BLOCKED
-                latest.status_message = f"Strict cross-review could not complete: {exc}"
-                return self.store.put(latest)
+            # An error is failed verification, never a PASS. Keep an auditable
+            # round and let queued user input reach the worker with this evidence.
+            outcome = StrictReviewOutcome(
+                verdict="BLOCK",
+                summary=f"Strict cross-review could not complete: {exc}"[:2000],
+                findings=[],
+                reviewer_provider="unavailable",
+            )
+            review_error = True
         finally:
             if self._strict_review_tasks.get(goal_id) is task:
                 self._strict_review_tasks.pop(goal_id, None)
@@ -916,7 +994,25 @@ class GoalRunController:
                     -GOAL_STRICT_REVIEW_HISTORY_LIMIT:
                 ]
                 latest.dispatch_state = GoalDispatchState.IDLE
-                if round_record.verdict == "PASS":
+                if latest.pending_input is not None:
+                    latest.strict_review_feedback = format_strict_review_feedback(round_record)
+                    latest.status_message = (
+                        "Strict cross-review finished; addressing queued user input"
+                    )
+                    # A queued human steer takes precedence over automatic PASS
+                    # completion or BLOCK parking, including the last review round.
+                    # Start a fresh budget only when this cycle has exhausted it.
+                    if round_number >= latest.strict_review_max_rounds:
+                        latest.strict_review_cycle += 1
+                        latest.strict_review_rounds = 0
+                        latest.strict_review_max_rounds = GOAL_STRICT_REVIEW_MAX_ROUNDS
+                    self.store.put(latest)
+                    prepared = self._prepare_dispatch_locked(latest.id)
+                elif review_error:
+                    latest.status = GoalRunStatus.BLOCKED
+                    latest.status_message = round_record.summary
+                    return self.store.put(latest)
+                elif round_record.verdict == "PASS":
                     latest.strict_review_feedback = None
                     latest.status = GoalRunStatus.COMPLETE
                     latest.completed_at = utc_now()
@@ -925,52 +1021,53 @@ class GoalRunController:
                         f"{round_record.reviewer_provider}): {round_record.summary[:240]}"
                     )
                     return self.store.put(latest)
-                active_cycle_history = [
-                    item
-                    for item in latest.strict_review_history
-                    if item.cycle == latest.strict_review_cycle
-                ]
-                decision = evaluate_review_continuation(
-                    active_cycle_history,
-                    base_max_rounds=latest.strict_review_max_rounds,
-                    hard_max_rounds=GOAL_STRICT_REVIEW_HARD_MAX_ROUNDS,
-                )
-                latest.strict_review_feedback = format_strict_review_feedback(round_record)
-                if not decision.should_continue:
-                    latest.status = GoalRunStatus.BLOCKED
-                    if decision.reason == "impasse":
+                if latest.pending_input is None:
+                    active_cycle_history = [
+                        item
+                        for item in latest.strict_review_history
+                        if item.cycle == latest.strict_review_cycle
+                    ]
+                    decision = evaluate_review_continuation(
+                        active_cycle_history,
+                        base_max_rounds=latest.strict_review_max_rounds,
+                        hard_max_rounds=GOAL_STRICT_REVIEW_HARD_MAX_ROUNDS,
+                    )
+                    latest.strict_review_feedback = format_strict_review_feedback(round_record)
+                    if not decision.should_continue:
+                        latest.status = GoalRunStatus.BLOCKED
+                        if decision.reason == "impasse":
+                            latest.status_message = (
+                                f"Strict cross-review stopped early on round {round_number}/"
+                                f"{latest.strict_review_max_rounds} due to a recurring blocker "
+                                f"impasse ({round_record.reviewer_provider}): "
+                                f"{round_record.summary[:200]} — steer the Goal or complete manually"
+                            )
+                        else:
+                            latest.status_message = (
+                                f"Strict cross-review blocked after {round_number}/"
+                                f"{latest.strict_review_max_rounds} rounds: "
+                                f"{round_record.summary[:240]}"
+                            )
+                        return self.store.put(latest)
+
+                    if decision.reason == "converging_grace":
+                        latest.strict_review_max_rounds = decision.effective_max_rounds
                         latest.status_message = (
-                            f"Strict cross-review stopped early on round {round_number}/"
-                            f"{latest.strict_review_max_rounds} due to a recurring blocker "
-                            f"impasse ({round_record.reviewer_provider}): "
-                            f"{round_record.summary[:200]} — steer the Goal or complete manually"
+                            f"Cross-review round {round_number} blockers are converging; "
+                            f"granted grace round {round_number + 1}/"
+                            f"{latest.strict_review_max_rounds} ({round_record.reviewer_provider})…"
                         )
                     else:
                         latest.status_message = (
-                            f"Strict cross-review blocked after {round_number}/"
-                            f"{latest.strict_review_max_rounds} rounds: "
-                            f"{round_record.summary[:240]}"
+                            f"Cross-review round {round_number} requested fixes "
+                            f"({round_record.reviewer_provider}); continuing…"
                         )
-                    return self.store.put(latest)
-
-                if decision.reason == "converging_grace":
-                    latest.strict_review_max_rounds = decision.effective_max_rounds
-                    latest.status_message = (
-                        f"Cross-review round {round_number} blockers are converging; "
-                        f"granted grace round {round_number + 1}/"
-                        f"{latest.strict_review_max_rounds} ({round_record.reviewer_provider})…"
-                    )
-                else:
-                    latest.status_message = (
-                        f"Cross-review round {round_number} requested fixes "
-                        f"({round_record.reviewer_provider}); continuing…"
-                    )
-                if self.dispatch is None:
-                    latest.status = GoalRunStatus.PAUSED
-                    latest.status_message = "automatic continuation is not connected"
-                    return self.store.put(latest)
-                self.store.put(latest)
-                prepared = self._prepare_dispatch_locked(latest.id)
+                    if self.dispatch is None:
+                        latest.status = GoalRunStatus.PAUSED
+                        latest.status_message = "automatic continuation is not connected"
+                        return self.store.put(latest)
+                    self.store.put(latest)
+                    prepared = self._prepare_dispatch_locked(latest.id)
         if prepared is not None and prepared.dispatch_state == GoalDispatchState.PENDING:
             return await self._dispatch_prepared(prepared)
         return self.store.get(goal_id)
@@ -1017,6 +1114,8 @@ class GoalRunController:
         goal.completed_turn_ids = goal.completed_turn_ids[-GOAL_RECENT_TURN_IDS_LIMIT:]
         goal.turns_completed += 1
         goal.pending_input = None
+        goal.pending_review_steer = False
+        goal.pending_review_recovery_digest = ""
         goal.pending_image_count = 0
         goal.pending_image_fingerprint = ""
         goal.current_turn_id = None
@@ -1244,7 +1343,7 @@ class GoalRunController:
         goal = self.store.get(goal_id)
         if goal.execution_owner == "provider_native" or goal.status != GoalRunStatus.ACTIVE:
             return goal
-        if goal.dispatch_state != GoalDispatchState.IDLE:
+        if goal.strict_review_in_progress or goal.dispatch_state != GoalDispatchState.IDLE:
             return goal
         if dispatch is None and self.dispatch is None:
             goal.status = GoalRunStatus.PAUSED
@@ -1290,8 +1389,18 @@ class GoalRunController:
                 return latest
             callback = self.dispatch if dispatch is None else dispatch
             assert callback is not None
-            result = callback(prepared.model_copy(deep=True), build_dispatch_prompt(prepared))
-            next_turn_id = await result if inspect.isawaitable(result) else result
+            # Detach only this dispatch's batch. An earlier send may return
+            # after its worker completed and a later review already queued images.
+            images = self._review_steer_images.pop(prepared.id, None)
+            if images is not None:
+                with goal_image_input(prepared.tab_id, images):
+                    result = callback(
+                        prepared.model_copy(deep=True), build_dispatch_prompt(prepared)
+                    )
+                    next_turn_id = await result if inspect.isawaitable(result) else result
+            else:
+                result = callback(prepared.model_copy(deep=True), build_dispatch_prompt(prepared))
+                next_turn_id = await result if inspect.isawaitable(result) else result
             async with self._lock_for(prepared.id):
                 goal = self.store.get(prepared.id)
                 if (
@@ -1314,6 +1423,8 @@ class GoalRunController:
                     goal.plan_answered = True
                 if goal.pending_input == prepared.pending_input:
                     goal.pending_input = None
+                    goal.pending_review_steer = False
+                    goal.pending_review_recovery_digest = ""
                 if goal.strict_review_feedback == prepared.strict_review_feedback:
                     goal.strict_review_feedback = None
                 if goal.pending_image_fingerprint == prepared.pending_image_fingerprint:

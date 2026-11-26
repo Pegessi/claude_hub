@@ -181,6 +181,7 @@ def _stub_goal(monkeypatch: MonkeyPatch, goal_ref: dict[str, Any] | None = None)
         lambda: SimpleNamespace(
             current=lambda _tab_id: state.get("goal"),
             refresh_current=refresh_current,
+            store=SimpleNamespace(review_steer_receipt=lambda *_: None),
             has_goal_history=lambda _tab_id: state.get("goal") is not None,
         ),
     )

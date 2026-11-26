@@ -451,7 +451,26 @@ async def _scenario(context: BrowserContext, *, appearance: bool) -> dict:
                         ),
                     )
                     return
-                if current_goal:
+                if current_goal and current_goal.get("strict_review_in_progress"):
+                    payload = send_payloads[-1]
+                    current_goal = {
+                        **current_goal,
+                        "review_steer_turn_ids": current_goal.get("review_steer_turn_ids", [])
+                        + [payload["client_turn_id"]],
+                        "pending_review_steer": True,
+                        "pending_input": "\n".join(
+                            text
+                            for text in [
+                                current_goal.get("pending_input"),
+                                payload["text"],
+                            ]
+                            if text
+                        ),
+                        "pending_image_count": current_goal.get("pending_image_count", 0)
+                        + len(payload.get("attachments", [])),
+                        "status_message": "User input queued; waiting for strict cross-model review to finish",
+                    }
+                elif current_goal:
                     # The approval message is dispatched as the Goal's next
                     # turn, which is what ends the plan's approval request.
                     current_goal = {
@@ -943,6 +962,43 @@ async def _scenario(context: BrowserContext, *, appearance: bool) -> dict:
             path.endswith("/resume") or path.endswith("/pause")
             for _, path in report["api_requests"]
         )
+
+        # Review-time input is acknowledged without a provider turn. Multiple
+        # receipts must release optimistic bubbles, while the Goal details show
+        # the retained messages/images rather than a false recovery warning.
+        plan_fixture = False
+        idle_fixture = True
+        current_goal = {
+            **GOAL,
+            "strict_review": True,
+            "strict_review_in_progress": True,
+            "current_turn_id": None,
+            "completed_turn_ids": [DONE_TURN, LIVE_TURN],
+        }
+        await page.reload(wait_until="domcontentloaded")
+        composer = page.locator(".composer-textarea").first
+        await composer.fill("Review question one")
+        await composer.press("Meta+Enter")
+        await expect(composer).to_have_value("")
+        await page.locator('input[type="file"]').set_input_files(
+            {"name": "review.png", "mimeType": "image/png", "buffer": PNG_IMAGE}
+        )
+        await expect(page.locator(".composer-attachments .attachment-thumb")).to_have_count(1)
+        await composer.fill("Review question two")
+        await composer.press("Meta+Enter")
+        await expect(composer).to_have_value("")
+        await page.locator(".goal-status-summary").click()
+        details = page.locator(".goal-status-details-body")
+        await expect(details).to_contain_text("Review question one")
+        await expect(details).to_contain_text("Review question two")
+        await expect(details).to_contain_text("(1 images)")
+        await expect(details).not_to_contain_text("Image delivery was interrupted")
+        assert len(current_goal["review_steer_turn_ids"]) == 2
+        assert current_goal["strict_review_in_progress"]
+        await page.screenshot(path=str(output / "goal-review-queued-input.png"), full_page=True)
+        report["screenshots"].append("goal-review-queued-input.png")
+        await page.locator(".goal-status-summary").click()
+        report["review_queue"] = "PASS"
 
         assert not report["unknown_requests"], report["unknown_requests"]
         assert not report["page_errors"], report["page_errors"]

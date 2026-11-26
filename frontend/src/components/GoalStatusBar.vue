@@ -103,10 +103,17 @@
             {{ goal.status_message }}
           </p>
           <p
-            v-if="goal.pending_image_count"
+            v-if="goal.pending_image_count && goal.status === 'paused'"
             class="goal-status-message"
           >
             Image delivery was interrupted. Review Chat, reattach images in the composer, then select Recover Goal.
+          </p>
+          <p
+            v-if="goal.pending_review_steer && goal.pending_input != null"
+            class="goal-status-message"
+          >
+            Queued input: {{ goal.pending_input || 'Image attachment' }}
+            <span v-if="goal.pending_image_count">({{ goal.pending_image_count }} images)</span>
           </p>
           <div
             v-if="goal.checkpoint"

@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, model_validator
 
 from claude_hub.api.routes.agent_stream.bindings import AgentStreamRouteBindings
@@ -348,6 +349,13 @@ async def dispatch_tab_stream_input(
             ttyd_manager.detach_subagent_tab(tab_id)
         goal_manager = get_goal_manager()
         goal = await goal_manager.refresh_current(tab_id)
+        # Queue receipts belong to their original Goal, including after Clear
+        # or replacement. A retry must never become fresh input to another owner.
+        receipt_owner = goal_manager.store.review_steer_receipt(
+            tab_id, f"steer:{payload.client_turn_id}"
+        )
+        if receipt_owner is not None:
+            goal = receipt_owner
         session = bindings.terminal_tab_session_or_404(tab_id)
         manager = bindings.get_tab_tailer_manager()
         from ....services.agent_stream.question_answers import answers
@@ -368,17 +376,24 @@ async def dispatch_tab_stream_input(
                 )
             ):
                 return str(goal.current_turn_id)
-            steer = False
+            review_receipt = goal.idempotency.get(f"steer:{payload.client_turn_id}", "").startswith(
+                "review-steer:"
+            )
+            steer = review_receipt
             if active:
-                steer = payload.delivery == "steer" or bool(
-                    not payload.attachments
-                    and goal.current_turn_id
-                    and payload.question_call_id is not None
-                    and await manager.accepts_question_followup(
-                        session,
-                        payload.text,
-                        goal.current_turn_id,
-                        expected_call_id=payload.question_call_id,
+                steer = (
+                    review_receipt
+                    or payload.delivery == "steer"
+                    or bool(
+                        not payload.attachments
+                        and goal.current_turn_id
+                        and payload.question_call_id is not None
+                        and await manager.accepts_question_followup(
+                            session,
+                            payload.text,
+                            goal.current_turn_id,
+                            expected_call_id=payload.question_call_id,
+                        )
                     )
                 )
             elif goal.status.value == "blocked" or (
@@ -432,11 +447,19 @@ async def dispatch_tab_stream_input(
                         detail=str(exc),
                         headers={CHAT_ERROR_REASON_HEADER: "chat_busy"},
                     ) from exc
+                except ValueError as exc:
+                    raise HTTPException(status_code=422, detail=str(exc)) from exc
                 if goal.execution_owner == "provider_native":
                     return payload.client_turn_id
-                delivered = payload.client_turn_id in goal.completed_turn_ids or (
-                    goal.current_turn_id == payload.client_turn_id
-                    and goal.dispatch_state.value == "dispatched"
+                delivered = (
+                    goal.idempotency.get(f"steer:{payload.client_turn_id}", "").startswith(
+                        "review-steer:"
+                    )
+                    or payload.client_turn_id in goal.completed_turn_ids
+                    or (
+                        goal.current_turn_id == payload.client_turn_id
+                        and goal.dispatch_state.value == "dispatched"
+                    )
                 )
                 if not delivered:
                     raise HTTPException(
@@ -722,12 +745,12 @@ def register_dispatch_routes(
             raise map_send_exception(exc)
         return {"ok": True}
 
-    @router.post("/tabs/{tab_id}/stream/send")
+    @router.post("/tabs/{tab_id}/stream/send", response_model=None)
     async def send_tab_stream_input(
         tab_id: str,
         payload: AgentStreamSendRequest,
         current_user: User = Depends(get_current_user),
-    ) -> Dict[str, Any]:
+    ) -> Dict[str, Any] | JSONResponse:
         if payload.question_turn_id is not None:
             from ....services.agent_stream.question_answers import answers
 
@@ -744,6 +767,16 @@ def register_dispatch_routes(
             raise
         except Exception as exc:
             raise map_send_exception(exc)
+        from claude_hub.services.goal_run import get_goal_manager
+
+        receipt = get_goal_manager().store.review_steer_receipt(
+            tab_id, f"steer:{payload.client_turn_id}"
+        )
+        if receipt is not None:
+            return JSONResponse(
+                {"ok": True, "goal_review_steer_accepted": payload.client_turn_id},
+                headers={"X-Claude-Hub-Goal-Review-Steer-Accepted": "true"},
+            )
         return {"ok": True}
 
     return AgentStreamDispatchEndpoints(

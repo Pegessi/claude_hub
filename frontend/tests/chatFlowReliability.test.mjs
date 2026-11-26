@@ -3,7 +3,7 @@ import { Buffer } from 'node:buffer'
 import { getEventListeners } from 'node:events'
 import { readFile } from 'node:fs/promises'
 import test from 'node:test'
-import { computed, createRenderer, nextTick, reactive, ref, watch } from 'vue'
+import { computed, createRenderer, effectScope, nextTick, reactive, ref, watch } from 'vue'
 import ts from 'typescript'
 
 const transpileOptions = {
@@ -792,3 +792,81 @@ for (const [label, goalSnapshot, reuse] of [
     assert.deepEqual(sent.map(item => item.text), ['hello', 'hello'])
   })
 }
+
+test('review queue receipts reconcile multiple optimistic steers without worker turns', async t => {
+  const makeEntries = await loadComposerEntries()
+  const deps = composerDeps({ draftMessage: '' })
+  deps.goal.value = { id: 'review-goal', status: 'active', strict_review_in_progress: true }
+  const entries = makeEntries(deps)
+  const scope = effectScope()
+  scope.run(() => entries.registerPendingWatcher())
+  t.after(() => scope.stop())
+  deps.pendingDirectTurns.value = [
+    { key: 'pending-one', turnId: 'one', userText: 'First question', attachments: [] },
+    { key: 'pending-two', turnId: 'two', userText: 'Second question', attachments: [] },
+  ]
+  assert.equal(entries.turnInFlight.value, true)
+  deps.goal.value = { ...deps.goal.value, review_steer_turn_ids: ['one', 'two'] }
+  await nextTick()
+  assert.equal(deps.pendingDirectTurns.value.length, 0)
+  assert.equal(entries.turnInFlight.value, false)
+  assert.equal(entries.composerTurnInFlight.value, false)
+  assert.equal(deps.authoritativeTurns.value.length, 0, 'receipts must not invent provider turns')
+  deps.authoritativeTurns.value = [{ turnId: 'coalesced-worker', completed: true }]
+  await nextTick()
+  assert.equal(entries.pendingTurns.value.length, 0)
+})
+
+test('lost review-steer response reconciles its receipt without losing edited drafts', async t => {
+  const makeEntries = await loadComposerEntries()
+  const deps = composerDeps({ draftMessage: 'Review question' })
+  deps.goal.value = { status: 'active', strict_review_in_progress: true }
+  const sent = []
+  t.mock.method(globalThis, 'fetch', async (_url, options) => {
+    sent.push(JSON.parse(options.body))
+    throw new Error('queue acknowledgement lost')
+  })
+  const entries = makeEntries(deps)
+  deps.hydrateGoal = async () => {}
+  await entries.submit('steer')
+  const id = deps.retrySendAttempt.value.clientTurnId
+  deps.goal.value = { status: 'complete', review_steer_turn_ids: [id] }
+  entries.reconcileGoalRecovery()
+  assert.equal(deps.retrySendAttempt.value, null)
+  assert.equal(deps.draftMessage.value, '')
+  assert.equal(deps.composerError.value, null)
+  assert.equal(await entries.submit('normal'), false)
+  assert.equal(sent.length, 1)
+
+  deps.retrySendAttempt.value = { clientTurnId: id, goalRecovery: false, message: 'Review question', attachments: [], questionIdentity: null }
+  deps.draftMessage.value = 'An edited unsent draft'
+  entries.reconcileGoalRecovery()
+  assert.equal(deps.draftMessage.value, 'An edited unsent draft')
+  assert.equal(deps.retrySendAttempt.value, null)
+})
+
+test('unresolved Goal steer retries keep identity after Goal completion or clear', async t => {
+  const deps = composerDeps({ draftMessage: 'Review question' })
+  deps.goal.value = { status: 'active', strict_review_in_progress: true }
+  const sent = []
+  t.mock.method(globalThis, 'fetch', async (_url, options) => {
+    sent.push(JSON.parse(options.body))
+    if (sent.length === 1) throw new Error('queue acknowledgement lost')
+    return {
+      ok: true,
+      headers: new Headers({ 'X-Claude-Hub-Goal-Review-Steer-Accepted': 'true' }),
+      json: async () => { throw new Error('body connection lost after receipt headers') },
+    }
+  })
+  const entries = (await loadComposerEntries())(deps)
+  const scope = effectScope()
+  scope.run(() => entries.registerPendingWatcher())
+  t.after(() => scope.stop())
+  await entries.submit('steer')
+  deps.goal.value = null
+  assert.equal(await entries.submit('normal'), true)
+  assert.equal(sent[0].client_turn_id, sent[1].client_turn_id)
+  await nextTick()
+  assert.equal(deps.pendingDirectTurns.value.length, 0)
+  assert.equal(entries.turnInFlight.value, false)
+})

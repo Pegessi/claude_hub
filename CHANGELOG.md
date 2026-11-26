@@ -7,6 +7,15 @@
 
 ## Released
 
+### fix(goals): queue steering while strict cross-review finishes
+
+- Preserve an active strict reviewer when users steer; retain ordered messages
+  and bounded image attachments, then deliver the completed review outcome and
+  user input together to the main agent, including after PASS or reviewer error.
+- Keep explicit stop/pause/cancel/manual-complete cancellation semantics.
+  Acknowledge queued input without fake worker turns or stuck optimistic messages,
+  and distinguish healthy queued images from recovery-required attachments.
+
 ### fix(goals): preserve recoverable turn failures for explicit resume
 
 - Keep transport delivery uncertainty and retryable failure metadata across the

@@ -908,6 +908,7 @@ async def test_scheduled_inbox_defers_while_feishu_batch_active_and_wakes_on_pro
         lambda: SimpleNamespace(
             current=lambda tid: None,
             refresh_current=AsyncMock(return_value=None),
+            store=SimpleNamespace(review_steer_receipt=lambda *_: None),
         ),
     )
 

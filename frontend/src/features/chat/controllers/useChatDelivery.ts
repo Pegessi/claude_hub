@@ -210,8 +210,10 @@ export function useChatDelivery(deps: Dependencies) {
 
   function reconcileGoalRecovery() {
     const attempt = retrySendAttempt.value
-    if (!attempt?.goalRecovery) return
-    const delivered = deps.authoritativeTurns.value.some(turn => turn.turnId === attempt.clientTurnId)
+    if (!attempt) return
+    const queued = deps.goal.value?.review_steer_turn_ids?.includes(attempt.clientTurnId)
+    if (!attempt.goalRecovery && !queued) return
+    const delivered = queued || deps.authoritativeTurns.value.some(turn => turn.turnId === attempt.clientTurnId)
       || deps.goal.value?.completed_turn_ids?.includes(attempt.clientTurnId)
       || (deps.goal.value?.current_turn_id === attempt.clientTurnId && deps.goal.value?.dispatch_state === 'dispatched')
     if (!delivered) return
@@ -334,6 +336,9 @@ export function useChatDelivery(deps: Dependencies) {
       }
       throw new Error(detail)
     }
+    // The receipt is in the response headers: a truncated/hanging body must
+    // not strand a historical retry that intentionally emits no provider turn.
+    return res.headers?.get('X-Claude-Hub-Goal-Review-Steer-Accepted') === 'true'
   }
 
   async function submit(
@@ -395,7 +400,7 @@ export function useChatDelivery(deps: Dependencies) {
     // Native provider turns do not deduplicate IDs. Only controller-backed
     // delivery may retain a failed attempt; an ordinary resend is a new intent.
     const goalControlledInput = !messageOverride && (recoveringGoal || deps.goal.value?.status === 'active' || deps.goal.value?.status === 'blocked')
-    const retainRetryId = deps.isManagedChat.value || goalControlledInput
+    const retainRetryId = deps.isManagedChat.value || goalControlledInput || retrySendAttempt.value !== null
     const reusableId = retainRetryId ? reusableSendId(message, draftAtts, questionIdentity) : null
     const retainedClientTurnId = recoveringGoal && !retrySendAttempt.value?.goalRecovery ? null : (queuedDraft?.clientTurnId ?? queuedDraft?.id) ?? reusableId
     const clientTurnId = retainedClientTurnId ?? (typeof crypto.randomUUID === 'function'
@@ -428,7 +433,7 @@ export function useChatDelivery(deps: Dependencies) {
         ]
       }
       deps.requestLatestAnchor(true)
-      await sendToStream(
+      const queueAccepted = await sendToStream(
         message,
         atts,
         clientTurnId,
@@ -436,6 +441,9 @@ export function useChatDelivery(deps: Dependencies) {
         source === 'queue' ? 15_000 : null,
         questionIdentity,
       )
+      if (queueAccepted) {
+        pendingDirectTurns.value = pendingDirectTurns.value.filter(turn => turn.turnId !== clientTurnId)
+      }
       retrySendAttempt.value = null
       if (!deps.isManagedChat.value && (messageOverride || (deps.goal.value && delivery === 'steer'))) await deps.hydrateGoal()
       // Deliberate user input may resume a queue moved into the composer, but
@@ -469,6 +477,7 @@ export function useChatDelivery(deps: Dependencies) {
       composerError.value = err instanceof Error ? err.message : 'Failed to send message.'
       if (!deps.isManagedChat.value && deps.goal.value) {
         await deps.hydrateGoal()
+        reconcileGoalRecovery()
         // Only a successful authoritative refresh permits a new explicit
         // recovery intent. A failed GET keeps the same attempt and blocks send.
         if (recoveringGoal && !deps.goalError.value && deps.goalImageRecovery.value) retrySendAttempt.value = null
@@ -485,9 +494,14 @@ export function useChatDelivery(deps: Dependencies) {
     // arrive. No text-reveal state is kept: assistant text is rendered directly
     // from the batched event stream.
     watch(
-      deps.authoritativeTurns,
-      (latest) => {
-        const observed = new Set(latest.map(turn => turn.turnId).filter(Boolean))
+      [deps.authoritativeTurns, deps.goal],
+      ([latest, goal]) => {
+        // Queue acceptance is not a provider turn. The Goal card owns pending
+        // input until one coalesced continuation echoes it into the timeline.
+        const observed = new Set([
+          ...latest.map(turn => turn.turnId).filter(Boolean),
+          ...(goal?.review_steer_turn_ids ?? []),
+        ])
         pendingDirectTurns.value = pendingDirectTurns.value.filter(turn => !observed.has(turn.turnId))
       },
       { immediate: true },

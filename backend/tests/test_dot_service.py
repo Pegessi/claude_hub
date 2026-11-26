@@ -1120,6 +1120,7 @@ def _install_tab_dispatch(monkeypatch: MonkeyPatch, manager: Any, calls: list[An
         lambda: SimpleNamespace(
             current=lambda tab_id: None,
             refresh_current=AsyncMock(return_value=None),
+            store=SimpleNamespace(review_steer_receipt=lambda *_: None),
             has_goal_history=lambda tab_id: False,
         ),
     )

@@ -126,6 +126,7 @@ async def test_dot_yield_keeps_facade_patch_lookup_inside_the_admission_guard(
     goal_manager = MagicMock()
     goal_manager.current.return_value = None
     goal_manager.refresh_current = AsyncMock(return_value=None)
+    goal_manager.store.review_steer_receipt.return_value = None
     goal_manager.has_goal_history.return_value = False
     monkeypatch.setattr(goal_run, "get_goal_manager", lambda: goal_manager)
     monkeypatch.setattr(stream_api, "_terminal_tab_session_or_404", lambda _tab: session)

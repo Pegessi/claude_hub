@@ -309,6 +309,7 @@ def install_stream(monkeypatch, on_send, *, subscribe_release=None, goal_lock=No
         lambda: SimpleNamespace(
             current=lambda tab_id: None,
             refresh_current=AsyncMock(return_value=None),
+            store=SimpleNamespace(review_steer_receipt=lambda *_: None),
         ),
     )
     return SimpleNamespace(

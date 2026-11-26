@@ -105,6 +105,16 @@ class GoalRunStore:
                 return None
             return current.model_copy(deep=True)
 
+    def review_steer_receipt(self, tab_id: str, request_id: str) -> GoalRun | None:
+        """Find the original queue owner even after clearing/replacing its Goal."""
+        with self._lock:
+            for goal in self._goals.values():
+                if goal.tab_id == tab_id and goal.idempotency.get(request_id, "").startswith(
+                    "review-steer:"
+                ):
+                    return goal.model_copy(deep=True)
+        return None
+
     def replay_create(self, tab_id: str, request: GoalRunCreate) -> GoalRun | None:
         """Return an exact create replay, rejecting request-id reuse with new input."""
         with self._lock:
