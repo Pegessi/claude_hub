@@ -92,57 +92,47 @@ def test_tool_guide_is_compact_and_preserves_workspace_lessons_and_safety_rules(
         assert bogus not in TOOL_GUIDE, bogus
 
 
-def test_format_task_brief_recipe_acceptance_checklists() -> None:
-    eval_brief = format_task_brief(
-        goal="Benchmark serving throughput",
-        context="Compare candidate vs baseline",
-        done_when="1. Report written",
-        output="reports/bench.md",
-        out_of_scope="Code edits",
-        constraints="Read-only",
-        recipe="eval_and_report",
-    )
-    assert "## Recipe acceptance checklist" in eval_brief
-    assert "sweep axis, load, and batch coverage across the intended operating range" in eval_brief
-    assert "not bunched at one point" in eval_brief
-    assert (
-        "Normalize per-replica or unit-resource throughput against an apples-to-apples "
-        "baseline distribution"
-    ) in eval_brief
-    assert (
-        "Update all affected tables, charts, and conclusions coherently throughout the "
-        "report body rather than appending an unintegrated tail section"
-    ) in eval_brief
-
-    triage_brief = format_task_brief(
-        goal="Diagnose timeout regression",
-        context="Inspect logs and runtime flags",
-        done_when="1. Root cause identified",
-        output="Reply in report",
-        out_of_scope="Code changes",
-        constraints="Read-only",
-        recipe="triage_diagnose",
-    )
-    assert "Post your plan (Goal Packet) before substantial work" not in triage_brief
-    assert "Perform read-only investigation directly within scope" in triage_brief
-    assert "## Recipe acceptance checklist" in triage_brief
-    assert (
-        "Trace back to the primary root-cause error log and config/parameter derivation "
-        "chain (verifying actual effective runtime values vs defaults), rather than "
-        "repeating secondary or cascading symptoms"
-    ) in triage_brief
-    assert "State concrete verification commands and evidence" in triage_brief
-
-    std_brief = format_task_brief(
+@pytest.mark.parametrize(
+    "recipe",
+    [None, "standard", "spec_implement_review", "triage_diagnose", "eval_and_report"],
+)
+def test_format_task_brief_recipes_only_adjust_the_goal_packet_line(recipe: str | None) -> None:
+    brief = format_task_brief(
         goal="G",
         context="C",
         done_when="1. D",
         output="O",
         out_of_scope="N",
         constraints="K",
-        recipe="standard",
+        recipe=recipe,
     )
-    assert "## Recipe acceptance checklist" not in std_brief
+    # Recipes never append acceptance ceremony; the caller's done-when list is the contract.
+    assert "acceptance checklist" not in brief.lower()
+    assert brief.rstrip().endswith("Keep the report concise.")
+    if recipe == "triage_diagnose":
+        assert "Post your plan (Goal Packet) before substantial work" not in brief
+        assert "Perform read-only investigation directly within scope" in brief
+    elif recipe == "spec_implement_review":
+        assert "Post your plan (Goal Packet) before substantial work" not in brief
+        assert "Execute end-to-end in your isolated feature worktree" in brief
+        assert "separate Goal Packet approval round" in brief
+    else:
+        assert "Post your plan (Goal Packet) before substantial work" in brief
+
+
+def test_format_task_brief_ignores_unknown_recipe() -> None:
+    brief = format_task_brief(
+        goal="G",
+        context="C",
+        done_when="1. D",
+        output="O",
+        out_of_scope="N",
+        constraints="K",
+        recipe="not_a_recipe",
+    )
+    assert brief == BRIEF_TEMPLATE.format(
+        goal="G", context="C", done_when="1. D", output="O", out_of_scope="N", constraints="K"
+    )
 
 
 @pytest.mark.parametrize("role", [b"Custom role: ask before changing memory.\n", b"", b"\xff\xfe"])

@@ -7,6 +7,14 @@
 
 ## Released
 
+### fix(dot): leave recipe briefs free of hardcoded acceptance checklists
+
+- Retire the `## Recipe acceptance checklist` section and its `acceptance_checks`
+  data from `format_task_brief`, superseding the built-in checklists added with the
+  session-pack fix; a recipe now only swaps the Goal Packet plan line, so delegated
+  agents keep their own acceptance judgment and the caller's done-when list stays
+  the contract.
+
 ### feat(feishu): guide realtime investigation in two beats
 
 - Send a situational heads-up before read-only investigation, then deliver a grounded follow-up; direct questions can receive a single answer.

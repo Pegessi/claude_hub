@@ -81,41 +81,18 @@ _BRIEF_GOAL_PACKET_LINE = (
     "  redirect you through a follow-up message."
 )
 
-_RECIPES: dict[str, dict[str, str | tuple[str, ...] | None]] = {
-    "standard": {
-        "goal_packet_line": None,
-        "acceptance_checks": (),
-    },
-    "spec_implement_review": {
-        "goal_packet_line": (
-            "- Execute end-to-end in your isolated feature worktree without pausing for a\n"
-            "  separate Goal Packet approval round; commit verified changes and request review."
-        ),
-        "acceptance_checks": (),
-    },
-    "triage_diagnose": {
-        "goal_packet_line": (
-            "- Perform read-only investigation directly within scope without a separate\n"
-            "  Goal Packet round; never edit repository files or push branches."
-        ),
-        "acceptance_checks": (
-            "Trace back to the primary root-cause error log and config/parameter derivation "
-            "chain (verifying actual effective runtime values vs defaults), rather than "
-            "repeating secondary or cascading symptoms.",
-            "State concrete verification commands and evidence supporting the diagnosis.",
-        ),
-    },
-    "eval_and_report": {
-        "goal_packet_line": None,
-        "acceptance_checks": (
-            "Verify sweep axis, load, and batch coverage across the intended operating range "
-            "(not bunched at one point).",
-            "Normalize per-replica or unit-resource throughput against an apples-to-apples "
-            "baseline distribution.",
-            "Update all affected tables, charts, and conclusions coherently throughout the "
-            "report body rather than appending an unintegrated tail section.",
-        ),
-    },
+# Recipes that replace the default "post your plan" line. Everything else in the
+# brief stays the caller's text: a recipe never prescribes acceptance checklists
+# or other ceremony, so delegated agents keep their own judgment.
+_RECIPE_GOAL_PACKET_LINES: dict[str, str] = {
+    "spec_implement_review": (
+        "- Execute end-to-end in your isolated feature worktree without pausing for a\n"
+        "  separate Goal Packet approval round; commit verified changes and request review."
+    ),
+    "triage_diagnose": (
+        "- Perform read-only investigation directly within scope without a separate\n"
+        "  Goal Packet round; never edit repository files or push branches."
+    ),
 }
 
 BRIEF_TEMPLATE = """\
@@ -164,7 +141,7 @@ def format_task_brief(
     constraints: str,
     recipe: str | None = None,
 ) -> str:
-    """Format Dot's delegated task brief with recipe-aligned execution guidance."""
+    """Format Dot's delegated task brief, letting the recipe only set the plan line."""
     rendered = BRIEF_TEMPLATE.format(
         goal=goal,
         context=context,
@@ -173,16 +150,9 @@ def format_task_brief(
         out_of_scope=out_of_scope,
         constraints=constraints,
     )
-    spec = _RECIPES.get(recipe or "")
-    if not spec:
-        return rendered
-    goal_packet_line = spec.get("goal_packet_line")
-    if isinstance(goal_packet_line, str) and goal_packet_line:
+    goal_packet_line = _RECIPE_GOAL_PACKET_LINES.get(recipe or "")
+    if goal_packet_line:
         rendered = rendered.replace(_BRIEF_GOAL_PACKET_LINE, goal_packet_line, 1)
-    checks = spec.get("acceptance_checks")
-    if isinstance(checks, tuple) and checks:
-        checklist = "## Recipe acceptance checklist\n" + "\n".join(f"- {item}" for item in checks)
-        rendered = f"{rendered.rstrip()}\n\n{checklist}\n"
     return rendered
 
 
