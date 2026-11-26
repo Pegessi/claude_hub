@@ -21,6 +21,8 @@ class RealtimePatch(BaseModel):
     model: str | None = Field(default=None, max_length=128)
     reasoning_effort: str | None = Field(default=None, max_length=32)
     workspace_id: str | None = Field(default=None, max_length=128)
+    p2p_debounce_seconds: float | None = Field(default=None, ge=0, le=86400, allow_inf_nan=False)
+    p2p_active_seconds: float | None = Field(default=None, ge=0, le=86400, allow_inf_nan=False)
 
 
 async def realtime_settings_payload() -> dict[str, Any]:

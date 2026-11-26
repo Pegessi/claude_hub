@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from claude_hub.api import feishu_bot as bot_api
 from claude_hub.models import AgentType, SessionKind, StreamModelOption, StreamReasoningEffortOption
 from claude_hub.services import feishu_realtime_agent as agent
 from claude_hub.services import feishu_realtime_delivery as delivery
@@ -132,7 +133,9 @@ async def test_each_kind_silent_or_notifies_without_waking(
 ) -> None:
     monkeypatch.setenv("CLAUDE_HUB_HOME", str(tmp_path / "hub"))
     dot = DotService(DotStore(tmp_path / "dot"))
-    dot.notify = AsyncMock(return_value="sent")  # type: ignore[method-assign]
+    notify = AsyncMock(return_value=(True, "om_notice", "app"))
+    monkeypatch.setattr(bot_api, "push_shared_card_to_tab", notify)
+    monkeypatch.setattr(dot, "tab_id", lambda: "dot-tab")
     dot.wake_for_external_event = AsyncMock()  # type: ignore[method-assign]
     monkeypatch.setattr("claude_hub.services.dot.get_dot_service", lambda: dot)
     diagnose = AsyncMock(
@@ -149,10 +152,10 @@ async def test_each_kind_silent_or_notifies_without_waking(
     diagnose.assert_awaited_once()
     dot.wake_for_external_event.assert_not_awaited()
     if decision == "skip":
-        dot.notify.assert_not_awaited()
+        notify.assert_not_awaited()
         assert not dot.store.list_inbox()
     else:
-        dot.notify.assert_awaited_once()
+        notify.assert_awaited_once()
         inbox = dot.store.list_inbox()
         assert len(inbox) == 1 and not triggers_wake(inbox[0])
         pack = build_turn_pack(
@@ -205,7 +208,9 @@ async def test_failed_notify_can_retry_without_waking(
 ) -> None:
     monkeypatch.setenv("CLAUDE_HUB_HOME", str(tmp_path / "hub"))
     dot = DotService(DotStore(tmp_path / "dot"))
-    dot.notify = AsyncMock(side_effect=["failed", "sent"])  # type: ignore[method-assign]
+    notify = AsyncMock(side_effect=[(False, "", ""), (True, "om_notice", "app")])
+    monkeypatch.setattr(bot_api, "push_shared_card_to_tab", notify)
+    monkeypatch.setattr(dot, "tab_id", lambda: "dot-tab")
     dot.wake_for_external_event = AsyncMock()  # type: ignore[method-assign]
     monkeypatch.setattr("claude_hub.services.dot.get_dot_service", lambda: dot)
     monkeypatch.setattr(
@@ -224,7 +229,9 @@ async def test_successful_card_is_not_resent_when_passive_store_retries(
 ) -> None:
     monkeypatch.setenv("CLAUDE_HUB_HOME", str(tmp_path / "hub"))
     dot = DotService(DotStore(tmp_path / "dot"))
-    dot.notify = AsyncMock(return_value="sent")  # type: ignore[method-assign]
+    notify = AsyncMock(return_value=(True, "om_notice", "app"))
+    monkeypatch.setattr(bot_api, "push_shared_card_to_tab", notify)
+    monkeypatch.setattr(dot, "tab_id", lambda: "dot-tab")
     monkeypatch.setattr("claude_hub.services.dot.get_dot_service", lambda: dot)
     diagnose = AsyncMock(return_value=agent.RealtimeDecision(decision="notify", summary="Answer"))
     monkeypatch.setattr(delivery, "diagnose_realtime_event", diagnose)
@@ -241,7 +248,7 @@ async def test_successful_card_is_not_resent_when_passive_store_retries(
         event(), FeishuRealtimeEventConfig(), still_unanswered=lambda: False
     )
     diagnose.assert_awaited_once()
-    dot.notify.assert_awaited_once()
+    notify.assert_awaited_once()
     assert len(dot.store.list_inbox()) == 1
 
 
@@ -251,7 +258,9 @@ async def test_answer_arriving_during_diagnosis_suppresses_card(
 ) -> None:
     monkeypatch.setenv("CLAUDE_HUB_HOME", str(tmp_path / "hub"))
     dot = DotService(DotStore(tmp_path / "dot"))
-    dot.notify = AsyncMock(return_value="sent")  # type: ignore[method-assign]
+    notify = AsyncMock(return_value=(True, "om_notice", "app"))
+    monkeypatch.setattr(bot_api, "push_shared_card_to_tab", notify)
+    monkeypatch.setattr(dot, "tab_id", lambda: "dot-tab")
     monkeypatch.setattr("claude_hub.services.dot.get_dot_service", lambda: dot)
     monkeypatch.setattr(
         delivery,
@@ -261,7 +270,7 @@ async def test_answer_arriving_during_diagnosis_suppresses_card(
     assert await delivery.deliver_realtime_triage(
         event(), FeishuRealtimeEventConfig(), still_unanswered=lambda: False
     )
-    dot.notify.assert_not_awaited()
+    notify.assert_not_awaited()
     assert not dot.store.list_inbox()
 
 
@@ -304,14 +313,29 @@ async def test_settings_api_validates_and_persists(
     ) as client:
         response = await client.patch(
             "/realtime-events",
-            json={"provider": "claude", "reasoning_effort": "", "model": "", "workspace_id": ""},
+            json={
+                "provider": "claude",
+                "reasoning_effort": "",
+                "model": "",
+                "workspace_id": "",
+                "p2p_debounce_seconds": 45,
+                "p2p_active_seconds": 300,
+            },
         )
         assert response.status_code == 200
         assert response.json()["config"]["reasoning_effort"] == ""
         saved = json.loads((tmp_path / "feishu_realtime_events.json").read_text())
         assert saved["provider"] == "claude"
+        assert saved["p2p_debounce_seconds"] == 45 and saved["p2p_active_seconds"] == 300
         before = (tmp_path / "feishu_realtime_events.json").read_text()
-        for bad in ({"provider": "invalid"}, {"reasoning_effort": None}, {"unknown": True}):
+        for bad in (
+            {"provider": "invalid"},
+            {"reasoning_effort": None},
+            {"unknown": True},
+            {"p2p_debounce_seconds": -1},
+            {"p2p_active_seconds": "NaN"},
+            {"p2p_active_seconds": 86401},
+        ):
             assert (await client.patch("/realtime-events", json=bad)).status_code == 422
         assert (tmp_path / "feishu_realtime_events.json").read_text() == before
 
@@ -372,22 +396,24 @@ async def test_two_beat_same_session_and_retry_reservation(
 ) -> None:
     monkeypatch.setenv("CLAUDE_HUB_HOME", str(tmp_path / "hub"))
     dot = DotService(DotStore(tmp_path / "dot"))
-    dot.notify = AsyncMock(return_value="sent")  # type: ignore[method-assign]
+    notify = AsyncMock(return_value=(True, "om_notice", "app"))
+    monkeypatch.setattr(bot_api, "push_shared_card_to_tab", notify)
+    monkeypatch.setattr(dot, "tab_id", lambda: "dot-tab")
     monkeypatch.setattr("claude_hub.services.dot.get_dot_service", lambda: dot)
     manager = FakeWorkspaceManager()
     monkeypatch.setattr(lifecycle, "workspace_manager", manager)
     turn = AsyncMock(
         side_effect=[
             '{"decision":"investigate","summary":"Looking into it","reply_draft":""}',
-            RuntimeError("interrupted"),
+            asyncio.CancelledError(),
             '{"decision":"notify","summary":"Found the cause","reply_draft":"Try this"}',
         ]
     )
     monkeypatch.setattr(lifecycle, "_run_workspace_triage_turn", turn)
-    with pytest.raises(RuntimeError, match="interrupted"):
+    with pytest.raises(asyncio.CancelledError):
         await delivery.deliver_realtime_triage(event(), FeishuRealtimeEventConfig())
     assert await delivery.deliver_realtime_triage(event(), FeishuRealtimeEventConfig())
-    assert dot.notify.await_count == 2
+    assert notify.await_count == 2
     assert turn.call_args_list[0].args[0] is turn.call_args_list[1].args[0]
     assert "heads-up was already sent" in turn.call_args_list[2].args[1]
     assert "screenshots" in turn.call_args_list[1].args[1]
@@ -395,12 +421,14 @@ async def test_two_beat_same_session_and_retry_reservation(
 
 
 @pytest.mark.asyncio
-async def test_owner_reply_suppresses_second_beat(
+async def test_owner_reply_does_not_suppress_second_beat(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, live_catalog: None
 ) -> None:
     monkeypatch.setenv("CLAUDE_HUB_HOME", str(tmp_path / "hub"))
     dot = DotService(DotStore(tmp_path / "dot"))
-    dot.notify = AsyncMock(return_value="sent")  # type: ignore[method-assign]
+    notify = AsyncMock(return_value=(True, "om_notice", "app"))
+    monkeypatch.setattr(bot_api, "push_shared_card_to_tab", notify)
+    monkeypatch.setattr(dot, "tab_id", lambda: "dot-tab")
     monkeypatch.setattr("claude_hub.services.dot.get_dot_service", lambda: dot)
     manager = FakeWorkspaceManager()
     monkeypatch.setattr(lifecycle, "workspace_manager", manager)
@@ -412,17 +440,17 @@ async def test_owner_reply_suppresses_second_beat(
             return '{"decision":"investigate","summary":"Investigating"}'
         return '{"decision":"notify","summary":"Found it"}'
 
-    async def notify(*args: object, **kwargs: object) -> str:
+    async def send(*args: object, **kwargs: object) -> tuple[bool, str, str]:
         nonlocal unanswered
         unanswered = False
-        return "sent"
+        return True, "om_notice", "app"
 
-    dot.notify.side_effect = notify
+    notify.side_effect = send
     monkeypatch.setattr(lifecycle, "_run_workspace_triage_turn", turn)
     assert await delivery.deliver_realtime_triage(
         event(), FeishuRealtimeEventConfig(), still_unanswered=lambda: unanswered
     )
-    dot.notify.assert_awaited_once()
+    assert notify.await_count == 2
     assert all(session.archived for session in manager.sessions.values())
 
 

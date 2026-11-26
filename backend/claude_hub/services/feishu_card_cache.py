@@ -21,24 +21,25 @@ def remember_card(app_id: str, message_id: str, content: Mapping[str, Any]) -> N
     heading = title.get("content") if isinstance(title, Mapping) else None
     body = content.get("body")
     elements = body.get("elements") if isinstance(body, Mapping) else None
-    if (
-        not isinstance(heading, str)
-        or not isinstance(elements, list)
-        or any(
-            not isinstance(element, Mapping)
-            or element.get("tag") != "markdown"
-            or not isinstance(element.get("content"), str)
-            for element in elements
-        )
-    ):
+    if not isinstance(heading, str) or not isinstance(elements, list):
         forget_card(app_id, message_id)
         return
     parts = [heading]
     for element in elements:
-        if isinstance(element, Mapping) and element.get("tag") == "markdown":
+        if not isinstance(element, Mapping):
+            forget_card(app_id, message_id)
+            return
+        if element.get("tag") == "markdown":
             text = element.get("content")
-            if isinstance(text, str):
-                parts.append(text)
+        elif element.get("tag") == "div" and isinstance(element.get("text"), Mapping):
+            plain = element["text"]
+            text = plain.get("content") if plain.get("tag") == "plain_text" else None
+        else:
+            text = None
+        if not isinstance(text, str):
+            forget_card(app_id, message_id)
+            return
+        parts.append(text)
     remember_text(app_id, message_id, "\n\n".join(parts))
 
 

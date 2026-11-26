@@ -33,6 +33,7 @@ from claude_hub.services.feishu_realtime_events import (
     FeishuRealtimeEventRouter,
     get_feishu_realtime_event_router,
 )
+from claude_hub.services.feishu_realtime_queue import RealtimeQueued, next_realtime_batch
 from claude_hub.services.feishu_realtime_settings import realtime_env_override
 from claude_hub.services.feishu_user_client import (
     FeishuMessageSearchPage,
@@ -41,6 +42,7 @@ from claude_hub.services.feishu_user_client import (
 )
 from claude_hub.services.feishu_web_journal import WebPushJournal
 from claude_hub.services.feishu_web_replay import WebPositionReplay
+from claude_hub.services.feishu_web_session.rich import CHAT_P2P
 
 logger = logging.getLogger(__name__)
 
@@ -151,20 +153,9 @@ class FeishuAiPoller:
         self._web_journal = WebPushJournal(self._web_replay.path.with_suffix(".sqlite3"))
         self._last_frontier_connected_at: float | None = None
         self._last_frontier_error: str | None = None
-        self._realtime_event_queue: OrderedDict[
-            str,
-            tuple[
-                Any,
-                FeishuUserMessage,
-                Any,
-                Any,
-                set[str],
-                bool,
-                WebPushJournal,
-                int | None,
-                WebPositionReplay,
-            ],
-        ] = OrderedDict()
+        self._realtime_event_queue: OrderedDict[str, RealtimeQueued] = OrderedDict()
+        self._realtime_queue_changed = asyncio.Event()
+        self._realtime_active_ids: set[str] = set()
         self._realtime_queue_worker: asyncio.Task[None] | None = None
         self._cached_user_client: Any = None
         self._cached_client_key: tuple[str, str, str] | None = None
@@ -277,10 +268,10 @@ class FeishuAiPoller:
             deferred_ids: set[str] = set()
             last_seq = 0
 
-            async def deliver(pushed: Any) -> None:
+            async def deliver(pushed: Any) -> bool | None:
                 message_id = pushed.message.id
                 if message_id in deferred_ids:
-                    return
+                    return False
                 with _session_guard(wt, generation_at_start):
                     pass
                 cfg = await self._service.aget_config(auto_import_lark_cli=False)
@@ -290,9 +281,19 @@ class FeishuAiPoller:
                 if client._get_web_transport() is not wt:
                     raise RuntimeError("Feishu Web replay identity or session changed")
                 generation = self._realtime_router.fallback_generation
-                await self.handle_pushed_web_message(
-                    pushed, expected_session=(wt, generation_at_start)
+                await asyncio.to_thread(
+                    _journal_add_guarded, journal, pushed, wt, generation_at_start
                 )
+                delegated: set[str] = set()
+                await self.handle_pushed_web_message(
+                    pushed,
+                    expected_session=(wt, generation_at_start),
+                    background_realtime=True,
+                    delegated_ids=delegated,
+                )
+                if message_id in delegated:
+                    deferred_ids.add(message_id)
+                    return False
                 fallback = self._realtime_router.fallback_kind_since(message_id, generation)
                 if fallback == "sender_verification_pending":
                     # Catch-up may advance its position after this returns. Keep the
@@ -301,7 +302,7 @@ class FeishuAiPoller:
                         _journal_add_guarded, journal, pushed, wt, generation_at_start
                     )
                     deferred_ids.add(message_id)
-                    return
+                    return False
                 if fallback is not None:
                     raise RuntimeError("Feishu Web replay event delivery failed")
                 await asyncio.to_thread(
@@ -312,6 +313,7 @@ class FeishuAiPoller:
                     wt,
                     generation_at_start,
                 )
+                return True
 
             async def drain_journal() -> None:
                 nonlocal last_seq
@@ -328,6 +330,8 @@ class FeishuAiPoller:
                 # Pushes arriving during the snapshot must be processed before
                 # the baseline can be advertised as healthy.
                 await drain_journal()
+                if self._realtime_queue_worker is not None:
+                    await asyncio.shield(self._realtime_queue_worker)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -416,9 +420,18 @@ class FeishuAiPoller:
         msg_id = (
             user_msg.message_id or getattr(getattr(pushed, "message", None), "id", "") or ""
         ).strip()
-        if not msg_id:
+        if (
+            not msg_id
+            or msg_id in self._realtime_event_queue
+            or msg_id in self._realtime_active_ids
+        ):
             return
-        self._realtime_event_queue[msg_id] = (
+        chat_id = pushed.message.chat_id or user_msg.chat_id
+        meta = getattr(web_transport, "_chat_cache", {}).get(chat_id)
+        is_p2p = pushed.chat_type == CHAT_P2P or (
+            not pushed.chat_type and getattr(meta, "type", None) == CHAT_P2P
+        )
+        self._realtime_event_queue[msg_id] = RealtimeQueued(
             pushed,
             user_msg,
             web_transport,
@@ -428,12 +441,12 @@ class FeishuAiPoller:
             self._web_journal,
             self._active_session_generation,
             self._web_replay,
+            time.monotonic(),
+            chat_id if is_p2p else "",
         )
-        self._realtime_event_queue.move_to_end(msg_id)
+        self._realtime_queue_changed.set()
         while len(self._realtime_event_queue) > 256:
-            dropped_id, (_, dropped_um, _, _, _, _, _, _, _) = self._realtime_event_queue.popitem(
-                last=False
-            )
+            dropped_id, dropped = self._realtime_event_queue.popitem(last=False)
             self._replay_ready = False
             self._schedule_web_replay()
             self._realtime_router._add_fallback_record(
@@ -441,11 +454,11 @@ class FeishuAiPoller:
                 dropped_id,
                 "uncovered_message",
                 "",
-                self._realtime_router._chat_keys(dropped_um.chat_id, web_transport),
-                dropped_um.thread_id or "",
-                dropped_um.sender_open_id,
-                dropped_um.text,
-                dropped_um.create_time_ms,
+                self._realtime_router._chat_keys(dropped.user_msg.chat_id, dropped.transport),
+                dropped.user_msg.thread_id or "",
+                dropped.user_msg.sender_open_id,
+                dropped.user_msg.text,
+                dropped.user_msg.create_time_ms,
             )
         if self._realtime_queue_worker is None or self._realtime_queue_worker.done():
             task = asyncio.create_task(
@@ -458,51 +471,61 @@ class FeishuAiPoller:
 
     async def _drain_realtime_event_queue(self) -> None:
         while self._realtime_event_queue and not self._stopping:
-            _mid, (
-                pushed,
-                user_msg,
-                wt,
-                uc,
-                owner_ids,
-                is_owner,
-                journal,
-                generation_at_start,
-                replay,
-            ) = self._realtime_event_queue.popitem(last=False)
+            batch = await next_realtime_batch(
+                self._realtime_event_queue,
+                self._realtime_queue_changed,
+                self._realtime_router,
+                now=time.monotonic,
+            )
+            if not batch:
+                continue
+            latest = batch[-1]
+            self._realtime_active_ids.update(item.user_msg.message_id for item in batch)
             try:
-                with _session_guard(wt, generation_at_start):
-                    pass
+                for item in batch:
+                    with _session_guard(item.transport, item.generation):
+                        pass
                 generation = self._realtime_router.fallback_generation
                 async with self._realtime_delivery_lock:
                     await self._realtime_router.handle_pushed_message(
-                        pushed,
-                        user_msg,
-                        web_transport=wt,
-                        user_client=uc,
-                        owner_ids=owner_ids,
-                        is_owner_sender=is_owner,
+                        latest.pushed,
+                        latest.user_msg,
+                        web_transport=latest.transport,
+                        user_client=latest.client,
+                        owner_ids=latest.owner_ids,
+                        is_owner_sender=latest.is_owner,
+                        coalesced_messages=[item.user_msg for item in batch],
                     )
-                if self._realtime_router.fallback_kind_since(user_msg.message_id, generation):
+                if self._realtime_router.fallback_kind_since(
+                    latest.user_msg.message_id, generation
+                ):
                     self._replay_ready = False
-                    self._schedule_web_replay()
+                    if not self._replay_lock.locked():
+                        self._schedule_web_replay()
                 else:
-                    await asyncio.to_thread(
-                        self._settle_web_message,
-                        journal,
-                        replay,
-                        pushed.message,
-                        wt,
-                        generation_at_start,
-                    )
+                    for item in batch:
+                        await asyncio.to_thread(
+                            self._settle_web_message,
+                            item.journal,
+                            item.replay,
+                            item.pushed.message,
+                            item.transport,
+                            item.generation,
+                        )
             except asyncio.CancelledError:
                 raise
             except Exception:
                 self._replay_ready = False
-                self._schedule_web_replay()
+                if not self._replay_lock.locked():
+                    self._schedule_web_replay()
                 logger.warning(
                     "Feishu real-time event background worker failed for %s",
-                    user_msg.message_id,
+                    latest.user_msg.message_id,
                     exc_info=True,
+                )
+            finally:
+                self._realtime_active_ids.difference_update(
+                    item.user_msg.message_id for item in batch
                 )
 
     def _get_or_build_user_client(self, cfg: FeishuAiCommandConfig) -> Any:
@@ -618,6 +641,7 @@ class FeishuAiPoller:
                 user_msg,
                 web_transport=wt,
             )
+            self._realtime_queue_changed.set()
             return False
 
         if not self._realtime_router.resolve_config().enabled:

@@ -106,7 +106,7 @@ class WebPositionReplay:
     async def catch_up(
         self,
         web: Any,
-        deliver: Callable[[PushedMessage], Awaitable[None]],
+        deliver: Callable[[PushedMessage], Awaitable[bool | None]],
         watch_chat_ids: frozenset[str] = frozenset(),
     ) -> None:
         state = self._load()
@@ -202,6 +202,7 @@ class WebPositionReplay:
                     messages, positions, cid, topic=False, require_end=positions[-1] == last
                 )
                 chunks.append((positions, messages, by_position))
+            deferred = False
             for positions, messages, by_position in reversed(chunks):
                 ids = [m.id for m in messages if m.id]
                 topics = await web.topics(ids) if ids else {}
@@ -219,14 +220,20 @@ class WebPositionReplay:
                     write_document(self.path, state)
                 for pos in positions:
                     if pos in by_position:
-                        await deliver(PushedMessage(message=by_position[pos], chat_type=chat.type))
+                        result = await deliver(
+                            PushedMessage(message=by_position[pos], chat_type=chat.type)
+                        )
+                        deferred = deferred or result is False
+                    # The durable queue owns deferred delivery; don't checkpoint past a gap.
+                    if deferred:
+                        continue
                     with self._guard():
                         state = self._load()
                         state["chats"][cid] = max(state["chats"].get(cid, -1), pos)
                         write_document(self.path, state)
 
     async def catch_up_topics(
-        self, web: Any, deliver: Callable[[PushedMessage], Awaitable[None]]
+        self, web: Any, deliver: Callable[[PushedMessage], Awaitable[bool | None]]
     ) -> None:
         state = self._load()
         checkpoints: dict[str, dict[str, Any]] = state["topics"]
@@ -262,12 +269,16 @@ class WebPositionReplay:
                         messages, positions, chat_id, topic=True, require_end=positions[-1] == last
                     )
                     chunks.append((positions, by_position))
+                deferred = False
                 for positions, by_position in reversed(chunks):
                     for pos in positions:
                         if pos in by_position:
-                            await deliver(
+                            result = await deliver(
                                 PushedMessage(message=by_position[pos], chat_type=chat_type)
                             )
+                            deferred = deferred or result is False
+                        if deferred:
+                            continue
                         with self._guard():
                             state = self._load()
                             state["topics"][tid]["position"] = max(

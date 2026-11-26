@@ -264,6 +264,9 @@ def _setup_poller(
             "send_mode": "web_session",
         }
     )
-    router = FeishuRealtimeEventRouter(config=realtime_config, event_sink=event_sink)
+    router = FeishuRealtimeEventRouter(
+        config=realtime_config,
+        event_sink=event_sink,
+    )
     poller = FeishuAiPoller(service, realtime_router=router)
     return poller, service, user_client
