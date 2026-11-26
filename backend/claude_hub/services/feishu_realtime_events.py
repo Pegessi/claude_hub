@@ -258,7 +258,7 @@ class FeishuRealtimeEventRouter:
     def bind_sender_alias(self, a: str, b: str, name: str = "") -> None:
         with self._lock:
             self._link_pair(self._known_sender_aliases, a, b)
-            if norm_n := " ".join((name or "").split()).casefold():
+            if norm_n := " ".join((name or "").split()):
                 for k in (a, b):
                     if ck := (k or "").strip().casefold():
                         self._known_sender_names[ck] = norm_n
@@ -309,7 +309,7 @@ class FeishuRealtimeEventRouter:
                     )
             for ch in getattr(wt, "_chatter_cache", {}).values():
                 if (cid := str(getattr(ch, "id", "") or "").strip().casefold()) and (
-                    cnm := " ".join(str(getattr(ch, "name", "") or "").split()).casefold()
+                    cnm := " ".join(str(getattr(ch, "name", "") or "").split())
                 ):
                     self._known_sender_names[cid] = cnm
 
@@ -349,7 +349,7 @@ class FeishuRealtimeEventRouter:
             for s in rec.sender_ids:
                 for sk in {s.casefold()} | set(self._known_sender_aliases.get(s.casefold(), ())):
                     if nm := self._known_sender_names.get(sk):
-                        return nm
+                        return nm.casefold()
         return ""
 
     def expand_chat_keys(self, chat_id: str) -> set[str]:
@@ -752,6 +752,39 @@ class FeishuRealtimeEventRouter:
                 return True
         return False
 
+    def owner_active_in_p2p(
+        self,
+        chat_id: str,
+        window_seconds: float,
+        *,
+        web_transport: Any = None,
+        owner_ids: set[str] | None = None,
+    ) -> bool:
+        if window_seconds <= 0:
+            return False
+        keys = self._chat_keys(chat_id, web_transport)
+        now_ms = time.time() * 1000
+        with self._lock:
+            times = [
+                mark.create_time_ms for key, mark in self._owner_chat_replies.items() if key in keys
+            ]
+            times.extend(
+                mark.create_time_ms
+                for (key, _), mark in self._owner_topic_replies.items()
+                if key in keys
+            )
+        # Warm Web cache covers owner messages from before process startup.
+        for msg in getattr(web_transport, "_msg_cache", {}).values():
+            if (
+                isinstance(msg, WebMessage)
+                and not msg.recalled
+                and msg.from_id in (owner_ids or set())
+                and self._chat_keys(msg.chat_id, web_transport) & keys
+                and not describe(msg.type, msg.content, "").strip().lower().startswith("/ai")
+            ):
+                times.append(msg.create_time_ms)
+        return any(0 <= now_ms - stamp < window_seconds * 1000 for stamp in times)
+
     async def _verify_unanswered_via_client(
         self, *, user_client: Any, chat_id: str, **kw: Any
     ) -> bool:
@@ -786,6 +819,13 @@ class FeishuRealtimeEventRouter:
                 or (item.text.strip().lower().startswith("/ai") and item.parent_id != mid)
             ):
                 continue
+            active_seconds = float(kw.get("active_seconds") or 0)
+            if (
+                active_seconds > 0
+                and not item.text.strip().lower().startswith("/ai")
+                and 0 <= time.time() * 1000 - item.create_time_ms < active_seconds * 1000
+            ):
+                return True
             direct = item.parent_id == mid or item.root_id == mid
             wm = msg_cache.get(item.message_id) if isinstance(msg_cache, Mapping) else None
             wpos = wm.position if wm is not None else 0
@@ -914,6 +954,9 @@ class FeishuRealtimeEventRouter:
         ftxt = describe(msg.type, msg.content, "").strip() or user_msg.text.strip()
         if has_ai_reply_footer(ftxt) or has_ai_reply_footer(user_msg.text):
             return False
+        batch: list[FeishuUserMessage] = kw.get("coalesced_messages") or [user_msg]
+        if len(batch) > 1:
+            ftxt = "\n".join(item.text for item in batch)
         urls = extract_message_urls(msg.type, msg.content, ftxt)
         is_at_me = bool(eff_oids.intersection(m_ids)) or (
             bool(pushed.at_me) and not (bool(m_ids) and set(m_ids) <= {"all", "@all"})
@@ -1012,6 +1055,18 @@ class FeishuRealtimeEventRouter:
         if automated_sender:
             return False
         self._sync_transport_chats(wt)
+        with self._lock:
+            sender_name = next(
+                (
+                    self._known_sender_names[key]
+                    for key in sorted(sender_keys)
+                    if self._known_sender_names.get(key)
+                ),
+                "",
+            )
+        # Web DM metadata often omits the chat label; the incoming human is its peer.
+        if is_p2p and not cname:
+            cname = sender_name
         # Web replay and push share the same numeric ID; changing the event key
         # when an OpenAPI alias happens to be known would break durable dedupe.
         cmid = user_msg.message_id
@@ -1022,6 +1077,9 @@ class FeishuRealtimeEventRouter:
         }
         ms = user_msg.create_time_ms
         chk_kw: dict[str, Any] = dict(chat_name=cname, thread_id=tid, text=ftxt, created_at_ms=ms)
+        from .feishu_realtime_delivery import has_pending_realtime_followup
+
+        followup_due = await has_pending_realtime_followup(cmid)
         if self.is_message_handled(
             cmid, chat_id=ocid or wcid, sender_id=user_msg.sender_open_id, **chk_kw
         ) or self.is_message_handled(
@@ -1030,7 +1088,8 @@ class FeishuRealtimeEventRouter:
             sender_id=msg.from_id or user_msg.sender_open_id,
             **chk_kw,
         ):
-            return False
+            if not followup_due:
+                return False
         rec_args = (cks, cname, {tid} if tid else None, s_set, ftxt, user_msg.text, ms)
 
         async def _suppress(courtesy: bool) -> bool:
@@ -1038,14 +1097,14 @@ class FeishuRealtimeEventRouter:
             self.suppressed_courtesy_count += int(courtesy)
             self.suppressed_replied_count += int(not courtesy)
             self._record_handled(user_msg.message_id, cmid, *rec_args)
-            for sup_key in {user_msg.message_id, cmid} - {""}:
+            for sup_key in {item.message_id for item in batch} | {cmid}:
                 try:
                     await record_suppressed_external_event("feishu", sup_key[:256])
                 except Exception:
                     pass
             return False
 
-        if not is_w_url and is_courtesy_or_ack_only(ftxt):
+        if not followup_due and not is_w_url and is_courtesy_or_ack_only(ftxt):
             return await _suppress(courtesy=True)
         tpos = int(getattr(msg, "topic_position", None) or 0)
         r_kw: dict[str, Any] = dict(
@@ -1054,10 +1113,20 @@ class FeishuRealtimeEventRouter:
         r_kw.update(
             position=msg.position, topic_position=tpos, web_transport=wt, owner_ids=eff_oids
         )
-        if self.has_owner_replied(
-            reply_to=msg.parent_id or msg.root_id, **r_kw
-        ) or await self._verify_unanswered_via_client(user_client=uc, **r_kw):
-            return await _suppress(courtesy=False)
+        if not followup_due and (
+            (
+                is_p2p
+                and self.owner_active_in_p2p(
+                    wcid, cfg.p2p_active_seconds, web_transport=wt, owner_ids=eff_oids
+                )
+            )
+            or self.has_owner_replied(reply_to=msg.parent_id or msg.root_id, **r_kw)
+            or await self._verify_unanswered_via_client(
+                user_client=uc, active_seconds=cfg.p2p_active_seconds if is_p2p else 0, **r_kw
+            )
+        ):
+            if not followup_due:
+                return await _suppress(courtesy=False)
         parsed_url: HttpUrl | None = None
         for u in m_urls or urls:
             try:
@@ -1081,6 +1150,8 @@ class FeishuRealtimeEventRouter:
         pl.update(
             zip(keys[6:10], (tid, user_msg.sender_open_id[:120], ftxt[:12000], trig)),
             matched_urls=u_slice,
+            sender_name=sender_name[:200],
+            coalesced_message_ids=[item.message_id for item in batch],
             created_at_ms=ms,
             reply_to=msg.parent_id or msg.root_id,
             position=msg.position,
@@ -1103,11 +1174,17 @@ class FeishuRealtimeEventRouter:
         delivery_err: str | None = None
         try:
             attachments = None
-            if self._event_sink is None and (user_msg.has_images or user_msg.image_refs):
+            if self._event_sink is None and any(
+                item.has_images or item.image_refs for item in batch
+            ):
                 from .feishu_ai_images import prepare_images
 
                 try:
-                    images, _ = await prepare_images(uc, user_msg, [])
+                    images = []
+                    for item in batch:
+                        if item.has_images or item.image_refs:
+                            prepared, _ = await prepare_images(uc, item, [])
+                            images.extend(prepared)
                 except Exception:
                     logger.warning("Realtime image acquisition failed for %s", cmid, exc_info=True)
                     event.payload["image_unavailable"] = True
@@ -1139,6 +1216,10 @@ class FeishuRealtimeEventRouter:
                 cmid, user_msg.message_id, "failed_delivery", *fb_base, *fb_tail
             )
             return False
+        for item in batch:
+            if item.message_id != cmid:
+                await record_suppressed_external_event("feishu", item.message_id)
+                self._record_handled(item.message_id, item.message_id, *rec_args)
         self.emitted_count += 1
         self._record_handled(user_msg.message_id, cmid, *rec_args)
         return True

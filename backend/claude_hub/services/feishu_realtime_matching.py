@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import math
 import os
 import re
 from collections.abc import Mapping, Sequence
@@ -248,6 +249,8 @@ class FeishuRealtimeEventConfig:
     model: str = ""
     reasoning_effort: str = "high"
     workspace_id: str = ""
+    p2p_debounce_seconds: float = 75.0
+    p2p_active_seconds: float = 900.0
 
     @classmethod
     def from_runtime(cls) -> FeishuRealtimeEventConfig:
@@ -271,6 +274,21 @@ class FeishuRealtimeEventConfig:
                 for key in (env_name, name):
                     if isinstance(doc.get(key), str):
                         return str(doc[key]).strip()
+            return default
+
+        def seconds(name: str, default: float) -> float:
+            env_name = f"CLAUDE_HUB_FEISHU_REALTIME_{name.upper()}"
+            for src in (os.environ, *d):
+                for key in (env_name, name):
+                    raw = src.get(key)
+                    if raw is None or isinstance(raw, bool):
+                        continue
+                    try:
+                        value = float(raw)
+                    except (TypeError, ValueError):
+                        continue
+                    if math.isfinite(value) and 0 <= value <= 86400:
+                        return value
             return default
 
         w_ids = v(
@@ -302,6 +320,8 @@ class FeishuRealtimeEventConfig:
             scalar("model", ""),
             scalar("reasoning_effort", "high"),
             scalar("workspace_id", ""),
+            seconds("p2p_debounce_seconds", 75.0),
+            seconds("p2p_active_seconds", 900.0),
         )
 
 

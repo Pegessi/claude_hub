@@ -77,6 +77,11 @@ from tests.feishu_realtime_support import (
 )
 
 
+@pytest.fixture(autouse=True)
+def immediate_debounce(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CLAUDE_HUB_FEISHU_REALTIME_P2P_DEBOUNCE_SECONDS", "0")
+
+
 @pytest.mark.asyncio
 async def test_c4_r2_same_second_same_text_collision_and_thread_mismatch_not_merged(
     tmp_path: Path,
@@ -479,7 +484,7 @@ async def test_unseeded_web_push_and_position_replay_use_one_identity(tmp_path: 
         return True
 
     poller, _service, client = _setup_poller(
-        tmp_path, realtime_config=FeishuRealtimeEventConfig(), event_sink=sink
+        tmp_path, realtime_config=FeishuRealtimeEventConfig(p2p_debounce_seconds=0), event_sink=sink
     )
     wt = client._get_web_transport()
     assert wt is not None
@@ -531,7 +536,7 @@ async def test_replayed_message_uses_protocol_at_user_ids(tmp_path: Path) -> Non
         return True
 
     poller, _service, _client = _setup_poller(
-        tmp_path, realtime_config=FeishuRealtimeEventConfig(), event_sink=sink
+        tmp_path, realtime_config=FeishuRealtimeEventConfig(p2p_debounce_seconds=0), event_sink=sink
     )
     pushed = _build_pushed_via_wire(
         msg_id="7400000000000007779",
@@ -557,7 +562,7 @@ async def test_p2p_topic_does_not_require_participation_lookup(
         return True
 
     poller, _service, _client = _setup_poller(
-        tmp_path, realtime_config=FeishuRealtimeEventConfig(), event_sink=sink
+        tmp_path, realtime_config=FeishuRealtimeEventConfig(p2p_debounce_seconds=0), event_sink=sink
     )
     lookup = AsyncMock(side_effect=RuntimeError("lookup unavailable"))
     monkeypatch.setattr("claude_hub.services.feishu_realtime_events.owner_participated", lookup)
@@ -581,7 +586,9 @@ async def test_p2p_topic_does_not_require_participation_lookup(
 async def test_failed_topic_participation_retains_recovery_marker(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    poller, _service, _client = _setup_poller(tmp_path, realtime_config=FeishuRealtimeEventConfig())
+    poller, _service, _client = _setup_poller(
+        tmp_path, realtime_config=FeishuRealtimeEventConfig(p2p_debounce_seconds=0)
+    )
     monkeypatch.setattr(
         "claude_hub.services.feishu_realtime_events.owner_participated",
         AsyncMock(side_effect=RuntimeError("lookup unavailable")),
@@ -603,7 +610,9 @@ async def test_failed_topic_participation_retains_recovery_marker(
 
 @pytest.mark.asyncio
 async def test_web_frontier_does_not_enqueue_ai_in_openapi_mode(tmp_path: Path) -> None:
-    poller, service, _client = _setup_poller(tmp_path, realtime_config=FeishuRealtimeEventConfig())
+    poller, service, _client = _setup_poller(
+        tmp_path, realtime_config=FeishuRealtimeEventConfig(p2p_debounce_seconds=0)
+    )
     service.update_config({"send_mode": "openapi"})
     pushed = _build_pushed_via_wire(
         msg_id="7400000000000007783",
@@ -619,7 +628,9 @@ async def test_web_frontier_does_not_enqueue_ai_in_openapi_mode(tmp_path: Path) 
 async def test_openapi_ai_mode_keeps_configured_realtime_stream(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    poller, service, _client = _setup_poller(tmp_path, realtime_config=FeishuRealtimeEventConfig())
+    poller, service, _client = _setup_poller(
+        tmp_path, realtime_config=FeishuRealtimeEventConfig(p2p_debounce_seconds=0)
+    )
     service.update_config({"send_mode": "openapi"})
     monkeypatch.setattr(poller, "web_replay_configured", lambda: True)
     monkeypatch.setattr(poller, "start", AsyncMock())
@@ -648,7 +659,7 @@ async def test_disabled_frontier_clears_tasks_and_transport(tmp_path: Path) -> N
 
 
 def test_ai_reply_only_suppresses_its_direct_target() -> None:
-    router = FeishuRealtimeEventRouter(config=FeishuRealtimeEventConfig())
+    router = FeishuRealtimeEventRouter(config=FeishuRealtimeEventConfig(p2p_debounce_seconds=0))
     parent = "7400000000000007784"
     pushed = PushedMessage(
         WebMessage(
@@ -690,7 +701,9 @@ async def test_frontier_keeps_journal_if_worker_already_popped(tmp_path: Path) -
         return True
 
     poller, _service, client = _setup_poller(
-        tmp_path, realtime_config=FeishuRealtimeEventConfig(), event_sink=stalled
+        tmp_path,
+        realtime_config=FeishuRealtimeEventConfig(p2p_debounce_seconds=0),
+        event_sink=stalled,
     )
     poller._active_web_transport = client._get_web_transport()
     pushed = _build_pushed_via_wire(
@@ -757,7 +770,7 @@ async def test_web_replay_delivery_failure_retains_position_and_retries(tmp_path
         return True
 
     poller, _service, client = _setup_poller(
-        tmp_path, realtime_config=FeishuRealtimeEventConfig(), event_sink=sink
+        tmp_path, realtime_config=FeishuRealtimeEventConfig(p2p_debounce_seconds=0), event_sink=sink
     )
     wt = client._get_web_transport()
     assert wt is not None
@@ -802,7 +815,7 @@ async def test_web_intake_does_not_depend_on_outbound_auto_send_preference(
         return True
 
     poller, service, client = _setup_poller(
-        tmp_path, realtime_config=FeishuRealtimeEventConfig(), event_sink=sink
+        tmp_path, realtime_config=FeishuRealtimeEventConfig(p2p_debounce_seconds=0), event_sink=sink
     )
     service.update_config({"send_mode": "auto"})
     monkeypatch.setattr(client, "should_use_web_session", lambda: False)
@@ -865,7 +878,9 @@ async def test_unfinished_web_push_survives_poller_restart(tmp_path: Path) -> No
         return True
 
     first, _service, client = _setup_poller(
-        tmp_path, realtime_config=FeishuRealtimeEventConfig(), event_sink=stalled
+        tmp_path,
+        realtime_config=FeishuRealtimeEventConfig(p2p_debounce_seconds=0),
+        event_sink=stalled,
     )
     wt = client._get_web_transport()
     assert wt is not None
@@ -890,7 +905,7 @@ async def test_unfinished_web_push_survives_poller_restart(tmp_path: Path) -> No
         return True
 
     resumed, _service, client = _setup_poller(
-        tmp_path, realtime_config=FeishuRealtimeEventConfig(), event_sink=sink
+        tmp_path, realtime_config=FeishuRealtimeEventConfig(p2p_debounce_seconds=0), event_sink=sink
     )
     wt = client._get_web_transport()
     assert wt is not None
@@ -917,7 +932,7 @@ async def test_live_push_during_first_snapshot_is_not_lost(tmp_path: Path) -> No
         return True
 
     poller, _service, client = _setup_poller(
-        tmp_path, realtime_config=FeishuRealtimeEventConfig(), event_sink=sink
+        tmp_path, realtime_config=FeishuRealtimeEventConfig(p2p_debounce_seconds=0), event_sink=sink
     )
     wt = client._get_web_transport()
     assert wt is not None
@@ -1297,7 +1312,8 @@ async def test_unresolved_dm_does_not_starve_journal_or_cross_chat_catchup(tmp_p
         unresolved_push.message.id,
         unresolved_history.message.id,
     ]
-    assert poller._web_replay._load()["chats"] == dict.fromkeys(chats, 1)
+    # Deferred queue entries keep their replay checkpoint until actually delivered.
+    assert poller._web_replay._load()["chats"] == {P2P_CHAT_WEB_ID: -1, ORDINARY_CHAT_WEB_ID: 1}
     assert not poller._replay_ready
 
     people[missing_sender] = WebChatter(id=missing_sender)

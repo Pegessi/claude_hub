@@ -7,6 +7,20 @@
 
 ## Released
 
+### feat(feishu): backfill shared realtime cards and quiet active p2p conversations
+
+- Render Source as plaintext chat/sender names with IDs; preserve the fast Summary
+  while Investigation and Suggested reply update in the same shared card.
+- Persist card identity and follow-up obligations, quote-reply after silent PATCH,
+  and fall back to a standalone conclusion when card identity/PATCH is unavailable.
+  Owner replies no longer cancel promised conclusions; cleanup preserves completed
+  answers and cancellation.
+- Coalesce p2p bursts after 75 quiet seconds and silence new p2p triage for 15 minutes
+  after normal owner participation (both configurable). Group triggers and owed
+  conclusions are exempt; casual commentary without an open request is skipped.
+- Keep deferred messages in the existing replay journal and avoid advancing catch-up
+  checkpoints past undelivered queue entries.
+
 ### fix(goals): queue steering while strict cross-review finishes
 
 - Preserve an active strict reviewer when users steer; retain ordered messages

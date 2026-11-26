@@ -15,6 +15,7 @@ from unittest.mock import AsyncMock
 import httpx
 import pytest
 
+from claude_hub.api import feishu_bot as bot_api
 from claude_hub.services.dot import DotService, DotStore
 from claude_hub.services.dot.events_gateway import ExternalEvent
 from claude_hub.services.feishu_ai_command import (
@@ -75,6 +76,11 @@ from tests.feishu_realtime_support import (
     _encode_rich_message,
     _setup_poller,
 )
+
+
+@pytest.fixture(autouse=True)
+def immediate_debounce(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CLAUDE_HUB_FEISHU_REALTIME_P2P_DEBOUNCE_SECONDS", "0")
 
 
 @pytest.mark.parametrize(
@@ -745,7 +751,7 @@ async def test_c2_r1_receipt_backed_patrol_suppression_retains_unhandled_backlog
     )
     from claude_hub.services.feishu_realtime_events import FeishuRealtimeEventRouter
 
-    assert FeishuRealtimeEventConfig().suppress_patrol_when_healthy is True
+    assert FeishuRealtimeEventConfig(p2p_debounce_seconds=0).suppress_patrol_when_healthy is True
 
     router = FeishuRealtimeEventRouter(
         config=FeishuRealtimeEventConfig(
@@ -1066,7 +1072,9 @@ async def test_default_background_triage_passive_dot_context(
 
     from claude_hub.services.feishu_realtime_agent import RealtimeDecision
 
-    dot.notify = AsyncMock(return_value="sent")  # type: ignore[method-assign]
+    notify = AsyncMock(return_value=(True, "om_notice", "app"))
+    monkeypatch.setattr(bot_api, "push_shared_card_to_tab", notify)
+    monkeypatch.setattr(dot, "tab_id", lambda: "dot-tab")
     monkeypatch.setattr(
         "claude_hub.services.feishu_realtime_delivery.diagnose_realtime_event",
         AsyncMock(
@@ -1092,7 +1100,7 @@ async def test_default_background_triage_passive_dot_context(
     assert inbox[0]["event_type"] == "triage.im.watch_chat_url"
     assert inbox[0]["severity"] == "normal"
     assert inbox[0]["payload"]["reply_draft"] == "Please check the worker logs."
-    dot.notify.assert_awaited_once()
+    notify.assert_awaited_once()
 
     # Verify 20m slow patrol is suppressed when the WebSocket realtime stream is healthy and opt-in enabled
     now = datetime(2026, 11, 14, 3, 0, tzinfo=timezone.utc)

@@ -652,6 +652,71 @@ def feishu_bound_to_tab(tab_id: str) -> bool:
         return False
 
 
+async def push_shared_card_to_tab(
+    tab_id: str,
+    card: dict[str, object],
+    *,
+    message_id: str = "",
+    app_id: str = "",
+) -> tuple[bool, str, str]:
+    """Send a shared notice, or backfill it and quote-reply to create an unread ping.
+
+    The caller persists the original bot identity with the message ID. Rebinding
+    to a different bot must fall back to a new card, not patch another bot's card.
+    """
+    try:
+        entry = _bot_bound_to_tab(tab_id)
+        if entry is None:
+            return False, "", ""
+        effective = _pool.effective(entry.bot_id)
+        client = FeishuBotClient(effective.config)
+        await client.get_tenant_token()
+        async with _gate(effective.bot_id):
+            binding = next(
+                (
+                    b
+                    for b in _entry_bindings(entry)
+                    if b.tab_id == tab_id and _binding_still_routes(effective, b)
+                ),
+                None,
+            )
+            if binding is None or not _pool.is_current_for_delivery(effective):
+                return False, "", ""
+            if message_id and app_id == effective.config.app_id:
+                try:
+                    await asyncio.wait_for(
+                        client.patch_message_card(message_id, card),
+                        timeout=_OUTBOUND_POST_TIMEOUT_SECONDS,
+                    )
+                except Exception:
+                    logger.warning(
+                        "Feishu shared notice update failed; sending follow-up", exc_info=True
+                    )
+                else:
+                    # A failed unread ping retries this idempotent PATCH + reply,
+                    # not a second standalone card or another model investigation.
+                    await asyncio.wait_for(
+                        client.reply_text(
+                            message_id,
+                            "Investigation updated · 核查结果已回填，请查看上方卡片。",
+                        ),
+                        timeout=_OUTBOUND_POST_TIMEOUT_SECONDS,
+                    )
+                    return True, message_id, app_id
+            if not _pool.is_current_for_delivery(effective) or not _binding_still_routes(
+                effective, binding
+            ):
+                return False, "", ""
+            sent_id = await asyncio.wait_for(
+                client.send_message(binding.chat_id, "interactive", card),
+                timeout=_OUTBOUND_POST_TIMEOUT_SECONDS,
+            )
+            return True, sent_id or "", effective.config.app_id
+    except Exception:
+        logger.warning("Feishu shared notice delivery failed", exc_info=True)
+        return False, "", ""
+
+
 async def push_to_tab(
     tab_id: str, text: str, *, title: str | None = None, tone: str = "info"
 ) -> bool:
