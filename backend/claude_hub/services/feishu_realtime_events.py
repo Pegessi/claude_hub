@@ -630,6 +630,12 @@ class FeishuRealtimeEventRouter:
         self, pushed: PushedMessage, user_msg: FeishuUserMessage, *, web_transport: Any = None
     ) -> None:
         msg = pushed.message
+        # /ai results are sent as the owner, but are not human participation.
+        # The originating command already marks its exact quoted target.
+        if has_ai_reply_footer(user_msg.text) or has_ai_reply_footer(
+            describe(msg.type, msg.content, "")
+        ):
+            return
         chat_keys = self._chat_keys(msg.chat_id or user_msg.chat_id, web_transport)
         topic_id = (
             user_msg.thread_id or (msg.thread_id or msg.root_id if is_in_topic(msg) else "") or ""
@@ -723,15 +729,15 @@ class FeishuRealtimeEventRouter:
                     return True
         msg_cache = getattr(wt, "_msg_cache", None) if owner_ids else None
         for c in msg_cache.values() if isinstance(msg_cache, Mapping) and owner_ids else ():
-            is_ai = isinstance(c, WebMessage) and describe(
-                c.type, c.content, ""
-            ).strip().lower().startswith("/ai")
+            cached_text = describe(c.type, c.content, "") if isinstance(c, WebMessage) else ""
+            is_ai = cached_text.strip().lower().startswith("/ai")
             if (
                 not isinstance(c, WebMessage)
                 or c.recalled
                 or not c.id
                 or c.id == clean_mid
                 or c.from_id not in owner_ids
+                or has_ai_reply_footer(cached_text)
                 or (is_ai and c.parent_id != clean_mid)
                 or not (chat_keys & self._chat_keys(c.chat_id, wt))
             ):
@@ -781,6 +787,7 @@ class FeishuRealtimeEventRouter:
                 and msg.from_id in (owner_ids or set())
                 and self._chat_keys(msg.chat_id, web_transport) & keys
                 and not describe(msg.type, msg.content, "").strip().lower().startswith("/ai")
+                and not has_ai_reply_footer(describe(msg.type, msg.content, ""))
             ):
                 times.append(msg.create_time_ms)
         return any(0 <= now_ms - stamp < window_seconds * 1000 for stamp in times)
@@ -816,6 +823,7 @@ class FeishuRealtimeEventRouter:
                 not isinstance(item, FeishuUserMessage)
                 or item.message_id == mid
                 or item.sender_open_id not in owner_ids
+                or has_ai_reply_footer(item.text)
                 or (item.text.strip().lower().startswith("/ai") and item.parent_id != mid)
             ):
                 continue

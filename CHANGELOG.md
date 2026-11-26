@@ -20,6 +20,10 @@
   conclusions are exempt; casual commentary without an open request is skipped.
 - Keep deferred messages in the existing replay journal and avoid advancing catch-up
   checkpoints past undelivered queue entries.
+- Separate answered and unanswered p2p messages before coalescing, using full reply
+  ordering metadata. A targeted /ai reply suppresses only its quoted message and
+  leaves other pending questions on their own quiet-window deadline. Generated /ai
+  result echoes do not count as human replies or start active-conversation silence.
 
 ### fix(goals): queue steering while strict cross-review finishes
 

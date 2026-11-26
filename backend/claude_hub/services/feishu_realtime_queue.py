@@ -13,6 +13,7 @@ from .feishu_realtime_events import FeishuRealtimeEventRouter
 from .feishu_user_client import FeishuUserMessage
 from .feishu_web_journal import WebPushJournal
 from .feishu_web_replay import WebPositionReplay
+from .feishu_web_session.adapter import is_in_topic
 
 
 @dataclass
@@ -44,12 +45,28 @@ async def next_realtime_batch(
         queued = list(queue.items())
         owners: dict[str, str] = {}
         terminal: set[str] = set()
+        replied: set[str] = set()
         for mid, item in queued:
             state, receipted = await realtime_message_state(mid)
             if state.event is not None or state.decision is not None or state.followup_due:
                 owners[mid] = state.event.dedupe_key if state.event else mid
             elif receipted or router.is_message_handled(mid):
                 terminal.add(mid)
+            else:
+                message = item.pushed.message
+                if item.p2p_key and router.has_owner_replied(
+                    chat_id=item.user_msg.chat_id,
+                    message_id=item.user_msg.message_id,
+                    created_at_ms=item.user_msg.create_time_ms,
+                    position=message.position,
+                    topic_position=int(message.topic_position or 0),
+                    thread_id=item.user_msg.thread_id
+                    or (message.thread_id or message.root_id if is_in_topic(message) else ""),
+                    reply_to=message.parent_id or message.root_id,
+                    web_transport=item.transport,
+                    owner_ids=item.owner_ids,
+                ):
+                    replied.add(mid)
         if changed.is_set():
             continue
         for mid, item in queued:
@@ -58,27 +75,30 @@ async def next_realtime_batch(
                 # A frozen batch is resumed as-is, even when only one member has
                 # arrived from replay. Delivery restores its persisted evidence.
                 batch = [(key, row) for key, row in queued if owners.get(key) == owners[mid]]
-            elif item.p2p_key and mid not in terminal and cfg.p2p_debounce_seconds > 0:
+            elif (
+                item.p2p_key
+                and mid not in terminal
+                and mid not in replied
+                and cfg.p2p_debounce_seconds > 0
+            ):
                 batch = [
                     (key, row)
                     for key, row in queued
-                    if row.p2p_key == item.p2p_key and key not in owners and key not in terminal
+                    if row.p2p_key == item.p2p_key
+                    and key not in owners
+                    and key not in terminal
+                    and key not in replied
                 ]
                 wait = max(row.received_at for _, row in batch) + cfg.p2p_debounce_seconds - now()
-                replied = router.has_owner_replied(
-                    chat_id=item.user_msg.chat_id,
-                    message_id=item.user_msg.message_id,
-                    created_at_ms=item.user_msg.create_time_ms,
-                    web_transport=item.transport,
-                    owner_ids=item.owner_ids,
-                )
                 active = router.owner_active_in_p2p(
                     item.user_msg.chat_id,
                     cfg.p2p_active_seconds,
                     web_transport=item.transport,
                     owner_ids=item.owner_ids,
                 )
-                if wait > 0 and not replied and not active:
+                # Already-replied rows are settled separately. Their arrival or
+                # reply must neither reset nor shorten an unanswered row's window.
+                if wait > 0 and not active:
                     remaining = min(remaining, wait)
                     continue
             for key, _ in batch:

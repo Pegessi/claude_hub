@@ -12,8 +12,10 @@ from claude_hub.services import feishu_ai_poller as poller_module
 from claude_hub.services import feishu_realtime_delivery as delivery
 from claude_hub.services import feishu_realtime_events as events
 from claude_hub.services.dot import DotService, DotStore
+from claude_hub.services.feishu_ai_command_models import ensure_ai_footer
 from claude_hub.services.feishu_realtime_matching import FeishuRealtimeEventConfig
 from claude_hub.services.feishu_realtime_settings import write_realtime_settings
+from claude_hub.services.feishu_user_client import FeishuReplyReceipt
 from claude_hub.services.feishu_web_session.rich import CHAT_GROUP, CHAT_P2P, T, WebChatter
 from tests.feishu_realtime_support import (
     COLLEAGUE_WEB_UID,
@@ -503,4 +505,175 @@ async def test_terminal_latest_retransmission_cannot_discard_unhandled_older_mem
         ]
         assert not poller._web_journal.pending()
     finally:
+        await close(poller, client)
+
+
+def pause_realtime_worker(poller, monkeypatch):
+    release = asyncio.Event()
+    original = poller._drain_realtime_event_queue
+
+    async def paused():
+        await release.wait()
+        await original()
+
+    monkeypatch.setattr(poller, "_drain_realtime_event_queue", paused)
+    return release
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ordering", ["timestamps", "positions", "topic-positions"])
+async def test_answered_row_does_not_shorten_or_contaminate_unanswered_window(
+    tmp_path, monkeypatch, clock, ordering
+):
+    sink = AsyncMock(return_value=True)
+    poller, _, client = _setup_poller(
+        tmp_path,
+        realtime_config=FeishuRealtimeEventConfig(p2p_active_seconds=0),
+        event_sink=sink,
+    )
+    poller._active_web_transport = client._get_web_transport()
+    release = pause_realtime_worker(poller, monkeypatch)
+    m1 = pushed("7400000000000010600", "Already answered question?", position=1)
+    owner = pushed(
+        "7400000000000010601",
+        "My answer",
+        owner=True,
+        position=2,
+        seconds=NOW + 1 if ordering == "timestamps" else NOW,
+    )
+    m2 = pushed(
+        "7400000000000010602",
+        "New unanswered question?",
+        position=3,
+        seconds=NOW + 2 if ordering == "timestamps" else NOW,
+    )
+    if ordering == "topic-positions":
+        topic = "7400000000000010699"
+        m1, owner, m2 = [
+            replace(
+                item,
+                message=replace(
+                    item.message, position=0, thread_id=topic, root_id=topic, topic_position=index
+                ),
+            )
+            for index, item in enumerate((m1, owner, m2), 1)
+        ]
+    try:
+        await poller._handle_frontier_pushed_web_message(m1)
+        clock.now = 10
+        await poller._handle_frontier_pushed_web_message(owner)
+        clock.now = 20
+        await poller._handle_frontier_pushed_web_message(m2)
+        release.set()
+        await wait_until(
+            lambda: m1.message.id not in {p.message.id for p in poller._web_journal.pending()}
+        )
+        assert sink.await_count == 0
+        assert [p.message.id for p in poller._web_journal.pending()] == [m2.message.id]
+        clock.now = 94
+        poller._realtime_queue_changed.set()
+        await asyncio.sleep(0.01)
+        assert sink.await_count == 0
+        clock.now = 95
+        poller._realtime_queue_changed.set()
+        await drain(poller)
+        assert sink.await_count == 1
+        assert sink.call_args.args[0].payload["text"] == "New unanswered question?"
+        assert sink.call_args.args[0].payload["coalesced_message_ids"] == [m2.message.id]
+    finally:
+        release.set()
+        await close(poller, client)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("echo_route", ["none", "push-thread", "push-main", "cache", "history"])
+async def test_owner_ai_reply_suppresses_only_target_not_other_pending_peer(
+    tmp_path, monkeypatch, clock, echo_route
+):
+    monkeypatch.setattr(
+        events, "time", SimpleNamespace(time=lambda: NOW + 2, monotonic=time.monotonic)
+    )
+    sink = AsyncMock(return_value=True)
+    prompts = []
+    poller, _, client = _setup_poller(
+        tmp_path,
+        realtime_config=FeishuRealtimeEventConfig(),
+        event_sink=sink,
+        dispatched_prompts=prompts,
+    )
+    wt = client._get_web_transport()
+    poller._active_web_transport = wt
+    monkeypatch.setattr(
+        client,
+        "reply_as_user",
+        AsyncMock(return_value=FeishuReplyReceipt(message_id="om_ai_answer")),
+    )
+    release = pause_realtime_worker(poller, monkeypatch)
+    m1 = pushed("7400000000000010700", "First unanswered question?", position=1)
+    m2 = pushed("7400000000000010701", "Second question?", position=2)
+    command = pushed("7400000000000010702", "/ai answer this", owner=True, position=3)
+    command = replace(command, message=replace(command.message, parent_id=m2.message.id))
+    try:
+        await poller._handle_frontier_pushed_web_message(m1)
+        clock.now = 20
+        await poller._handle_frontier_pushed_web_message(m2)
+        clock.now = 30
+        await poller._handle_frontier_pushed_web_message(command)
+        # Suppression must survive cache eviction and be recorded before command
+        # dispatch returns; a targeted /ai command must not start chat-wide silence.
+        wt._msg_cache.pop(command.message.id, None)
+        assert m2.message.id in poller.realtime_router._owner_ai_parent_replies
+        if echo_route != "none":
+            echo = pushed(
+                "7400000000000010703",
+                ensure_ai_footer("Assistant answer"),
+                owner=True,
+                seconds=NOW + 1,
+                position=4,
+            )
+            if echo_route == "push-thread":
+                echo = replace(
+                    echo,
+                    message=replace(
+                        echo.message,
+                        parent_id=command.message.id,
+                        root_id=command.message.id,
+                        thread_id=command.message.id,
+                        topic_position=1,
+                    ),
+                )
+            if echo_route.startswith("push"):
+                await poller._handle_frontier_pushed_web_message(echo)
+            else:
+                echo_user = wt.ingest_pushed_message(echo)
+                if echo_route == "history":
+                    wt._msg_cache.pop(echo.message.id, None)
+                    monkeypatch.setattr(
+                        client,
+                        "list_messages_page",
+                        AsyncMock(return_value=SimpleNamespace(items=[echo_user])),
+                    )
+        assert not poller.realtime_router.owner_active_in_p2p(
+            P2P_CHAT_WEB_ID, 900, web_transport=wt, owner_ids={OWNER_WEB_UID}
+        )
+        release.set()
+        await wait_until(
+            lambda: m2.message.id not in {p.message.id for p in poller._web_journal.pending()}
+        )
+        assert sink.await_count == 0
+        clock.now = 74
+        poller._realtime_queue_changed.set()
+        await asyncio.sleep(0.01)
+        assert sink.await_count == 0
+        clock.now = 75
+        poller._realtime_queue_changed.set()
+        await drain(poller)
+        await poller.wait_for_inflight()
+        assert len(prompts) == 1
+        assert sink.await_count == 1
+        assert sink.call_args.args[0].payload["text"] == "First unanswered question?"
+        assert sink.call_args.args[0].payload["coalesced_message_ids"] == [m1.message.id]
+        assert not poller._web_journal.pending()
+    finally:
+        release.set()
         await close(poller, client)

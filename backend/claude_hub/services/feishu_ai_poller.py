@@ -611,6 +611,22 @@ class FeishuAiPoller:
             user_msg.sender_type == "user"
             and self._service._matches_owner_sender(user_msg.sender_open_id, cfg)
         )
+        # /ai quotes suppress only their exact parent. Record before command
+        # admission returns, without starting normal-chat active silence.
+        owner_ids = self._resolve_owner_ids(cfg, wt)
+        owner_sender = (
+            is_owner
+            or user_msg.sender_open_id in owner_ids
+            or getattr(pushed.message, "from_id", "") in owner_ids
+        )
+        if owner_sender:
+            self._realtime_router.record_owner_pushed_message(
+                pushed,
+                user_msg,
+                web_transport=wt,
+            )
+            self._realtime_queue_changed.set()
+
         if cfg.enabled and self._service.is_owner_ai_command_candidate(
             sender_open_id=user_msg.sender_open_id,
             sender_type=user_msg.sender_type,
@@ -630,18 +646,7 @@ class FeishuAiPoller:
                 return True
             return False
 
-        owner_ids = self._resolve_owner_ids(cfg, wt)
-        if (
-            is_owner
-            or user_msg.sender_open_id in owner_ids
-            or getattr(pushed.message, "from_id", "") in owner_ids
-        ):
-            self._realtime_router.record_owner_pushed_message(
-                pushed,
-                user_msg,
-                web_transport=wt,
-            )
-            self._realtime_queue_changed.set()
+        if owner_sender:
             return False
 
         if not self._realtime_router.resolve_config().enabled:

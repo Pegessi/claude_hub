@@ -79,8 +79,9 @@ Zero disables the corresponding filter. API values must be finite and between
 
 Live Feishu rendering/unread behavior and model intent accuracy need human
 acceptance; HTTP mocks and prompt-contract tests cannot prove those external facts.
-The referenced abbreviated privacy lesson was not retrievable during implementation;
-do not equate staged checkout safety with an exhaustive private-string scanner.
+The formal reviewer subsequently located the exact privacy lesson in Dot lessons:
+check only incremental additions and retain the public contributor author identity.
+Staged checkout safety is separate from the incremental private-string scan.
 Final Task reports record the exact checks, retained evidence and unresolved risks.
 
 ## Independent review fixes
@@ -111,5 +112,48 @@ settlement, keeping its existing file-size ceiling without a parallel scheduler.
   code was modified. The final serial run included that test and passed the full
   default test scope, not an exclusion-based subset.
 - Incremental added-line scans found zero private-domain, machine-path or private-IP
-  matches. This is a bounded scan, not certification against the unavailable
-  abbreviated lesson's exact pattern set.
+  matches. The formal reviewer also verified the actual lesson's incremental-only
+  scope and public-author requirements; no baseline matches were modified.
+
+
+## Formal review revision: per-message reply boundaries
+
+The formal reviewer reproduced a fresh-batch boundary defect: an answered peer
+message could shorten the next unanswered message's quiet window and be prepended
+to it. A targeted /ai reply could also suppress another unanswered batch member.
+
+- Classify reply status for each queued row, passing position, topic position,
+  thread and reply-parent metadata alongside message identity/time.
+- Exclude already-replied rows from fresh coalescing candidates and settle them
+  separately; they cannot contribute text or alter the unanswered subset's deadline.
+- Record owner messages before /ai command admission returns, including waking the
+  existing queue. The existing /ai mark remains scoped to its exact parent and does
+  not start the normal active-conversation silence window. Owned batches still take
+  precedence, preserving already-promised investigation followups.
+- Added regressions for answered m1 → normal owner reply → unanswered m2 (timestamp,
+  same-second message-position and topic-position orderings), plus unanswered m1/m2
+  → /ai quote of m2 with the owner message evicted from the Web cache. The timestamp
+  and targeted-/ai cases failed before repair; all 19 noise tests pass after repair.
+- No unrelated shared-service, database or baseline content changes.
+
+- A follow-up read-only review exercised the actual /ai result echo (sent under
+  the owner's identity), exposing a same-contract gap beyond command admission.
+  Recognized generated-footer results are now excluded from human reply marks,
+  cached broad reply inference, active-cache scans and history-page suppression.
+  The originating /ai command still suppresses its exact quoted target. Four
+  echo routes (threaded push, main-chat push, cache-only and history-only) failed
+  before repair; the regression now includes the full command/result round trip.
+
+### Revision validation
+
+After the per-row and generated-echo fixes: all six realtime suites pass in both
+orders (**145 passed** each); full standard verification with
+CLAUDE_HUB_VERIFY_SHARDS=1 passes (**7853 backend passed, 10 skipped**, **1565 frontend
+passed**, 85% backend coverage), including format/types/docs/lint/build.
+Full backend evidence: /tmp/claude-hub-verify.mx0cwm1g.
+The independent read-only reviewer re-ran its original echo probe and confirmed
+only the still-unanswered peer message is diagnosed; all 145 realtime tests passed
+in its reversed-order check, with no remaining actionable finding.
+Generated-output filtering uses the existing standard footer contract, not a new
+heuristic for arbitrary custom footers. Live Feishu UI/unread behavior remains a
+human acceptance check.
