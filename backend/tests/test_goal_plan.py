@@ -16,7 +16,7 @@ from claude_hub.services.goal_run import (
     GoalRunController,
     GoalRunStore,
 )
-from claude_hub.services.goal_run.controller import (
+from claude_hub.services.goal_run.prompts import (
     build_continuation_prompt,
     build_dispatch_prompt,
     build_plan_prompt,

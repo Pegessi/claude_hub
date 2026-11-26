@@ -19,16 +19,21 @@ from ...models import AgentType
 from ...models.goal_run import (
     GOAL_STRICT_REVIEW_HARD_MAX_ROUNDS,
     GOAL_STRICT_REVIEW_MAX_ROUNDS,
+    TERMINAL_GOAL_STATUSES,
     GoalCheckpoint,
+    GoalDispatchState,
     GoalRun,
+    GoalRunStatus,
     GoalStrictReviewFinding,
     GoalStrictReviewRound,
 )
 from .. import maso_discovery
+from ..cross_review_settings import read_cross_review_settings
 from ..cross_reviewer import (
     _ORIGINAL_DISCOVER_MASO_SERVICE,
     CrossReviewCandidate,
     StrictReviewerTarget,
+    are_candidates_distinct_families,
     canonical_maso_base_model,
     is_candidate_quota_exhausted,
     read_cached_quota_map,
@@ -229,6 +234,7 @@ def _detect_referenced_worktrees_sync(
     objective: str,
     assistant_text: str,
     checkpoint: GoalCheckpoint | None,
+    include_cwd: bool = False,
 ) -> tuple[list[str], list[str]]:
     """Detect referenced *_worktree/<slug> directories and filter existing inspection dirs off-loop."""
     checkpoint_blob = (
@@ -251,7 +257,7 @@ def _detect_referenced_worktrees_sync(
             resolved = str(path.resolve())
         except OSError:
             continue
-        if resolved != resolved_cwd and resolved not in found:
+        if (include_cwd or resolved != resolved_cwd) and resolved not in found:
             found.append(resolved)
         if len(found) >= 3:
             break
@@ -266,6 +272,91 @@ def _detect_referenced_worktrees_sync(
         except OSError:
             continue
     return found, existing_dirs
+
+
+def invalidate_push_authorization(goal: GoalRun) -> bool:
+    if not goal.strict_review_push_pending:
+        goal.strict_review_push_target = None
+        return False
+    goal.strict_review_push_pending = False
+    goal.strict_review_push_target = None
+    if goal.strict_review and goal.status not in TERMINAL_GOAL_STATUSES:
+        goal.strict_review_cycle += 1
+        goal.strict_review_rounds = 0
+        goal.strict_review_max_rounds = GOAL_STRICT_REVIEW_MAX_ROUNDS
+        goal.strict_review_feedback = None
+    return True
+
+
+def block_unverifiable_push(goal: GoalRun, reason: str) -> GoalRun:
+    goal.status = GoalRunStatus.BLOCKED
+    goal.strict_review_in_progress = False
+    goal.dispatch_state = GoalDispatchState.IDLE
+    goal.status_message = (
+        f"Automatic branch push could not verify clean reviewed checkout ({reason}); "
+        "push manually or steer the Goal"
+    )
+    return goal
+
+
+async def inspect_push_candidate(
+    goal: GoalRun, assistant_text: str
+) -> tuple[str | None, str | None]:
+    """Bind a reviewed push to one clean, non-protected checkout."""
+    from ..ttyd_manager import ttyd_manager
+
+    tab = ttyd_manager.get_tab(goal.tab_id)
+    if tab is None:
+        return None, "The Goal Chat is no longer available"
+    cwd = str(tab.cwd or "")
+    referenced, _ = await asyncio.to_thread(
+        _detect_referenced_worktrees_sync,
+        cwd,
+        objective="" if goal.strict_review_push_target else goal.objective,
+        assistant_text=assistant_text,
+        checkpoint=None if goal.strict_review_push_target else goal.checkpoint,
+        include_cwd=True,
+    )
+    try:
+        if goal.strict_review_push_target:
+            approved_dir = goal.strict_review_push_target.rsplit("@", 1)[0]
+            if any(str(Path(path).expanduser().resolve()) != approved_dir for path in referenced):
+                return None, "Push turn referenced a different worktree"
+            target = approved_dir
+        else:
+            resolved_referenced = list(
+                dict.fromkeys(str(Path(path).expanduser().resolve()) for path in referenced)
+            )
+            if len(resolved_referenced) > 1:
+                return None, "Multiple worktrees referenced; automatic push skipped"
+            target = (
+                str(
+                    Path(resolved_referenced[0] if resolved_referenced else cwd)
+                    .expanduser()
+                    .resolve()
+                )
+                if cwd or resolved_referenced
+                else ""
+            )
+    except OSError:
+        return None, "Unable to resolve the checkout directory"
+    if not target:
+        return None, "No checkout directory is available"
+    rc, inside = await _run_git_command(target, "rev-parse", "--is-inside-work-tree")
+    if rc or inside.lower() != "true":
+        return None, "Target is not a Git working tree"
+    rc, branch = await _run_git_command(target, "rev-parse", "--abbrev-ref", "HEAD")
+    if rc or not branch or branch in {"main", "master", "develop", "HEAD"}:
+        return None, "Protected or detached branch cannot be pushed automatically"
+    rc, head = await _run_git_command(target, "rev-parse", "HEAD")
+    if rc or not head:
+        return None, "Unable to resolve checkout HEAD"
+    rc, status = await _run_git_command(target, "status", "--porcelain")
+    if rc:
+        return None, "Unable to inspect working tree status"
+    if status:
+        return None, "Working tree has uncommitted changes"
+    return f"{target}@{branch}:{head}", None
 
 
 async def _collect_single_dir_git_snapshot(target_cwd: str) -> tuple[bool, str, str | None]:
@@ -719,6 +810,18 @@ def build_strict_review_prompt(
         )
 
     context_block = f"\n{context.render_prompt_block()}" if context is not None else ""
+    rubric = ""
+    if goal.strict_review_preset == "mr_slim":
+        rubric += (
+            "Mandatory Subtraction Gate (Concept Survival Table): audit every added config knob, env var, flag, class, protocol, module and standalone test file in the full git diff merge-base..HEAD. "
+            "Rate unjustified parallel paths, wrappers and fragmented tests P1, naming the existing owner to fold into; naming or formatting nitpicks remain P2/P3.\n"
+        )
+    elif goal.strict_review_preset == "bug_only":
+        rubric += "Subtraction and refactoring are P2/P3 advisory only; block strictly on reachable correctness, data-integrity, security or broken-verification defects.\n"
+    elif goal.strict_review_preset == "readonly_brief":
+        rubric += "Verify the worker kept the repository untouched and its Review Briefing and defect analysis match the actual diff and call paths. Do not ask the worker to modify files.\n"
+    if goal.strict_review_briefing:
+        rubric += "Verify all four sections of the 3-Minute Review Briefing against actual diff stats, call paths and verification outputs; missing or materially inaccurate claims are P1.\n"
 
     return f"""You are an independent adversarial reviewer verifying whether this Goal is genuinely complete.
 This is a READ-ONLY review (round {round_number} of {effective_max}).
@@ -734,7 +837,7 @@ Worker's completion claim (turn {worker_turn_id}):
 {excerpt}
 
 Instructions & Surgical Review Rubric:
-1. Full-Diff & Situational Scope:
+{rubric}1. Full-Diff & Situational Scope:
    - If the target directory (or a referenced feature worktree) is a Git repository, inspect the COMPLETE actual git status and diff across all modified/untracked files, never restricting your review only to the subset of files cited in the worker's prose.
    - For read-only investigations, benchmark analyses, or non-Git directory tasks, verify outputs, calculations, and evidence directly against the Objective without demanding Git worktree/commit ceremony.
 2. Causal P0/P1 Bar (Evidence-First, Anti-Dogmatic):
@@ -812,6 +915,40 @@ def parse_strict_review_output(
     )
 
 
+def merge_strict_review_outcomes(outcomes: Sequence[StrictReviewOutcome]) -> StrictReviewOutcome:
+    if not outcomes:
+        raise ValueError("At least one review is required")
+    findings: list[GoalStrictReviewFinding] = []
+    for outcome in outcomes:
+        for finding in outcome.findings:
+            match = next(
+                (i for i, existing in enumerate(findings) if _findings_match(existing, finding)),
+                None,
+            )
+            if match is None:
+                findings.append(finding.model_copy(deep=True))
+            else:
+                prior = findings[match]
+                fixes = list(dict.fromkeys(x for x in (prior.fix, finding.fix) if x))
+                findings[match] = prior.model_copy(
+                    update={
+                        "severity": min(prior.severity, finding.severity),
+                        "file": prior.file or finding.file,
+                        "fix": " / ".join(fixes)[:1000] or None,
+                    }
+                )
+    blocking = [f for f in findings if f.severity in {"P0", "P1"}]
+    ordered = (blocking + [f for f in findings if f.severity not in {"P0", "P1"}])[:30]
+    verdict = "PASS" if all(o.verdict == "PASS" for o in outcomes) and not blocking else "BLOCK"
+    return StrictReviewOutcome(
+        verdict,
+        " | ".join(f"{o.reviewer_provider}: {o.summary}" for o in outcomes)[:2000],
+        ordered,
+        "+".join(dict.fromkeys(o.reviewer_provider for o in outcomes))[:80],
+        " + ".join(o.reviewer_model for o in outcomes if o.reviewer_model)[:120] or None,
+    )
+
+
 def format_strict_review_feedback(round_record: GoalStrictReviewRound) -> str:
     """Format the completed review outcome for the next Goal continuation."""
     model_suffix = f" ({round_record.reviewer_model})" if round_record.reviewer_model else ""
@@ -886,6 +1023,7 @@ async def run_subagent_strict_review(
             maso_url = None
 
     quota_map = await read_cached_quota_map()
+    settings = await asyncio.to_thread(read_cross_review_settings)
     candidates = select_cross_reviewer_candidates(
         tab.agent_type,
         parent_env,
@@ -893,6 +1031,11 @@ async def run_subagent_strict_review(
         maso_models=maso_model_ids,
         default_maso_model=default_maso_model,
         quota_by_provider=quota_map,
+        preferred_candidates=(
+            goal.strict_review_candidates
+            if goal.strict_review_candidates is not None
+            else settings.preferred_candidates
+        ),
     )
     if not candidates:
         raise RuntimeError(
@@ -916,8 +1059,12 @@ async def run_subagent_strict_review(
     service = subagents_mod.get_subagent_service()
     errors: list[str] = []
 
-    for index, candidate in enumerate(candidates):
-        call_id = f"goal-strict-review:{goal.id}:{worker_turn_id}:r{round_number}:c{index}"
+    async def attempt(
+        index: int, candidate: CrossReviewCandidate, slot: int
+    ) -> StrictReviewOutcome | None:
+        call_id = (
+            f"goal-strict-review:{goal.id}:{worker_turn_id}:r{round_number}:slot{slot}:c{index}"
+        )
         record_id: str | None = None
         try:
             record, turn = await service.create(
@@ -944,7 +1091,7 @@ async def run_subagent_strict_review(
                     break
             if turn.status != SubagentTurnStatus.COMPLETED or not turn.final_text:
                 errors.append(f"{candidate.provider}: {turn.error or turn.status.value}")
-                continue
+                return None
             return parse_strict_review_output(
                 turn.final_text,
                 reviewer_provider=candidate.provider,
@@ -968,6 +1115,59 @@ async def run_subagent_strict_review(
             )
             errors.append(f"{candidate.provider}: {exc}")
 
+        return None
+
+    if (goal.strict_review_mode or settings.review_mode) == "single":
+        for index, candidate in enumerate(candidates):
+            outcome = await attempt(index, candidate, 0)
+            if outcome is not None:
+                return outcome
+    else:
+        remaining = list(enumerate(candidates))
+        first = remaining.pop(0)
+        second_index = next(
+            (
+                i
+                for i, (_, c) in enumerate(remaining)
+                if are_candidates_distinct_families(first[1], c)
+            ),
+            0,
+        )
+        primary = [first]
+        if remaining:
+            primary.append(remaining.pop(second_index))
+        outcomes = await asyncio.gather(
+            *(attempt(index, candidate, slot) for slot, (index, candidate) in enumerate(primary))
+        )
+        while remaining and (len(outcomes) < 2 or any(outcome is None for outcome in outcomes)):
+            slot = next((i for i, outcome in enumerate(outcomes) if outcome is None), len(outcomes))
+            successful = [outcome for outcome in outcomes if outcome is not None]
+            backup_index = next(
+                (
+                    i
+                    for i, (_, c) in enumerate(remaining)
+                    if all(
+                        are_candidates_distinct_families(
+                            c, CrossReviewCandidate(o.reviewer_provider, o.reviewer_model)
+                        )
+                        for o in successful
+                    )
+                ),
+                0,
+            )
+            index, candidate = remaining.pop(backup_index)
+            outcome = await attempt(index, candidate, slot)
+            if slot == len(outcomes):
+                outcomes.append(outcome)
+            else:
+                outcomes[slot] = outcome
+        valid = [outcome for outcome in outcomes if outcome is not None]
+        if len(valid) == 1:
+            raise RuntimeError(
+                "Dual consensus requires two valid reviews; only 1/2 reviewers available"
+            )
+        if valid:
+            return merge_strict_review_outcomes(valid)
     raise RuntimeError(
         "Strict cross-review could not obtain a valid verdict (" + "; ".join(errors[:3]) + ")"
     )

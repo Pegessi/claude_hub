@@ -198,3 +198,19 @@ test('Goal errors remain visible and setup traps focus', () => {
   assert.ok(dialog.includes('@keydown.tab="trapFocus"'))
   assert.ok(dialog.includes("if (!props.busy) emit('close')"))
 })
+
+
+test('cross-review settings are loaded only by the opened dialog', () => {
+  const dialog = readFileSync(new URL('../src/components/CrossReviewDialog.vue', import.meta.url), 'utf8')
+  assert.ok(composer.includes('@cross-review='))
+  assert.ok(dialog.includes("watch(() => props.open"))
+  assert.ok(dialog.includes('/api/goals/cross-review-settings'))
+  assert.ok(goalController.includes('strict_review_candidates: input.strict_review_candidates'))
+})
+
+test('Cross-Review deactivation closes the dialog and removes its key listener', () => {
+  const dialog = readFileSync(new URL('../src/components/CrossReviewDialog.vue', import.meta.url), 'utf8')
+  assert.match(pane, /onDeactivated\(\(\) => \{[\s\S]*?goalController\.isCrossReviewOpen\.value = false/)
+  assert.ok(dialog.includes("document.removeEventListener('keydown', onDocumentKeydown)"))
+  assert.ok(composer.includes('!isGoalSetupOpen && !isCrossReviewOpen && !isManagedChat'))
+})

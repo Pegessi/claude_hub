@@ -7,9 +7,10 @@ from enum import Enum
 from typing import Any, Literal
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from .chat_image import ChatImageAttachment
+from .schema_domains.runtime import PROVIDER_EFFORT_ENV_KEYS, REASONING_EFFORTS, AgentType
 
 GOAL_OBJECTIVE_MAX_LENGTH = 4000
 GOAL_STEER_INPUT_MAX_LENGTH = 32_000
@@ -161,7 +162,53 @@ class GoalStrictReviewRound(BaseModel):
     created_at: datetime = Field(default_factory=utc_now)
 
 
-class GoalRun(BaseModel):
+StrictReviewPreset = Literal["standard", "mr_slim", "bug_only", "readonly_brief"]
+StrictReviewMode = Literal["single", "dual"]
+
+
+class CrossReviewModelPreference(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    provider: Literal["maso", "codex", "claude", "cursor", "traex"]
+    model: str | None = Field(default=None, max_length=120)
+    effort: str | None = Field(default=None, max_length=32)
+
+    @model_validator(mode="after")
+    def validate_effort(self) -> "CrossReviewModelPreference":
+        if self.effort is not None:
+            if self.effort not in REASONING_EFFORTS:
+                raise ValueError(f"effort must be one of {', '.join(sorted(REASONING_EFFORTS))}")
+            if not PROVIDER_EFFORT_ENV_KEYS.get(AgentType(self.provider)):
+                raise ValueError(f"{self.provider} Chat has no separate reasoning-effort setting")
+        return self
+
+    @field_validator("model", "effort", mode="before")
+    @classmethod
+    def strip_blank(cls, value: object) -> object:
+        return (value.strip() or None) if isinstance(value, str) else value
+
+
+class StrictReviewOptions(BaseModel):
+    strict_review: bool = False
+    strict_review_preset: StrictReviewPreset = "standard"
+    strict_review_mode: StrictReviewMode | None = None
+    strict_review_candidates: list[CrossReviewModelPreference] | None = Field(
+        default=None, max_length=8
+    )
+    strict_review_briefing: bool = False
+    strict_review_mr_description: bool = False
+    strict_review_push_branch: bool = False
+
+    @model_validator(mode="after")
+    def validate_review_options(self) -> "StrictReviewOptions":
+        if self.strict_review_preset == "readonly_brief" and self.strict_review_push_branch:
+            raise ValueError("Read-only audit preset cannot push branches")
+        if self.strict_review_preset != "standard":
+            self.strict_review = True
+        return self
+
+
+class GoalRun(StrictReviewOptions):
     id: str = Field(default_factory=lambda: str(uuid4()))
     tab_id: str
     execution_owner: Literal["hub_managed", "provider_native"] = "hub_managed"
@@ -222,12 +269,14 @@ class GoalRun(BaseModel):
     # Additive ``strict_review`` cross-model consensus gate. When enabled, the
     # Goal stays Hub-managed and intercepts ``complete`` to run an independent
     # cross-model review subagent before allowing completion.
-    strict_review: bool = False
     strict_review_cycle: int = Field(default=1, ge=1)
     strict_review_rounds: int = Field(default=0, ge=0, le=GOAL_STRICT_REVIEW_HARD_MAX_ROUNDS)
     strict_review_max_rounds: int = Field(
         default=GOAL_STRICT_REVIEW_MAX_ROUNDS, ge=1, le=GOAL_STRICT_REVIEW_HARD_MAX_ROUNDS
     )
+    strict_review_push_pending: bool = False
+    strict_review_push_attempts: int = Field(default=0, ge=0)
+    strict_review_push_target: str | None = None
     strict_review_in_progress: bool = False
     strict_review_subagent_id: str | None = None
     strict_review_feedback: str | None = Field(default=None, max_length=GOAL_STEER_INPUT_MAX_LENGTH)
@@ -249,14 +298,13 @@ class GoalRun(BaseModel):
         return value
 
 
-class GoalRunCreate(BaseModel):
+class GoalRunCreate(StrictReviewOptions):
     attachments: list[ChatImageAttachment] = Field(default_factory=list, max_length=10)
     objective: str = Field(min_length=1, max_length=GOAL_OBJECTIVE_MAX_LENGTH)
     client_request_id: str = Field(min_length=1, max_length=128)
     # Additive and optional: absent callers keep the previous start-immediately
     # behaviour byte for byte.
     plan_first: bool = False
-    strict_review: bool = False
 
     @field_validator("objective", "client_request_id")
     @classmethod

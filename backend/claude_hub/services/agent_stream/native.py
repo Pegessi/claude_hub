@@ -73,6 +73,7 @@ from ...models import (
     StreamModeOption,
     StreamReasoningEffortOption,
 )
+from ...models.schema_domains.runtime import REASONING_EFFORTS
 from ..agent_execution_policy import EXECUTION_POLICY as EXECUTION_POLICY
 from ..provider_proxy import provider_subprocess_env, redact_provider_proxy_diagnostic
 from .fork_seed import wrap_fork_seed_history
@@ -251,7 +252,7 @@ _OSC_RE = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
 _MARKER_RE = re.compile(r"\s*\((default|current)\)\s*$", re.IGNORECASE)
 _MODELS_POSITIVE_TTL_S = 600.0  # successful probe: 10 minutes
 _MODELS_NEGATIVE_TTL_S = 60.0  # failed probe (static fallback): 1 minute
-_REASONING_EFFORTS = {"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"}
+_REASONING_EFFORTS = set(REASONING_EFFORTS)
 _REASONING_LABELS = {
     "none": "None",
     "minimal": "Minimal",

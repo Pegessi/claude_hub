@@ -5,10 +5,10 @@ from .controller import (
     CancelCallback,
     DispatchCallback,
     GoalRunController,
-    build_continuation_prompt,
 )
 from .native import NativeGoalResolver
 from .policy import GoalPolicyError
+from .prompts import build_continuation_prompt
 from .store import GoalRunStore
 from .strict_review import (
     StrictReviewerCallback,

@@ -15,6 +15,28 @@ from ...models.goal_run import (
 )
 from ..local_storage import document_exists, read_document, write_document
 
+REVIEW_OPTION_NAMES = set(GoalRunCreate.model_fields) - {
+    "attachments",
+    "objective",
+    "client_request_id",
+    "plan_first",
+}
+
+
+def _normalized_create_input(tab_id: str, request: GoalRunCreate) -> dict[str, object]:
+    from .images import image_fingerprint
+
+    supplied: dict[str, object] = {"tab_id": tab_id, "objective": request.objective}
+    fingerprint = image_fingerprint(request.attachments)
+    if fingerprint:
+        supplied["images"] = fingerprint
+    if request.plan_first:
+        supplied["plan_first"] = True
+    supplied.update(
+        request.model_dump(mode="json", include=REVIEW_OPTION_NAMES, exclude_defaults=True)
+    )
+    return supplied
+
 
 class GoalRunStore:
     def __init__(self, path: Path) -> None:
@@ -45,7 +67,7 @@ class GoalRunStore:
                 key: {
                     name: item
                     for name, item in value.items()
-                    if name in {"tab_id", "objective", "images", "plan_first", "strict_review"}
+                    if name in {"tab_id", "objective", "images", "plan_first", *REVIEW_OPTION_NAMES}
                 }
                 for key, value in payload.get("create_inputs", {}).items()
             }
@@ -129,16 +151,7 @@ class GoalRunStore:
                     "objective": prior.objective,
                 },
             )
-            from .images import image_fingerprint
-
-            supplied: dict[str, object] = {"tab_id": tab_id, "objective": request.objective}
-            fingerprint = image_fingerprint(request.attachments)
-            if fingerprint:
-                supplied["images"] = fingerprint
-            if request.plan_first:
-                supplied["plan_first"] = True
-            if request.strict_review:
-                supplied["strict_review"] = True
+            supplied = _normalized_create_input(tab_id, request)
             if original != supplied:
                 raise ValueError("client_request_id was already used for another create")
             return prior.model_copy(deep=True)
@@ -147,16 +160,13 @@ class GoalRunStore:
         self, goal: GoalRun, client_request_id: str, request: GoalRunCreate | None = None
     ) -> GoalRun:
         with self._lock:
-            replay = self.replay_create(
-                goal.tab_id,
-                request
-                or GoalRunCreate(
-                    objective=goal.objective,
-                    client_request_id=client_request_id,
-                    plan_first=goal.plan_first,
-                    strict_review=goal.strict_review,
-                ),
+            effective_request = request or GoalRunCreate(
+                objective=goal.objective,
+                client_request_id=client_request_id,
+                plan_first=goal.plan_first,
+                **goal.model_dump(include=REVIEW_OPTION_NAMES),
             )
+            replay = self.replay_create(goal.tab_id, effective_request)
             if replay is not None:
                 return replay
             if any(
@@ -170,16 +180,9 @@ class GoalRunStore:
                 raise ValueError("tab already has an unfinished goal")
             self._goals[goal.id] = goal.model_copy(deep=True)
             self._create_requests[client_request_id] = goal.id
-            self._create_inputs[client_request_id] = {
-                "tab_id": goal.tab_id,
-                "objective": goal.objective,
-            }
-            if goal.pending_image_fingerprint:
-                self._create_inputs[client_request_id]["images"] = goal.pending_image_fingerprint
-            if goal.plan_first:
-                self._create_inputs[client_request_id]["plan_first"] = True
-            if goal.strict_review:
-                self._create_inputs[client_request_id]["strict_review"] = True
+            self._create_inputs[client_request_id] = _normalized_create_input(
+                goal.tab_id, effective_request
+            )
             try:
                 self._save()
             except Exception:

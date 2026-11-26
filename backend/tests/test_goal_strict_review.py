@@ -26,11 +26,11 @@ from claude_hub.services.goal_run import (
     GoalRunStore,
     StrictReviewOutcome,
 )
-from claude_hub.services.goal_run.controller import (
+from claude_hub.services.goal_run.native import NativeGoalConnection
+from claude_hub.services.goal_run.prompts import (
     build_continuation_prompt,
     build_dispatch_prompt,
 )
-from claude_hub.services.goal_run.native import NativeGoalConnection
 from claude_hub.services.goal_run.strict_review import (
     _run_git_command,
     build_strict_review_prompt,
@@ -40,6 +40,31 @@ from claude_hub.services.goal_run.strict_review import (
     run_subagent_strict_review,
     select_cross_reviewer_candidates,
 )
+
+
+@pytest.fixture
+def push_checkout(tmp_path, monkeypatch):
+    """Use an actual clean checkout even in controller lifecycle tests."""
+    from claude_hub.services.ttyd_manager import ttyd_manager
+
+    repo = tmp_path / "checkout"
+    repo.mkdir()
+    for args in [
+        ("init", "-b", "feature"),
+        (
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.test",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "initial",
+        ),
+    ]:
+        subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True)
+    monkeypatch.setattr(ttyd_manager, "get_tab", lambda _: SimpleNamespace(cwd=str(repo)))
+    return repo
 
 
 def complete_envelope(summary: str = "Implemented and verified") -> str:
@@ -1359,3 +1384,746 @@ async def test_plan_first_and_strict_review_planning_turn_complete_signal_parks_
     assert after_plan.strict_review_in_progress is False
     assert after_plan.strict_review_rounds == 0
     assert after_plan.status_message == "The plan awaits your approval before the Goal continues"
+
+
+def test_cross_review_preferences_and_consensus():
+    from claude_hub.models.goal_run import CrossReviewModelPreference, GoalStrictReviewFinding
+    from claude_hub.services.cross_reviewer import select_cross_reviewer_candidates
+    from claude_hub.services.goal_run.strict_review import (
+        StrictReviewOutcome,
+        merge_strict_review_outcomes,
+    )
+
+    preferences = [
+        CrossReviewModelPreference(provider="codex", model="reviewer-alpha"),
+        CrossReviewModelPreference(provider="claude", model="reviewer-beta"),
+    ]
+    candidates = select_cross_reviewer_candidates(
+        AgentType.CLAUDE, preferred_candidates=preferences
+    )
+    assert candidates[0].model == "reviewer-alpha"
+    assert candidates[-1].model == "reviewer-beta" or candidates[-1].provider == "claude"
+    a = StrictReviewOutcome("PASS", "clear", [], "codex", "reviewer-alpha")
+    b = StrictReviewOutcome(
+        "PASS",
+        "issue",
+        [
+            GoalStrictReviewFinding(
+                severity="P1",
+                file="a.py:3",
+                summary="Missing validation causes data loss",
+                fix="Validate input",
+            )
+        ],
+        "claude",
+        "reviewer-beta",
+    )
+    merged = merge_strict_review_outcomes([a, b])
+    assert merged.verdict == "BLOCK"
+    assert merged.findings[0].severity == "P1"
+    assert merged.reviewer_provider == "codex+claude"
+
+
+def test_cross_review_presets_and_settings(tmp_path, monkeypatch):
+    from pydantic import ValidationError
+
+    from claude_hub.models.goal_run import GoalRunCreate
+    from claude_hub.services import cross_review_settings as settings_module
+
+    monkeypatch.setattr(settings_module, "resolve_runtime_home", lambda: tmp_path)
+    with pytest.raises(ValidationError, match="Read-only audit preset cannot push branches"):
+        settings_module.CrossReviewSettings(
+            default_preset="readonly_brief", push_remote_branch=True
+        )
+    with pytest.raises(ValidationError, match="Read-only audit preset cannot push branches"):
+        GoalRunCreate(
+            objective="audit",
+            client_request_id="id",
+            strict_review_preset="readonly_brief",
+            strict_review_push_branch=True,
+        )
+    request = GoalRunCreate(
+        objective="audit", client_request_id="id", strict_review_preset="mr_slim"
+    )
+    assert request.strict_review
+    saved = settings_module.CrossReviewSettings(review_mode="dual")
+    settings_module.write_cross_review_settings(saved)
+    assert settings_module.read_cross_review_settings() == saved
+
+
+@pytest.mark.asyncio
+async def test_dual_review_concurrent_and_backup(tmp_path, monkeypatch):
+    from claude_hub.models.subagent import SubagentTurnStatus
+    from claude_hub.services import subagents
+    from claude_hub.services.goal_run import strict_review as sr
+    from claude_hub.services.ttyd_manager import ttyd_manager
+
+    monkeypatch.setattr(
+        ttyd_manager,
+        "get_tab",
+        lambda _: SimpleNamespace(agent_type=AgentType.CURSOR, env={}, cwd=str(tmp_path)),
+    )
+    candidates = [
+        sr.CrossReviewCandidate("codex", "reviewer-alpha"),
+        sr.CrossReviewCandidate("claude", "reviewer-beta"),
+        sr.CrossReviewCandidate("cursor", "reviewer-gamma"),
+    ]
+    monkeypatch.setattr(sr, "select_cross_reviewer_candidates", lambda *args, **kwargs: candidates)
+    entered = 0
+    both_started = asyncio.Event()
+    calls = []
+
+    class Service:
+        async def create(self, req):
+            nonlocal entered
+            calls.append(req.call_id)
+            entered += 1
+            if entered == 2:
+                both_started.set()
+            if entered <= 2:
+                await asyncio.wait_for(both_started.wait(), timeout=2)
+            return SimpleNamespace(id=req.model), SimpleNamespace(turn_id=req.model)
+
+        async def wait_turn(self, record_id, turn_id, wait_seconds):
+            text = (
+                "invalid"
+                if record_id == "reviewer-beta"
+                else '<goal-review>{"verdict":"PASS","summary":"verified","findings":[]}</goal-review>'
+            )
+            return SimpleNamespace(id=record_id), SimpleNamespace(
+                status=SubagentTurnStatus.COMPLETED, final_text=text
+            )
+
+    monkeypatch.setattr(subagents, "get_subagent_service", lambda: Service())
+    goal = GoalRun(tab_id="tab", objective="review", strict_review=True, strict_review_mode="dual")
+    outcome = await run_subagent_strict_review(goal, "done", 1)
+    assert outcome.verdict == "PASS"
+    assert outcome.reviewer_provider == "codex+cursor"
+    assert (
+        len(calls) == 3
+        and ":slot0:" in calls[0]
+        and ":slot1:" in calls[1]
+        and ":slot1:" in calls[2]
+    )
+
+
+def test_review_preset_rubrics():
+    for preset, phrase in [
+        ("mr_slim", "Mandatory Subtraction Gate"),
+        ("bug_only", "P2/P3 advisory only"),
+        ("readonly_brief", "repository untouched"),
+    ]:
+        goal = GoalRun(
+            tab_id="tab",
+            objective="review",
+            strict_review_preset=preset,
+            strict_review_briefing=True,
+        )
+        prompt = build_strict_review_prompt(goal, "turn", "done", 1)
+        assert phrase in prompt
+        assert "3-Minute Review Briefing" in prompt
+
+
+@pytest.mark.asyncio
+async def test_push_continuation_waits_for_review_pass(tmp_path, push_checkout):
+    prompts = []
+
+    async def dispatch(goal, prompt):
+        prompts.append(prompt)
+        return f"turn-{len(prompts)}"
+
+    async def reviewer(goal, text, round_number):
+        return StrictReviewOutcome("PASS", "verified", [], "codex")
+
+    controller = GoalRunController(
+        GoalRunStore(tmp_path / "goals.json"), dispatch, strict_reviewer=reviewer
+    )
+    goal = await controller.create_and_start(
+        "tab",
+        GoalRunCreate(
+            objective="review",
+            client_request_id="push",
+            strict_review=True,
+            strict_review_push_branch=True,
+        ),
+    )
+    assert "Do not push yet" in prompts[0]
+    goal = await controller.on_turn_completed(
+        "tab", goal.current_turn_id, "completed", complete_envelope()
+    )
+    assert goal.status == GoalRunStatus.ACTIVE and goal.strict_review_push_pending
+    assert "independent strict review passed" in prompts[1]
+    assert "never force push" in prompts[1]
+    changed = await controller.update_objective(goal.id, "edit", "changed objective")
+    assert not changed.strict_review_push_pending and changed.strict_review_cycle == 2
+    goal = await controller.on_turn_completed(
+        "tab", changed.current_turn_id, "completed", complete_envelope()
+    )
+    assert goal.strict_review_push_pending
+    goal = await controller.on_turn_completed(
+        "tab", goal.current_turn_id, "completed", complete_envelope("Push reported")
+    )
+    assert goal.status == GoalRunStatus.COMPLETE
+
+
+def test_invalid_settings_and_effort_fall_back(tmp_path, monkeypatch):
+    from pydantic import ValidationError
+
+    from claude_hub.models.goal_run import CrossReviewModelPreference
+    from claude_hub.services import cross_review_settings as settings
+
+    monkeypatch.setattr(settings, "resolve_runtime_home", lambda: tmp_path)
+    path = tmp_path / "cross_review_settings.json"
+    for contents in ('{"review_mode":', '{"review_mode":"invalid"}'):
+        path.write_text(contents)
+        assert settings.read_cross_review_settings() == settings.CrossReviewSettings()
+    for provider in ("maso", "claude", "cursor"):
+        with pytest.raises(ValidationError, match="no separate reasoning-effort"):
+            CrossReviewModelPreference(provider=provider, effort="high")
+    assert CrossReviewModelPreference(provider="codex", effort="high").effort == "high"
+
+
+@pytest.mark.asyncio
+async def test_push_approval_interruption_and_recovery(tmp_path, push_checkout):
+    async def dispatch(goal, prompt):
+        return goal.pending_step_id
+
+    async def reviewer(goal, text, round_number):
+        return StrictReviewOutcome("PASS", "verified", [], "codex")
+
+    manager = GoalRunController(
+        GoalRunStore(tmp_path / "goals.json"), dispatch, strict_reviewer=reviewer
+    )
+    goal = await manager.create_and_start(
+        "synthetic",
+        GoalRunCreate(
+            objective="review",
+            client_request_id="create",
+            strict_review=True,
+            strict_review_push_branch=True,
+        ),
+    )
+    goal = await manager.on_turn_completed(
+        "synthetic", goal.current_turn_id, "completed", complete_envelope()
+    )
+    assert goal.strict_review_push_pending and goal.strict_review_push_attempts == 1
+    paused = await manager.pause(goal.id, "pause")
+    assert not paused.strict_review_push_pending and paused.strict_review_push_target is None
+    assert paused.strict_review_cycle == 2 and paused.strict_review_rounds == 0
+    assert paused.strict_review_push_attempts == 1
+    resumed = await manager.resume(goal.id, "resume")
+    assert not resumed.strict_review_push_pending and resumed.strict_review_push_attempts == 1
+    resumed = await manager.on_turn_completed(
+        "synthetic", resumed.current_turn_id, "completed", complete_envelope()
+    )
+    assert resumed.strict_review_push_pending and resumed.strict_review_push_attempts == 2
+    manager.recover()
+    recovered = manager.get(goal.id)
+    assert not recovered.strict_review_push_pending and recovered.strict_review_push_target is None
+    assert recovered.strict_review_cycle == 3 and recovered.strict_review_push_attempts == 2
+
+
+@pytest.mark.asyncio
+async def test_push_approval_tracks_git_candidate(tmp_path, monkeypatch):
+    from claude_hub.services.ttyd_manager import ttyd_manager
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    def git(*args):
+        return subprocess.run(
+            ["git", "-C", str(repo), *args], check=True, capture_output=True, text=True
+        ).stdout.strip()
+
+    git("init", "-b", "main")
+    git("config", "user.name", "Test")
+    git("config", "user.email", "test@example.test")
+    (repo / "file.txt").write_text("one")
+    git("add", "file.txt")
+    git("commit", "-m", "initial")
+    monkeypatch.setattr(ttyd_manager, "get_tab", lambda _: SimpleNamespace(cwd=str(repo)))
+
+    async def dispatch(goal, prompt):
+        return goal.pending_step_id
+
+    async def reviewer(goal, text, round_number):
+        return StrictReviewOutcome("PASS", "verified", [], "codex")
+
+    manager = GoalRunController(
+        GoalRunStore(tmp_path / "goals.json"), dispatch, strict_reviewer=reviewer
+    )
+    req = GoalRunCreate(
+        objective="review",
+        client_request_id="first",
+        strict_review=True,
+        strict_review_push_branch=True,
+    )
+    goal = await manager.create_and_start("protected", req)
+    result = await manager.on_turn_completed(
+        "protected", goal.current_turn_id, "completed", complete_envelope()
+    )
+    assert result.status == GoalRunStatus.COMPLETE and "Protected" in result.status_message
+    git("checkout", "-b", "feature")
+    goal = await manager.create_and_start(
+        "feature", req.model_copy(update={"client_request_id": "second"})
+    )
+    result = await manager.on_turn_completed(
+        "feature", goal.current_turn_id, "completed", complete_envelope()
+    )
+    assert (
+        result.strict_review_push_target == f"{repo.resolve()}@feature:{git('rev-parse', 'HEAD')}"
+    )
+    (repo / "file.txt").write_text("two")
+    git("add", "file.txt")
+    git("commit", "-m", "change")
+    result = await manager.on_turn_completed(
+        "feature", result.current_turn_id, "completed", complete_envelope()
+    )
+    assert result.strict_review_cycle == 2
+    assert result.strict_review_push_pending and result.strict_review_push_target.endswith(
+        git("rev-parse", "HEAD")
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "status,signal",
+    [
+        ("cancelled", "complete"),
+        ("failed", "complete"),
+        ("completed", "continue"),
+        ("completed", "blocked"),
+        ("completed", "needs_input"),
+    ],
+)
+async def test_interrupted_push_never_retains_approval(tmp_path, push_checkout, status, signal):
+    async def dispatch(goal, prompt):
+        return goal.pending_step_id
+
+    async def reviewer(goal, text, round_number):
+        return StrictReviewOutcome("PASS", "verified", [], "codex")
+
+    manager = GoalRunController(
+        GoalRunStore(tmp_path / "goals.json"), dispatch, strict_reviewer=reviewer
+    )
+    goal = await manager.create_and_start(
+        "tab",
+        GoalRunCreate(
+            objective="review",
+            client_request_id="id",
+            strict_review=True,
+            strict_review_push_branch=True,
+        ),
+    )
+    goal = await manager.on_turn_completed(
+        "tab", goal.current_turn_id, "completed", complete_envelope()
+    )
+    assert goal.strict_review_push_pending
+    result = await manager.on_turn_completed(
+        "tab", goal.current_turn_id, status, f'<goal-status state="{signal}">waiting</goal-status>'
+    )
+    assert not result.strict_review_push_pending
+    assert result.strict_review_push_target is None
+    assert result.strict_review_cycle == 2
+
+
+@pytest.mark.asyncio
+async def test_candidate_changes_during_review_never_authorize_push(tmp_path, monkeypatch):
+    from claude_hub.services.ttyd_manager import ttyd_manager
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    def git(*args):
+        return subprocess.run(
+            ["git", "-C", str(repo), *args], check=True, capture_output=True, text=True
+        ).stdout.strip()
+
+    git("init", "-b", "feature")
+    git("config", "user.name", "Test")
+    git("config", "user.email", "test@example.test")
+    (repo / "file.txt").write_text("initial")
+    git("add", "file.txt")
+    git("commit", "-m", "initial")
+    monkeypatch.setattr(ttyd_manager, "get_tab", lambda _: SimpleNamespace(cwd=str(repo)))
+
+    async def dispatch(goal, prompt):
+        return goal.pending_step_id
+
+    async def reviewer(goal, text, round_number):
+        (repo / "file.txt").write_text("changed during review")
+        return StrictReviewOutcome("PASS", "verified", [], "codex")
+
+    manager = GoalRunController(
+        GoalRunStore(tmp_path / "goals.json"), dispatch, strict_reviewer=reviewer
+    )
+    goal = await manager.create_and_start(
+        "tab",
+        GoalRunCreate(
+            objective="review",
+            client_request_id="id",
+            strict_review=True,
+            strict_review_push_branch=True,
+        ),
+    )
+    result = await manager.on_turn_completed(
+        "tab", goal.current_turn_id, "completed", complete_envelope()
+    )
+    assert result.status == GoalRunStatus.ACTIVE
+    assert not result.strict_review_push_pending and not result.strict_review_history
+    assert result.current_turn_id is not None
+
+
+@pytest.mark.asyncio
+async def test_push_candidate_reuses_approved_referenced_worktree(tmp_path, monkeypatch):
+    from claude_hub.services.goal_run.strict_review import inspect_push_candidate
+    from claude_hub.services.ttyd_manager import ttyd_manager
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    worktree = tmp_path / "workspace_worktree" / "feat-x"
+    worktree.mkdir(parents=True)
+    subprocess.run(["git", "init", "-b", "feat-x", str(worktree)], check=True, capture_output=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(worktree),
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.test",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "initial",
+        ],
+        check=True,
+        capture_output=True,
+    )
+    monkeypatch.setattr(ttyd_manager, "get_tab", lambda _: SimpleNamespace(cwd=str(workspace)))
+    goal = GoalRun(tab_id="tab", objective="Review the change", strict_review=True)
+    approved, reason = await inspect_push_candidate(goal, f"Implemented in {worktree}")
+    assert reason is None and approved is not None
+    goal.strict_review_push_target = approved
+    assert await inspect_push_candidate(goal, "Pushed feat-x to origin") == (approved, None)
+    other = worktree.parent / "other"
+    other.mkdir()
+    assert await inspect_push_candidate(goal, f"Pushed from {other}") == (
+        None,
+        "Push turn referenced a different worktree",
+    )
+
+
+@pytest.mark.asyncio
+async def test_multiple_worktrees_skip_automatic_push(tmp_path, monkeypatch):
+    from claude_hub.services.ttyd_manager import ttyd_manager
+
+    root = tmp_path / "project_worktree"
+    candidate = root / "candidate"
+    baseline = root / "baseline"
+    candidate.mkdir(parents=True)
+    baseline.mkdir()
+    subprocess.run(
+        ["git", "init", "-b", "feature", str(candidate)], check=True, capture_output=True
+    )
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(candidate),
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.test",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "initial",
+        ],
+        check=True,
+        capture_output=True,
+    )
+    monkeypatch.setattr(ttyd_manager, "get_tab", lambda _: SimpleNamespace(cwd=str(candidate)))
+    calls = []
+
+    async def dispatch(goal, prompt):
+        calls.append(prompt)
+        return goal.pending_step_id
+
+    async def reviewer(goal, text, round_number):
+        return StrictReviewOutcome("PASS", "verified", [], "codex")
+
+    manager = GoalRunController(
+        GoalRunStore(tmp_path / "goals.json"), dispatch, strict_reviewer=reviewer
+    )
+    goal = await manager.create_and_start(
+        "tab",
+        GoalRunCreate(
+            objective=f"Review {candidate} against {baseline}",
+            client_request_id="multi",
+            strict_review=True,
+            strict_review_push_branch=True,
+        ),
+    )
+    result = await manager.on_turn_completed(
+        "tab", goal.current_turn_id, "completed", complete_envelope()
+    )
+    assert result.status == GoalRunStatus.COMPLETE
+    assert result.strict_review_rounds == 1 and not result.strict_review_push_pending
+    assert "automatic push skipped: Multiple worktrees referenced" in result.status_message
+    assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_repeated_changed_push_candidate_stops_at_hard_cap(tmp_path, monkeypatch):
+    from claude_hub.models.goal_run import GOAL_STRICT_REVIEW_HARD_MAX_ROUNDS
+    from claude_hub.services.ttyd_manager import ttyd_manager
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    def git(*args):
+        subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True)
+
+    git("init", "-b", "feature")
+    git("config", "user.name", "Test")
+    git("config", "user.email", "test@example.test")
+    git("commit", "--allow-empty", "-m", "initial")
+    monkeypatch.setattr(ttyd_manager, "get_tab", lambda _: SimpleNamespace(cwd=str(repo)))
+
+    async def dispatch(goal, prompt):
+        return goal.pending_step_id
+
+    async def reviewer(goal, text, round_number):
+        return StrictReviewOutcome("PASS", "verified", [], "codex")
+
+    manager = GoalRunController(
+        GoalRunStore(tmp_path / "goals.json"), dispatch, strict_reviewer=reviewer
+    )
+    goal = await manager.create_and_start(
+        "tab",
+        GoalRunCreate(
+            objective="review",
+            client_request_id="cap",
+            strict_review=True,
+            strict_review_push_branch=True,
+        ),
+    )
+    goal = await manager.on_turn_completed(
+        "tab", goal.current_turn_id, "completed", complete_envelope()
+    )
+    for index in range(GOAL_STRICT_REVIEW_HARD_MAX_ROUNDS):
+        assert goal.strict_review_push_pending
+        git("commit", "--allow-empty", "-m", f"change-{index}")
+        previous_turn = goal.current_turn_id
+        goal = await manager.on_turn_completed(
+            "tab", previous_turn, "completed", complete_envelope()
+        )
+    assert goal.status == GoalRunStatus.BLOCKED
+    assert goal.strict_review_cycle == GOAL_STRICT_REVIEW_HARD_MAX_ROUNDS + 1
+    assert not goal.strict_review_push_pending and not goal.strict_review_in_progress
+    assert previous_turn in goal.completed_turn_ids and goal.current_turn_id is None
+    assert "push manually or steer the Goal" in goal.status_message
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "signal", ['<goal-status state="continue">continue</goal-status>', "No status emitted"]
+)
+@pytest.mark.parametrize("recovery", ["resume", "steer"])
+async def test_incomplete_push_turns_stop_at_cap_and_user_can_recover(
+    tmp_path, monkeypatch, signal, recovery
+):
+    from claude_hub.models.goal_run import GOAL_STRICT_REVIEW_HARD_MAX_ROUNDS
+    from claude_hub.services.ttyd_manager import ttyd_manager
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    def git(*args):
+        subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True)
+
+    git("init", "-b", "feature")
+    git("config", "user.name", "Test")
+    git("config", "user.email", "test@example.test")
+    git("commit", "--allow-empty", "-m", "initial")
+    monkeypatch.setattr(ttyd_manager, "get_tab", lambda _: SimpleNamespace(cwd=str(repo)))
+
+    async def dispatch(goal, prompt):
+        return goal.pending_step_id
+
+    async def reviewer(goal, text, round_number):
+        return StrictReviewOutcome("PASS", "verified", [], "codex")
+
+    manager = GoalRunController(
+        GoalRunStore(tmp_path / "goals.json"), dispatch, strict_reviewer=reviewer
+    )
+    goal = await manager.create_and_start(
+        "tab",
+        GoalRunCreate(
+            objective="review",
+            client_request_id="cap",
+            strict_review=True,
+            strict_review_push_branch=True,
+        ),
+    )
+    goal = await manager.on_turn_completed(
+        "tab", goal.current_turn_id, "completed", complete_envelope()
+    )
+    for attempt in range(GOAL_STRICT_REVIEW_HARD_MAX_ROUNDS):
+        assert goal.strict_review_push_pending
+        assert goal.strict_review_push_attempts == attempt + 1
+        git("commit", "--allow-empty", "-m", f"change-{attempt}")
+        goal = await manager.on_turn_completed("tab", goal.current_turn_id, "completed", signal)
+        if attempt + 1 < GOAL_STRICT_REVIEW_HARD_MAX_ROUNDS:
+            assert goal.status == GoalRunStatus.ACTIVE
+            goal = await manager.on_turn_completed(
+                "tab", goal.current_turn_id, "completed", complete_envelope()
+            )
+    assert goal.status == GoalRunStatus.BLOCKED
+    assert goal.dispatch_state == GoalDispatchState.IDLE and goal.current_turn_id is None
+    assert not goal.strict_review_push_pending
+    if recovery == "resume":
+        goal = await manager.resume(goal.id, "user-recovery")
+    else:
+        goal = await manager.steer(goal.id, "user-recovery", "Try again", "steer-turn")
+    assert goal.strict_review_push_attempts == 0
+    goal = await manager.on_turn_completed(
+        "tab", goal.current_turn_id, "completed", complete_envelope()
+    )
+    assert goal.strict_review_push_pending and goal.strict_review_push_attempts == 1
+
+
+@pytest.mark.asyncio
+async def test_repeated_changes_during_review_stop_at_push_cap(tmp_path, monkeypatch):
+    from claude_hub.models.goal_run import GOAL_STRICT_REVIEW_HARD_MAX_ROUNDS
+    from claude_hub.services.ttyd_manager import ttyd_manager
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    def git(*args):
+        subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True)
+
+    git("init", "-b", "feature")
+    git("config", "user.name", "Test")
+    git("config", "user.email", "test@example.test")
+    git("commit", "--allow-empty", "-m", "initial")
+    monkeypatch.setattr(ttyd_manager, "get_tab", lambda _: SimpleNamespace(cwd=str(repo)))
+
+    async def dispatch(goal, prompt):
+        return goal.pending_step_id
+
+    async def reviewer(goal, text, round_number):
+        git("commit", "--allow-empty", "-m", "changed during review")
+        return StrictReviewOutcome("PASS", "verified", [], "codex")
+
+    manager = GoalRunController(
+        GoalRunStore(tmp_path / "goals.json"), dispatch, strict_reviewer=reviewer
+    )
+    goal = await manager.create_and_start(
+        "tab",
+        GoalRunCreate(
+            objective="review",
+            client_request_id="cap",
+            strict_review=True,
+            strict_review_push_branch=True,
+        ),
+    )
+    for _ in range(GOAL_STRICT_REVIEW_HARD_MAX_ROUNDS):
+        goal = await manager.on_turn_completed(
+            "tab", goal.current_turn_id, "completed", complete_envelope()
+        )
+    assert goal.status == GoalRunStatus.BLOCKED
+    assert goal.strict_review_push_attempts == GOAL_STRICT_REVIEW_HARD_MAX_ROUNDS
+    assert goal.dispatch_state == GoalDispatchState.IDLE and goal.current_turn_id is None
+    assert not goal.strict_review_push_pending
+    assert "checkout changed during review" in goal.status_message
+
+
+@pytest.mark.asyncio
+async def test_missing_chat_never_authorizes_a_push(tmp_path, monkeypatch):
+    from claude_hub.services.ttyd_manager import ttyd_manager
+
+    monkeypatch.setattr(ttyd_manager, "get_tab", lambda _: None)
+    sent = []
+
+    async def dispatch(goal, prompt):
+        sent.append(prompt)
+        return goal.pending_step_id
+
+    async def reviewer(goal, text, round_number):
+        return StrictReviewOutcome("PASS", "verified", [], "codex")
+
+    ctrl = GoalRunController(
+        GoalRunStore(tmp_path / "goals.json"), dispatch, strict_reviewer=reviewer
+    )
+    goal = await ctrl.create_and_start(
+        "missing",
+        GoalRunCreate(
+            objective="review",
+            client_request_id="create",
+            strict_review=True,
+            strict_review_push_branch=True,
+        ),
+    )
+    result = await ctrl.on_turn_completed(
+        "missing", goal.current_turn_id, "completed", complete_envelope()
+    )
+    assert result.status == GoalRunStatus.COMPLETE
+    assert not result.strict_review_push_pending
+    assert "automatic push skipped" in result.status_message
+    assert len(sent) == 1
+
+
+@pytest.mark.parametrize(
+    "effort", ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]
+)
+def test_review_effort_uses_subagent_runtime_contract(effort):
+    from claude_hub.models.goal_run import CrossReviewModelPreference
+    from claude_hub.services.subagents import REASONING_EFFORTS
+
+    assert effort in REASONING_EFFORTS
+    assert CrossReviewModelPreference(provider="codex", effort=effort).effort == effort
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("uncertain", [False, True])
+async def test_recoverable_push_failure_pauses_and_requires_fresh_review(
+    tmp_path, push_checkout, uncertain
+):
+    async def dispatch(goal, prompt):
+        return goal.pending_step_id
+
+    async def reviewer(goal, text, round_number):
+        return StrictReviewOutcome("PASS", "verified", [], "codex")
+
+    ctrl = GoalRunController(
+        GoalRunStore(tmp_path / "goals.json"), dispatch, strict_reviewer=reviewer
+    )
+    goal = await ctrl.create_and_start(
+        "tab",
+        GoalRunCreate(
+            objective="review",
+            client_request_id="create",
+            strict_review=True,
+            strict_review_push_branch=True,
+        ),
+    )
+    goal = await ctrl.on_turn_completed(
+        "tab", goal.current_turn_id, "completed", complete_envelope()
+    )
+    turn_id = goal.current_turn_id
+    result = await ctrl.on_turn_completed(
+        "tab", turn_id, "failed", "", retryable=True, delivery_uncertain=uncertain
+    )
+    assert result.status == GoalRunStatus.PAUSED
+    assert result.dispatch_state == (
+        GoalDispatchState.UNCERTAIN if uncertain else GoalDispatchState.IDLE
+    )
+    assert result.current_turn_id == (turn_id if uncertain else None)
+    assert not result.strict_review_push_pending
+    assert result.strict_review_push_target is None
+    assert result.strict_review_cycle == 2
+    assert result.strict_review_push_attempts == 1

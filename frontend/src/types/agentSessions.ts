@@ -189,7 +189,23 @@ export interface ChatGoalStrictReviewRound {
   created_at: string
 }
 
-export interface ChatGoal {
+export type StrictReviewPreset = 'standard' | 'mr_slim' | 'bug_only' | 'readonly_brief'
+export type StrictReviewMode = 'single' | 'dual'
+export interface CrossReviewCandidate {
+  provider: 'maso' | 'codex' | 'claude' | 'cursor' | 'traex'
+  model: string | null
+  effort: string | null
+}
+export interface StrictReviewOptions {
+  strict_review_preset?: StrictReviewPreset
+  strict_review_mode?: StrictReviewMode | null
+  strict_review_candidates?: CrossReviewCandidate[] | null
+  strict_review_briefing?: boolean
+  strict_review_mr_description?: boolean
+  strict_review_push_branch?: boolean
+}
+
+export interface ChatGoal extends StrictReviewOptions {
   id: string
   tab_id: string
   objective: string
@@ -244,7 +260,7 @@ export interface ChatGoal {
   completed_at?: string | null
 }
 
-export interface ChatGoalCreate {
+export interface ChatGoalCreate extends StrictReviewOptions {
   attachments?: (WorkspaceAttachmentCreate & { preview_is_original?: boolean })[]
   objective: string
   client_request_id: string

@@ -61,6 +61,14 @@
 - Route managed Chat `unarchiveTab` and `deleteTab` calls through the Workspace session APIs, fail closed when Workspace session identity is missing, clear stale `?tab=` query parameters after tab switches or failed deep-link restores (without interfering with attachment preview history), remove duplicate full-width error banners in `App.vue` and `WorkspaceSummary.vue`, and separate Personal vs. Workspace tabs in `ArchivedSessionsPanel` and the sidebar archive counter.
 - Auto-expand a collapsed `Needs you` group in the Status sidebar view when switching back to Status or when a new unread/waiting session arrives, fix collapsed group header tooltips (`Click to expand`), and highlight the collapsed `Needs you` count badge.
 
+### feat: configurable Cross-Review & Slim Goals
+
+- Add workflow presets, reviewer priorities and optional dual consensus to the existing Goal review gate, with saved runtime defaults and a lazy Chat setup dialog.
+- Bind optional push continuation to the reviewed clean feature-branch checkout, and invalidate approval on interruption or candidate changes. Ambiguous worktrees skip automatic pushing, and repeated verification failures stop the Goal.
+- Bound automatic push attempts across incomplete turns and changes during review; explicit user recovery starts a fresh budget.
+- Preserve queued steering through single/dual review and recoverable push-turn failures. Dual consensus requires two valid verdicts; missing Chats cannot authorize a push.
+- Hydrate saved workflow choices without losing scope notes, and use the shared effort-request contract with an explicit provider-fallback disclosure.
+
 ### feat(feedback): replace board reaper task with silent turn and inline bilingual top-3 lessons
 
 - Replace board-visible `WorkspaceTask(internal_kind="feedback_reaper")` dispatch with a single-flight silent background ephemeral Chat turn using public-safe MASO catalog selection (`CLAUDE_HUB_FEEDBACK_MODEL` / `CLAUDE_HUB_PATROL_MODEL` / advertised lightweight high-reasoning model) with read-only CLI fallback and guaranteed ephemeral session archival.

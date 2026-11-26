@@ -26,6 +26,7 @@ from typing import Literal, Mapping, Optional, Tuple, cast
 from pydantic import BaseModel, ConfigDict, model_validator
 
 from ....models import AgentType
+from ....models.schema_domains.runtime import PROVIDER_EFFORT_ENV_KEYS
 
 
 class TransportKind(str, Enum):
@@ -408,7 +409,7 @@ REGISTRY: Mapping[AgentType, ProviderSpec] = MappingProxyType(
             model_env_key="CODEX_MODEL",
             model_configurable_in_managed=True,
             reasoning_effort=ReasoningEffortKind.ENV_KEY,
-            effort_env_keys=("CODEX_REASONING_EFFORT",),
+            effort_env_keys=PROVIDER_EFFORT_ENV_KEYS[AgentType.CODEX],
             hot_env_keys=("CODEX_MODEL", "CODEX_REASONING_EFFORT"),
             goals=GoalSpec(
                 api=NativeGoals.RPC_THREAD,
@@ -535,7 +536,7 @@ REGISTRY: Mapping[AgentType, ProviderSpec] = MappingProxyType(
             reasoning_effort=ReasoningEffortKind.ENV_KEY,
             # CODEX_REASONING_EFFORT is read first; TRAEX_REASONING_EFFORT is
             # the legacy fallback (providers/codex.py:646-648).
-            effort_env_keys=("CODEX_REASONING_EFFORT", "TRAEX_REASONING_EFFORT"),
+            effort_env_keys=PROVIDER_EFFORT_ENV_KEYS[AgentType.TRAEX],
             hot_env_keys=(
                 "CODEX_MODEL",
                 "CODEX_REASONING_EFFORT",

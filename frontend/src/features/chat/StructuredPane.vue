@@ -446,6 +446,7 @@ onDeactivated(() => {
   preview.close(false)
   settings.isAddMenuOpen.value = false
   goalController.isGoalSetupOpen.value = false
+  goalController.isCrossReviewOpen.value = false
   goalController.cancelGoalRefresh()
   timeline.deactivateViewport()
   suspendStreamForDeactivation()

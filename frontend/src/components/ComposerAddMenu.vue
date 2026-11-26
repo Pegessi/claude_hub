@@ -112,6 +112,25 @@
         </svg>
         <span>Set a Goal</span>
       </button>
+      <button
+        v-if="showGoal"
+        type="button"
+        role="menuitem"
+        :aria-disabled="Boolean(goalDisabledReason)"
+        :title="goalDisabledReason || 'Run configurable cross-model review and slimming'"
+        @click="select('crossReview')"
+      >
+        <svg
+          width="18"
+          height="18"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="1.6"
+          aria-hidden="true"
+        ><path d="M4 7h16M4 12h12M4 17h8M17 16l2 2 3-4" /></svg>
+        <span>Cross-Review &amp; Slim</span>
+      </button>
     </div>
   </div>
 </template>
@@ -134,6 +153,7 @@ const emit = defineEmits<{
   'update:open': [value: boolean]
   attachment: []
   goal: []
+  crossReview: []
   schedule: []
 }>()
 const rootEl = ref<HTMLElement | null>(null)
@@ -162,14 +182,15 @@ function toggle() {
   else showMenu()
 }
 
-function select(action: 'attachment' | 'goal' | 'schedule') {
+function select(action: 'attachment' | 'goal' | 'schedule' | 'crossReview') {
   if (action === 'attachment' && props.attachmentDisabledReason) return
-  if (action === 'goal' && props.goalDisabledReason) return
+  if ((action === 'goal' || action === 'crossReview') && props.goalDisabledReason) return
   // Restore focus before opening the dialog so its return target survives
   // removal of the menu item from the DOM. Keep file picking synchronous.
   close(true)
   if (action === 'attachment') emit('attachment')
   else if (action === 'goal') emit('goal')
+  else if (action === 'crossReview') emit('crossReview')
   else emit('schedule')
 }
 
@@ -213,7 +234,7 @@ onUnmounted(() => document.removeEventListener('pointerdown', handleOutsidePoint
 .composer-add-menu { position: relative; flex-shrink: 0; }
 .composer-add-trigger { display: flex; align-items: center; justify-content: center; width: 32px; height: 32px; padding: 0; border: 0; border-radius: var(--ch-radius-sm); color: var(--ch-color-text-muted); background: transparent; cursor: pointer; }
 .composer-add-trigger:hover, .composer-add-trigger[aria-expanded='true'] { color: var(--ch-color-text); background: var(--ch-color-surface-control-hover); }
-.composer-add-options { position: absolute; bottom: calc(100% + 8px); left: 0; z-index: 6; display: grid; gap: 2px; width: 200px; max-width: calc(100vw - 48px); padding: 5px; border: 1px solid var(--ch-color-border); border-radius: var(--ch-radius-md); background: var(--ch-color-surface); box-shadow: var(--ch-shadow-md); }
+.composer-add-options { position: absolute; bottom: calc(100% + 8px); left: 0; z-index: 6; display: grid; gap: 2px; width: 224px; max-width: calc(100vw - 48px); padding: 5px; border: 1px solid var(--ch-color-border); border-radius: var(--ch-radius-md); background: var(--ch-color-surface); box-shadow: var(--ch-shadow-md); }
 .composer-add-options button { display: flex; align-items: center; gap: 10px; padding: 9px 10px; border: 0; border-radius: var(--ch-radius-sm); color: var(--ch-color-text); background: transparent; font: inherit; font-size: 13px; text-align: left; cursor: pointer; }
 .composer-add-options svg { flex: 0 0 auto; color: var(--ch-color-text-muted); }
 .composer-add-options button:hover, .composer-add-options button:focus-visible { background: var(--ch-color-surface-control-hover); }

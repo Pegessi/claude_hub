@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import os
 from collections.abc import Callable
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -17,6 +19,13 @@ from ..models import (
 )
 from ..models.chat_image import ChatImageAttachment
 from ..models.goal_run import GoalObjectiveUpdate
+from ..models.schema_domains.runtime import REASONING_EFFORTS
+from ..services.cross_review_settings import (
+    CrossReviewSettings,
+    read_cross_review_settings,
+    write_cross_review_settings,
+)
+from ..services.cross_reviewer import read_cached_quota_map
 from ..services.goal_run import (
     GoalPolicyError,
     configure_goal_dispatch,
@@ -25,10 +34,71 @@ from ..services.goal_run import (
 )
 from ..services.goal_run.images import goal_image_input, pending_goal_images
 from ..services.goal_run.native import NativeGoalError
+from ..services.maso_discovery import discover_maso_service
 from ..services.ttyd_manager import ttyd_manager
 from .routes.goal_provider import resolve_goal_provider
 
 router = APIRouter(tags=["goals"])
+
+
+async def _cross_review_payload(settings: CrossReviewSettings) -> dict[str, object]:
+    models: list[str] = []
+    if (
+        not os.environ.get("PYTEST_CURRENT_TEST")
+        or os.environ.get("CLAUDE_HUB_ENABLE_CROSS_REVIEW_PROBE_IN_TESTS") == "1"
+    ):
+        try:
+            _, discovered, _ = await asyncio.wait_for(discover_maso_service({}), timeout=1.5)
+            models = [item.id for item in discovered]
+        except Exception:
+            pass
+    from ..models import AgentType
+    from ..services.agent_stream.providers.spec import get_spec
+
+    quotas = await read_cached_quota_map()
+    from ..services.agent_stream.native import _static_options
+
+    fallback = await asyncio.to_thread(
+        lambda: {
+            provider: [item.id for item in _static_options(provider)]
+            for provider in ("maso", "codex", "claude", "cursor", "traex")
+        }
+    )
+    providers = [
+        {
+            "provider": provider,
+            "label": label,
+            "models": (models or fallback[provider]) if provider == "maso" else fallback[provider],
+            "supports_effort": bool(get_spec(AgentType(provider)).effort_env_keys),
+            "effort_options": (
+                sorted(REASONING_EFFORTS) if get_spec(AgentType(provider)).effort_env_keys else []
+            ),
+            "quota_state": quotas[provider].state if provider in quotas else None,
+        }
+        for provider, label in [
+            ("maso", "Maso"),
+            ("codex", "Codex"),
+            ("claude", "Claude"),
+            ("cursor", "Cursor"),
+            ("traex", "Traex"),
+        ]
+    ]
+    return {"settings": settings, "providers": providers}
+
+
+@router.get("/api/goals/cross-review-settings")
+async def get_cross_review_settings(
+    current_user: User = Depends(get_current_user),
+) -> dict[str, object]:
+    return await _cross_review_payload(await asyncio.to_thread(read_cross_review_settings))
+
+
+@router.put("/api/goals/cross-review-settings")
+async def put_cross_review_settings(
+    settings: CrossReviewSettings, current_user: User = Depends(get_current_user)
+) -> dict[str, object]:
+    await asyncio.to_thread(write_cross_review_settings, settings)
+    return await _cross_review_payload(settings)
 
 
 async def _dispatch_goal_turn(goal: GoalRun, prompt: str) -> str:

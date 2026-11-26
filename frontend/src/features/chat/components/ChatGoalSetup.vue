@@ -78,12 +78,20 @@
       </div>
     </template>
   </GoalSetupDialog>
+  <CrossReviewDialog
+    :open="isCrossReviewOpen"
+    :busy="isGoalMutating"
+    :error="goalError"
+    @close="isCrossReviewOpen = false"
+    @submit="startGoal"
+  />
 </template>
 
 <script setup lang="ts">
 import { requireChatOwner, chatGoalKey, chatAttachmentsKey, chatDeliveryKey, chatImagesKey } from '../owners'
 import GoalSetupDialog from '@/components/GoalSetupDialog.vue'
-const { isGoalSetupOpen, isGoalMutating, isGoalHydrating, hydrateGoal, goalError, isGoalEditing, goal, startGoal, planFirstPreferred, strictReviewPreferred, planFirstDisabledReason } = requireChatOwner(chatGoalKey)
+import CrossReviewDialog from '@/components/CrossReviewDialog.vue'
+const { isCrossReviewOpen, isGoalSetupOpen, isGoalMutating, isGoalHydrating, hydrateGoal, goalError, isGoalEditing, goal, startGoal, planFirstPreferred, strictReviewPreferred, planFirstDisabledReason } = requireChatOwner(chatGoalKey)
 const { isPreparingAttachments, attachmentDisabledReason, triggerFilePicker, attachments, removeAttachment, handlePaste } = requireChatOwner(chatAttachmentsKey)
 const { composerError } = requireChatOwner(chatDeliveryKey)
 const { openImageLightbox } = requireChatOwner(chatImagesKey)

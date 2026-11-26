@@ -885,3 +885,33 @@ async def test_review_steer_api_retains_images_across_request_contexts(
     finally:
         release.set()
         await completion
+
+
+def test_cross_review_settings_api(goal_client, monkeypatch, tmp_path):
+    from claude_hub.services import cross_review_settings
+
+    monkeypatch.setattr(cross_review_settings, "resolve_runtime_home", lambda: tmp_path)
+    response = goal_client.get("/api/goals/cross-review-settings")
+    assert response.status_code == 200
+    settings = response.json()["settings"]
+    providers = {item["provider"]: item for item in response.json()["providers"]}
+    assert "ultra" in providers["codex"]["effort_options"]
+    assert providers["claude"]["effort_options"] == []
+    support = {item["provider"]: item["supports_effort"] for item in response.json()["providers"]}
+    assert support == {
+        "maso": False,
+        "codex": True,
+        "claude": False,
+        "cursor": False,
+        "traex": True,
+    }
+    assert settings["review_mode"] == "single"
+    settings["review_mode"] = "dual"
+    settings["preferred_candidates"] = [
+        {"provider": "codex", "model": "reviewer-alpha", "effort": "high"}
+    ]
+    assert goal_client.put("/api/goals/cross-review-settings", json=settings).status_code == 200
+    assert goal_client.get("/api/goals/cross-review-settings").json()["settings"] == settings
+    settings["default_preset"] = "readonly_brief"
+    settings["push_remote_branch"] = True
+    assert goal_client.put("/api/goals/cross-review-settings", json=settings).status_code == 422

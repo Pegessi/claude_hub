@@ -14,7 +14,7 @@ from claude_hub.models import (
 )
 from claude_hub.models.agent_stream import normalize_provider_usage
 from claude_hub.services.goal_run import GoalPolicyError, GoalRunController, GoalRunStore
-from claude_hub.services.goal_run.controller import build_continuation_prompt
+from claude_hub.services.goal_run.prompts import build_continuation_prompt
 from claude_hub.services.local_storage import read_document, write_document
 
 
@@ -117,6 +117,12 @@ def test_contract_validation_and_create_idempotency(tmp_path: Path) -> None:
         # Additive scope/review gates stay off for every existing caller.
         "plan_first": False,
         "strict_review": False,
+        "strict_review_preset": "standard",
+        "strict_review_mode": None,
+        "strict_review_candidates": None,
+        "strict_review_briefing": False,
+        "strict_review_mr_description": False,
+        "strict_review_push_branch": False,
     }
     with pytest.raises(ValidationError):
         GoalRunCreate(objective="x" * 4001, client_request_id="large")
@@ -1350,3 +1356,15 @@ async def test_fixed_resume_options_reject_deferral_without_mutating_goal(tmp_pa
     unchanged = manager.get(goal.id)
     assert unchanged.status == GoalRunStatus.PAUSED
     assert unchanged.idempotency == {"pause": "pause"}
+
+
+def test_native_goal_create_replay_uses_original_request(tmp_path):
+    store = GoalRunStore(tmp_path / "native-goals.json")
+    req = GoalRunCreate(objective="Native", client_request_id="native", strict_review_mode="dual")
+    native = GoalRun(tab_id="tab", objective="Native", execution_owner="provider_native")
+    created = store.create(native, req.client_request_id, req)
+    assert store.replay_create("tab", req).id == created.id
+    reloaded = GoalRunStore(tmp_path / "native-goals.json")
+    assert reloaded.replay_create("tab", req).id == created.id
+    with pytest.raises(ValueError, match="already used"):
+        reloaded.replay_create("tab", req.model_copy(update={"strict_review_mode": "single"}))

@@ -52,6 +52,8 @@ def test_launcher_forwards_actual_bind_port_to_backend_environment(monkeypatch, 
 
     monkeypatch.setenv("PORT", "11004")
     monkeypatch.setenv("CLAUDE_HUB_PORT", "9999")
+    # main() writes this key; restore it before later child-backend tests.
+    monkeypatch.setenv("CLAUDE_HUB_BIND_HOST", "127.0.0.1")
     monkeypatch.setattr(launcher_module, "ServiceLauncher", FakeLauncher)
     monkeypatch.setattr(launcher_module, "RestartStore", lambda path: object())
     monkeypatch.setattr(launcher_module, "resolve_runtime_home", lambda: tmp_path)

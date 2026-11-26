@@ -22,10 +22,7 @@ from playwright.async_api import BrowserContext, expect
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from appearance_assertions import filled_button_themes  # noqa: E402
-from appearance_assertions import (
-    select_appearance,
-    wide_chat_themes,
-)
+from appearance_assertions import select_appearance, wide_chat_themes
 from browser_lifecycle import BrowserRun, run_browser_main  # noqa: E402
 
 TAB = "goal-steer-tab"
@@ -273,6 +270,20 @@ async def _scenario(context: BrowserContext, *, appearance: bool) -> dict:
     fail_next_send = False
     goal_updates = []
     goal_creates = []
+    cross_settings = {
+        "default_preset": "readonly_brief",
+        "review_mode": "dual",
+        "preferred_candidates": [],
+        "include_review_briefing": True,
+        "generate_mr_description": False,
+        "push_remote_branch": False,
+    }
+    settings_get_started = asyncio.Event()
+    release_settings_get = asyncio.Event()
+    first_settings_get = True
+    delay_settings_save = True
+    save_started = asyncio.Event()
+    release_save = asyncio.Event()
     failure: BaseException | None = None
     page = None
 
@@ -283,7 +294,8 @@ async def _scenario(context: BrowserContext, *, appearance: bool) -> dict:
             await socket.close(code=1000, reason="mocked goal smoke")
 
         async def route_all(route) -> None:
-            nonlocal current_goal, fail_next_send, plan_fixture
+            nonlocal current_goal, fail_next_send, plan_fixture, cross_settings
+            nonlocal first_settings_get, delay_settings_save
             request = route.request
             parsed = urlparse(request.url)
             if origin(request.url) != origin(base):
@@ -481,6 +493,47 @@ async def _scenario(context: BrowserContext, *, appearance: bool) -> dict:
                         "plan_answered": bool(current_goal.get("plan_turn_id")),
                     }
                 body = {"ok": True}
+            elif path == "/api/goals/cross-review-settings":
+                if request.method == "GET" and first_settings_get:
+                    first_settings_get = False
+                    settings_get_started.set()
+                    await release_settings_get.wait()
+                if request.method == "PUT":
+                    cross_settings = json.loads(request.post_data or "{}")
+                    if delay_settings_save:
+                        delay_settings_save = False
+                        save_started.set()
+                        await release_save.wait()
+                body = {
+                    "settings": cross_settings,
+                    "providers": [
+                        {
+                            "provider": "codex",
+                            "label": "Codex",
+                            "models": ["reviewer-alpha"],
+                            "supports_effort": True,
+                            "effort_options": [
+                                "none",
+                                "minimal",
+                                "low",
+                                "medium",
+                                "high",
+                                "xhigh",
+                                "max",
+                                "ultra",
+                            ],
+                            "quota_state": None,
+                        },
+                        {
+                            "provider": "claude",
+                            "label": "Claude",
+                            "models": [],
+                            "supports_effort": False,
+                            "effort_options": [],
+                            "quota_state": None,
+                        },
+                    ],
+                }
             elif path.endswith("/goal/current"):
                 body = current_goal
             elif path.endswith("/objective") and request.method == "PATCH":
@@ -491,7 +544,7 @@ async def _scenario(context: BrowserContext, *, appearance: bool) -> dict:
             elif path.endswith("/goal") and request.method == "POST":
                 creation = json.loads(request.post_data or "{}")
                 goal_creates.append(creation)
-                current_goal = {**GOAL, "objective": creation["objective"]}
+                current_goal = {**GOAL, **creation, "objective": creation["objective"]}
                 body = current_goal
             elif path.endswith("/view"):
                 body = {"ok": True}
@@ -665,6 +718,97 @@ async def _scenario(context: BrowserContext, *, appearance: bool) -> dict:
             == PNG_IMAGE
         )
         await expect(page.get_by_role("button", name="Pause", exact=True)).to_be_visible()
+
+        # The configurable review opens lazily and uses the ordinary Goal path.
+        current_goal = None
+        idle_fixture = True
+        await page.reload(wait_until="domcontentloaded")
+        assert not any(
+            path == "/api/goals/cross-review-settings" for _, path in report["api_requests"]
+        )
+        await expect(composer).to_be_enabled()
+        await select_appearance(page, "dark", "Classic")
+        await page.get_by_role("button", name="Add to chat", exact=True).click()
+        await page.get_by_role("menuitem", name="Cross-Review & Slim").click()
+        review = page.get_by_role("dialog", name="Cross-Review & Slim")
+        await expect(review).to_be_visible()
+        await asyncio.wait_for(settings_get_started.wait(), timeout=5)
+        # Saved defaults must load before the review can start.
+        await expect(review.get_by_role("button", name="Start Cross-Review")).to_be_disabled()
+        await expect(review.get_by_label("MR Slim & Gate")).to_be_disabled()
+        await review.get_by_label("Scope / focus notes").fill("Preserve these notes while loading")
+        release_settings_get.set()
+        await expect(review.get_by_role("button", name="Start Cross-Review")).to_be_enabled()
+        await expect(review.get_by_label("Read-Only Audit")).to_be_checked()
+        await expect(review.get_by_label("Dual consensus")).to_be_checked()
+        await expect(review.get_by_label("Scope / focus notes")).to_have_value(
+            "Preserve these notes while loading"
+        )
+        # The first and last enabled controls trap keyboard focus.
+        await review.get_by_role("button", name="Start Cross-Review").focus()
+        await page.keyboard.press("Tab")
+        await expect(review.get_by_label("Read-Only Audit")).to_be_focused()
+        await page.keyboard.press("Shift+Tab")
+        await expect(review.get_by_role("button", name="Start Cross-Review")).to_be_focused()
+        # Readable text in the current theme; the existing Goal test also exercises both palettes.
+        cross_contrast = (
+            CONTRAST_SCRIPT.replace("#goal-dialog-title", "#cross-review-title")
+            .replace(".goal-dialog-field-label", ".dialog legend")
+            .replace(".goal-dialog-field-hint", ".dialog label")
+            .replace(".goal-dialog-plan-note", ".dialog p")
+            .replace(".goal-dialog-tips", ".dialog footer button")
+        )
+        measured = await page.evaluate(cross_contrast)
+        assert measured and all(value >= 4.5 for value in measured.values()), measured
+        await page.set_viewport_size({"width": 390, "height": 844})
+        for name in ("Cancel", "Start Cross-Review"):
+            assert (await review.get_by_role("button", name=name, exact=True).bounding_box())[
+                "height"
+            ] >= 44
+        await review.get_by_label("Read-Only Audit").check()
+        await expect(review.get_by_label("Push feature branch on PASS")).to_be_disabled()
+        await review.get_by_label("Read-Only Audit").focus()
+        await page.keyboard.press("Shift+Tab")
+        await expect(review.get_by_role("button", name="Start Cross-Review")).to_be_focused()
+        await review.get_by_role("button", name="Save as default").click()
+        await asyncio.wait_for(save_started.wait(), timeout=5)
+        await page.keyboard.press("Escape")
+        await expect(review).not_to_be_visible()
+        await page.set_viewport_size({"width": 1440, "height": 900})
+        await select_appearance(page, "light", "Classic")
+        await page.get_by_role("button", name="Add to chat", exact=True).click()
+        await page.get_by_role("menuitem", name="Cross-Review & Slim").click()
+        await expect(review.get_by_role("button", name="Start Cross-Review")).to_be_enabled()
+        release_save.set()
+        await page.wait_for_timeout(100)
+        await expect(review.get_by_text("Defaults saved.")).to_have_count(0)
+        await review.get_by_label("MR Slim & Gate").check()
+        light_contrast = await page.evaluate(cross_contrast)
+        assert light_contrast and all(
+            value >= 4.5 for value in light_contrast.values()
+        ), light_contrast
+        await expect(review.get_by_label("MR Slim & Gate")).to_be_checked()
+        await review.get_by_label("Dual consensus").check()
+        await review.get_by_label("Provider", exact=True).select_option("claude")
+        await expect(review.get_by_label("Effort", exact=True)).to_be_disabled()
+        await review.get_by_label("Provider", exact=True).select_option("codex")
+        await expect(review.get_by_label("Effort", exact=True)).to_be_enabled()
+        await review.get_by_label("Model", exact=True).fill("reviewer-alpha")
+        await review.get_by_label("Effort", exact=True).select_option("ultra")
+        await expect(
+            review.get_by_text("Effort is a request, not a guarantee.", exact=False)
+        ).to_be_visible()
+        await review.get_by_role("button", name="Add reviewer").click()
+        await review.get_by_role("button", name="Save as default").click()
+        await expect(review.get_by_text("Defaults saved.")).to_be_visible()
+        assert cross_settings["review_mode"] == "dual"
+        assert cross_settings["preferred_candidates"][0]["effort"] == "ultra"
+        await review.get_by_role("button", name="Start Cross-Review").click()
+        await expect(review).not_to_be_visible()
+        assert goal_creates[-1]["strict_review_preset"] == "mr_slim"
+        assert goal_creates[-1]["strict_review_mode"] == "dual"
+        assert goal_creates[-1]["strict_review_candidates"][0]["model"] == "reviewer-alpha"
+        await expect(page.locator(".goal-strict-pill")).to_contain_text("MR Slim · Dual")
 
         # Goal creation includes composer images in its first request.
         current_goal = None
@@ -980,6 +1124,9 @@ async def _scenario(context: BrowserContext, *, appearance: bool) -> dict:
         await composer.fill("Review question one")
         await composer.press("Meta+Enter")
         await expect(composer).to_have_value("")
+        # Empty text is optimistic. Wait for the receipt before attaching:
+        # attachment preparation deliberately rejects input during a send.
+        await expect(composer).to_be_enabled()
         await page.locator('input[type="file"]').set_input_files(
             {"name": "review.png", "mimeType": "image/png", "buffer": PNG_IMAGE}
         )

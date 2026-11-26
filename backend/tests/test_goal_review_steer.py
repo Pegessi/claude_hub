@@ -62,13 +62,14 @@ class ReviewHarness:
             reviewer_subagent_id="review-child",
         )
 
-    async def start(self) -> tuple[GoalRun, asyncio.Task[GoalRun | None]]:
+    async def start(self, *, push: bool = False) -> tuple[GoalRun, asyncio.Task[GoalRun | None]]:
         goal = await self.controller.create_and_start(
             "tab-review",
             GoalRunCreate(
                 objective="Verify candidate",
                 client_request_id="create",
                 strict_review=True,
+                strict_review_push_branch=push,
             ),
         )
         assert goal.current_turn_id is not None
@@ -454,7 +455,9 @@ async def test_review_recovery_retry_does_not_append_the_same_amendment_twice(tm
     ctrl = harness.controller
     goal, completion = await harness.start()
     image = ChatImageAttachment(
-        filename="ref.png", mime_type="image/png", data_url="data:image/png;base64,iVBORw0KGgo="
+        filename="ref.png",
+        mime_type="image/png",
+        data_url="data:image/png;base64,iVBORw0KGgo=",
     )
     with goal_image_input(goal.tab_id, [image]):
         await ctrl.steer(goal.id, "one", "Instruction A", "one", 1, image_fingerprint([image]))
@@ -468,14 +471,182 @@ async def test_review_recovery_retry_does_not_append_the_same_amendment_twice(tm
     ctrl.set_dispatch_callback(fail)
     with goal_image_input(goal.tab_id, [image]):
         await ctrl.steer(
-            goal.id, "retry-one", "Amendment C", "retry-one", 1, image_fingerprint([image])
+            goal.id,
+            "retry-one",
+            "Amendment C",
+            "retry-one",
+            1,
+            image_fingerprint([image]),
         )
     cold = GoalRunController(GoalRunStore(tmp_path / "goals.json"), harness.dispatch)
     with goal_image_input(goal.tab_id, [image]):
         await cold.steer(
-            goal.id, "retry-two", "Amendment C", "retry-two", 1, image_fingerprint([image])
+            goal.id,
+            "retry-two",
+            "Amendment C",
+            "retry-two",
+            1,
+            image_fingerprint([image]),
         )
     prompt = harness.sent[-1][1]
     assert prompt.count("Instruction A") == 1
     assert prompt.count("Instruction B") == 1
     assert prompt.count("Amendment C") == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["single", "dual"])
+@pytest.mark.parametrize("outcome", ["PASS", "BLOCK", "ERROR", "CANCEL"])
+async def test_configured_review_queue_precedes_push_and_waits_for_all_reviewers(
+    tmp_path, monkeypatch, mode, outcome
+):
+    """Exercise the real slot runner and controller, not a replacement review callback."""
+    from types import SimpleNamespace
+
+    from claude_hub.models import AgentType
+    from claude_hub.models.subagent import SubagentTurnStatus
+    from claude_hub.services import subagents
+    from claude_hub.services.goal_run import controller as controller_module
+    from claude_hub.services.goal_run import strict_review as sr
+    from claude_hub.services.ttyd_manager import ttyd_manager
+
+    monkeypatch.setattr(
+        ttyd_manager,
+        "get_tab",
+        lambda _: SimpleNamespace(
+            agent_type=AgentType.CURSOR,
+            env={},
+            cwd=str(tmp_path),
+        ),
+    )
+    candidates = [sr.CrossReviewCandidate("codex", "reviewer-alpha")]
+    if mode == "dual":
+        candidates.append(sr.CrossReviewCandidate("claude", "reviewer-beta"))
+    monkeypatch.setattr(sr, "select_cross_reviewer_candidates", lambda *a, **kw: candidates)
+    started = {c.provider: asyncio.Event() for c in candidates}
+    release = {c.provider: asyncio.Event() for c in candidates}
+    finished = {c.provider: asyncio.Event() for c in candidates}
+    closed = []
+
+    class Service:
+        async def create(self, request):
+            return SimpleNamespace(id=request.agent_type.value), SimpleNamespace(turn_id="review")
+
+        async def wait_turn(self, record_id, turn_id, wait_seconds):
+            started[record_id].set()
+            await release[record_id].wait()
+            finished[record_id].set()
+            text = (
+                '<goal-review>{"verdict":"PASS","summary":"verified","findings":[]}</goal-review>'
+            )
+            if record_id == candidates[-1].provider:
+                if outcome == "ERROR":
+                    text = "Invalid reviewer output"
+                elif outcome == "BLOCK":
+                    text = '<goal-review>{"verdict":"BLOCK","summary":"boundary defect","findings":[{"severity":"P1","summary":"Missing check"}]}</goal-review>'
+            return SimpleNamespace(id=record_id), SimpleNamespace(
+                status=SubagentTurnStatus.COMPLETED,
+                final_text=text,
+            )
+
+        async def close(self, record_id, reason):
+            closed.append(record_id)
+
+    monkeypatch.setattr(subagents, "get_subagent_service", lambda: Service())
+
+    async def inspect_candidate(goal, text):
+        return "checkout@feature:reviewed-head", None
+
+    monkeypatch.setattr(controller_module, "inspect_push_candidate", inspect_candidate)
+    sent = []
+
+    async def dispatch(goal, prompt):
+        sent.append(prompt)
+        return goal.pending_step_id
+
+    ctrl = GoalRunController(GoalRunStore(tmp_path / "goals.json"), dispatch)
+    goal = await ctrl.create_and_start(
+        "tab",
+        GoalRunCreate(
+            objective="review candidate",
+            client_request_id="create",
+            strict_review=True,
+            strict_review_mode=mode,
+            strict_review_push_branch=True,
+        ),
+    )
+    completion = asyncio.create_task(
+        ctrl.on_turn_completed("tab", goal.current_turn_id, "completed", COMPLETE)
+    )
+    try:
+        await asyncio.wait_for(asyncio.gather(*(event.wait() for event in started.values())), 5)
+        await ctrl.steer(goal.id, "steer-one", "Report progress first", "user-one")
+        if outcome == "CANCEL":
+            stopped = await ctrl.pause(goal.id, "stop")
+            await asyncio.wait_for(completion, 5)
+            assert stopped.status == GoalRunStatus.PAUSED
+            assert set(closed) == set(started)
+            assert len(sent) == 1
+            assert not stopped.strict_review_in_progress
+            return
+        if mode == "dual":
+            release["codex"].set()
+            await asyncio.wait_for(finished["codex"].wait(), 5)
+            await ctrl.steer(goal.id, "steer-two", "Then update the summary", "user-two")
+            assert not completion.done()
+        assert len(sent) == 1
+        for event in release.values():
+            event.set()
+        result = await asyncio.wait_for(completion, 5)
+        assert result.status == GoalRunStatus.ACTIVE
+        assert not result.strict_review_push_pending
+        assert not closed
+        assert len(sent) == 2
+        assert sent[-1].count("Report progress first") == 1
+        if mode == "dual":
+            assert sent[-1].count("Then update the summary") == 1
+        assert "Do not push yet" in sent[-1]
+        assert result.strict_review_history[-1].verdict == (
+            "PASS" if outcome == "PASS" else "BLOCK"
+        )
+        if outcome == "ERROR":
+            assert "could not complete" in sent[-1]
+        if outcome == "PASS":
+            assert "A PASS covers the reviewed candidate" in sent[-1]
+    finally:
+        for event in release.values():
+            event.set()
+        await completion
+
+
+@pytest.mark.asyncio
+async def test_changed_push_target_at_cap_still_delivers_queued_steer(tmp_path, monkeypatch):
+    from claude_hub.models.goal_run import GOAL_STRICT_REVIEW_HARD_MAX_ROUNDS
+    from claude_hub.services.goal_run import controller as controller_module
+
+    calls = 0
+
+    async def inspect_candidate(goal, text):
+        nonlocal calls
+        calls += 1
+        return f"checkout@feature:head-{calls}", None
+
+    monkeypatch.setattr(controller_module, "inspect_push_candidate", inspect_candidate)
+    harness = ReviewHarness(tmp_path / "goals.json")
+    goal, completion = await harness.start(push=True)
+    try:
+        # The first candidate inspection happens before the callback; arrange
+        # a changed post-review candidate without replacing lifecycle logic.
+        reviewing = harness.controller.get(goal.id)
+        reviewing.strict_review_push_attempts = GOAL_STRICT_REVIEW_HARD_MAX_ROUNDS - 1
+        harness.controller.store.put(reviewing)
+        await harness.controller.steer(goal.id, "steer", "Inspect this before any push", "user")
+        harness.release.set()
+        result = await asyncio.wait_for(completion, 5)
+        assert result.status == GoalRunStatus.ACTIVE
+        assert not result.strict_review_push_pending
+        assert "Inspect this before any push" in harness.sent[-1][1]
+        assert "returned PASS" in harness.sent[-1][1]
+    finally:
+        harness.release.set()
+        await completion

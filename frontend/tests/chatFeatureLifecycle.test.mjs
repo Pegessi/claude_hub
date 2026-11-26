@@ -151,6 +151,7 @@ const stubs = {
   'components/FeishuIdentityMark.vue': emptyComponent,
   'components/ChatDraftQueue.vue': emptyComponent,
   'components/GoalSetupDialog.vue': emptyComponent,
+  'components/CrossReviewDialog.vue': emptyComponent,
   'components/ComposerAddMenu.vue': emptyComponent,
   'components/GoalStatusBar.vue': emptyComponent,
   'components/ThinkingIndicator.vue': emptyComponent,
@@ -817,3 +818,41 @@ test('ChatMessageInbox recovery or Retry status reconnects observation when conn
   assert.equal(inboxInstance.props.active, false)
 })
 
+
+test('deactivation closes Cross-Review and keeps it closed when returning', async t => {
+  const h = await mount(t)
+  const goal = h.owner(h.keys.chatGoalKey)
+  goal.isCrossReviewOpen.value = true
+  await flush()
+  h.selected.value = 'two'
+  await flush()
+  assert.equal(goal.isCrossReviewOpen.value, false)
+  h.selected.value = 'one'
+  await flush()
+  assert.equal(goal.isCrossReviewOpen.value, false)
+})
+
+test('Cross-Review can retry a failed create after empty reconciliation', async t => {
+  let creates = 0
+  const h = await mount(t, { fetch: async (url, options = {}) => {
+    if (url.endsWith('/goal') && options.method === 'POST') {
+      creates++
+      if (creates === 1) return new Response(JSON.stringify({ detail: 'Temporary failure' }), { status: 503 })
+      return new Response(JSON.stringify({ id: 'goal-1', tab_id: 'one', status: 'active', dispatch_state: 'dispatched', objective: 'Review' }), { status: 201 })
+    }
+    return new Response(null, { status: 204 })
+  } })
+  const goal = h.owner(h.keys.chatGoalKey)
+  await goal.hydrateGoal()
+  goal.isCrossReviewOpen.value = true
+  const input = { objective: 'Review', strictReview: true, strict_review_preset: 'mr_slim' }
+  await goal.startGoal(input)
+  assert.equal(creates, 1)
+  assert.equal(goal.goal.value, null)
+  assert.equal(goal.isCrossReviewOpen.value, true)
+  assert.equal(goal.goalError.value, 'Temporary failure')
+  await goal.startGoal(input)
+  assert.equal(creates, 2)
+  assert.equal(goal.goal.value.id, 'goal-1')
+  assert.equal(goal.isCrossReviewOpen.value, false)
+})

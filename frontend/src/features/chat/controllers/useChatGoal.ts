@@ -1,5 +1,5 @@
 import { type Ref, computed, ref, toRef, watch } from 'vue'
-import { type StreamCapabilities, type AgentStreamEvent } from '@/types'
+import { type StreamCapabilities, type AgentStreamEvent, type StrictReviewOptions } from '@/types'
 import { type ChatPaneProps, type DraftAttachment } from './types'
 import { type useTerminalStore } from '@/stores/terminalStore'
 import { toStreamSendAttachment } from '@/utils/agentStreamAttachments'
@@ -49,6 +49,7 @@ export function useChatGoal(deps: Dependencies) {
   } = useGoalResource(toRef(deps.props, 'tabId'))
 
   const isGoalSetupOpen = ref(false)
+  const isCrossReviewOpen = ref(false)
 
   const isGoalEditing = ref(false)
 
@@ -81,7 +82,7 @@ export function useChatGoal(deps: Dependencies) {
     ? 'This provider runs Goals itself, so it cannot plan a first turn unless Strict cross-review is on.'
     : null)
 
-  async function startGoal(input: { objective: string; planFirst?: boolean; strictReview?: boolean }) {
+  async function startGoal(input: { objective: string; planFirst?: boolean; strictReview?: boolean } & StrictReviewOptions) {
     if (isGoalEditing.value) {
       if (await updateGoalObjective(input.objective)) isGoalSetupOpen.value = false
       return
@@ -109,14 +110,17 @@ export function useChatGoal(deps: Dependencies) {
       plan_first: choice.effective,
       strict_review: strictEnabled,
       attachments: imageSnapshot.map(toStreamSendAttachment),
+      ...(input.strict_review_preset ? { strict_review_preset: input.strict_review_preset, strict_review_mode: input.strict_review_mode, strict_review_candidates: input.strict_review_candidates, strict_review_briefing: input.strict_review_briefing, strict_review_mr_description: input.strict_review_mr_description, strict_review_push_branch: input.strict_review_push_branch } : {}),
     })
     if (saved) {
       deps.attachments.value = []
       isGoalSetupOpen.value = false
+      isCrossReviewOpen.value = false
     } else if (goal.value) {
       // The server may have persisted the Goal before delivery failed. Keep
       // originals in the composer so an explicit image steer can recover it.
       isGoalSetupOpen.value = false
+      isCrossReviewOpen.value = false
     }
   }
 
@@ -160,7 +164,7 @@ export function useChatGoal(deps: Dependencies) {
     if (goal.value) return 'Clear the current Goal before starting another'
     if (!deps.capabilities.value?.supports_goals) return 'Goals are unavailable for this chat'
     if (!isGoalHydrated.value || isGoalHydrating.value) return 'Loading Goal status…'
-    if (goalError.value && !isGoalSetupOpen.value) return 'Reload Goal status before starting a Goal'
+    if (goalError.value && !isGoalSetupOpen.value && !isCrossReviewOpen.value) return 'Reload Goal status before starting a Goal'
     if (isGoalMutating.value) return 'Updating Goal…'
     if (deps.connectionState.value !== 'live') return 'Wait for Chat to reconnect'
     if (deps.modeInteractionLocked.value || deps.isUpdatingMode.value || deps.isUpdatingModel.value || deps.isUpdatingReasoningEffort.value) return 'Wait for the current turn or settings change to finish'
@@ -241,6 +245,7 @@ export function useChatGoal(deps: Dependencies) {
     completeGoal,
     clearGoal,
     isGoalSetupOpen,
+    isCrossReviewOpen,
     isGoalEditing,
     goalPlanReason,
     goalEditReason,

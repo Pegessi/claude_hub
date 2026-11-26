@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from typing import Awaitable, Callable, Mapping, Sequence
 
 from claude_hub.models import AgentType, ProviderQuota, SessionKind, StreamModelOption
+from claude_hub.models.goal_run import CrossReviewModelPreference
 from claude_hub.services import maso_discovery
 from claude_hub.services.local_runtime_settings import local_setting
 from claude_hub.services.maso_discovery import discover_maso_service
@@ -352,6 +353,7 @@ def select_cross_reviewer_candidates(
     default_maso_model: str | None = None,
     quota_by_provider: Mapping[str, ProviderQuota] | None = None,
     allow_same_model_fallback: bool = True,
+    preferred_candidates: Sequence[CrossReviewModelPreference] | None = None,
 ) -> list[CrossReviewCandidate]:
     """Choose quota-filtered independent reviewer subagent candidates for ``parent_agent_type``.
 
@@ -471,11 +473,62 @@ def select_cross_reviewer_candidates(
                 )
             )
 
-    return [
-        candidate
-        for candidate in candidates
-        if not is_candidate_quota_exhausted(candidate, quota_by_provider)
+    preferred_heterogeneous: list[CrossReviewCandidate] = []
+    preferred_same: list[CrossReviewCandidate] = []
+    advertised = _advertised_model_ids(model_seq)
+    for preference in preferred_candidates or []:
+        if preference.provider == "maso":
+            if not maso_base_url or (
+                advertised and preference.model and preference.model not in advertised
+            ):
+                continue
+            candidate_env = {"MASO_BASE_URL": maso_base_url}
+        else:
+            candidate_env = {}
+        candidate = CrossReviewCandidate(
+            preference.provider, preference.model, preference.effort, candidate_env or None
+        )
+        review_env = {**candidate_env, "MASO_MODEL": preference.model or ""}
+        if is_heterogeneous_reviewer(
+            parent_agent_type,
+            env,
+            AgentType(preference.provider),
+            review_env,
+            default_maso_model=default_maso_model,
+        ):
+            preferred_heterogeneous.append(candidate)
+        elif allow_same_model_fallback:
+            preferred_same.append(candidate)
+    heterogeneous = [
+        c
+        for c in candidates
+        if is_heterogeneous_reviewer(
+            parent_agent_type,
+            env,
+            AgentType(c.provider),
+            {**(c.env or {}), "MASO_MODEL": c.model or ""},
+            default_maso_model=default_maso_model,
+        )
     ]
+    same = [c for c in candidates if c not in heterogeneous]
+    result: list[CrossReviewCandidate] = []
+    seen: set[tuple[str, str | None]] = set()
+    for candidate in preferred_heterogeneous + heterogeneous + preferred_same + same:
+        key = (candidate.provider, candidate.model)
+        if key not in seen and not is_candidate_quota_exhausted(candidate, quota_by_provider):
+            result.append(candidate)
+            seen.add(key)
+    return result
+
+
+def are_candidates_distinct_families(a: CrossReviewCandidate, b: CrossReviewCandidate) -> bool:
+    if a.provider != b.provider:
+        return True
+    if a.provider == "maso":
+        left = maso_model_family({"MASO_MODEL": a.model or ""})
+        right = maso_model_family({"MASO_MODEL": b.model or ""})
+        return bool(left and right and left != right)
+    return False
 
 
 async def resolve_cross_reviewer_target(

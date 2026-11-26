@@ -40,6 +40,16 @@ class AgentType(str, Enum):
     TERMINAL = "terminal"
 
 
+REASONING_EFFORTS = frozenset({"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"})
+
+
+# One shared definition for model validation and the provider registry.
+PROVIDER_EFFORT_ENV_KEYS = {
+    AgentType.CODEX: ("CODEX_REASONING_EFFORT",),
+    AgentType.TRAEX: ("CODEX_REASONING_EFFORT", "TRAEX_REASONING_EFFORT"),
+}
+
+
 class SessionKind(str, Enum):
     """User-facing session surface chosen at creation time."""
 

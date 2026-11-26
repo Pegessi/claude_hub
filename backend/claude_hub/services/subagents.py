@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Any, AsyncIterator, Awaitable, Callable, Dict, Iterable, List, Optional, Tuple
 
 from ..models import AgentType, SessionKind, TerminalTab
+from ..models.schema_domains.runtime import REASONING_EFFORTS
 from ..models.subagent import (
     SUBAGENT_ID_ENV,
     SUBAGENT_MAX_DEPTH,
@@ -68,7 +69,6 @@ _EFFORT_ENV_KEYS = {
     for agent_type, spec in all_specs().items()
     if spec.effort_env_keys
 }
-REASONING_EFFORTS = frozenset({"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"})
 
 SUBAGENT_PREAMBLE = (
     "You are a subagent invoked through Claude Hub by another agent. Do the task below "

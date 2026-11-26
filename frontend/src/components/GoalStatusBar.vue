@@ -92,7 +92,7 @@
           </p>
           <div class="goal-status-meta">
             <span>{{ goal.execution_owner === 'provider_native' ? 'Managed by provider' : 'Managed by Claude Hub' }}</span>
-            <span v-if="goal.strict_review">Strict cross-review ({{ goal.strict_review_rounds ?? 0 }}/{{ strictMaxRounds }})</span>
+            <span v-if="goal.strict_review">{{ strictContext || 'Strict cross-review' }} ({{ goal.strict_review_rounds ?? 0 }}/{{ strictMaxRounds }})</span>
             <span>Started {{ formatTime(goal.created_at) }}</span>
             <span>Updated {{ formatTime(goal.updated_at) }}</span>
           </div>
@@ -254,9 +254,15 @@ const strictMaxRounds = computed(() =>
     props.goal.strict_review_in_progress ? (props.goal.strict_review_rounds ?? 0) + 1 : 0,
   ),
 )
+const strictContext = computed(() => {
+  const preset = props.goal.strict_review_preset
+  const name = preset === 'mr_slim' ? 'MR Slim' : preset === 'bug_only' ? 'Bug Gate' : preset === 'readonly_brief' ? 'Read-Only Audit' : ''
+  return [name, props.goal.strict_review_mode === 'dual' ? 'Dual' : ''].filter(Boolean).join(' · ')
+})
 const strictPillText = computed(() => {
   const rounds = props.goal.strict_review_rounds ?? 0
   const max = strictMaxRounds.value
+  if (strictContext.value) return `${strictContext.value} (${rounds}/${max})`
   if (props.goal.strict_review_in_progress) return `Review ${rounds + 1}/${max}`
   if (rounds > 0) return `Strict ${rounds}/${max}`
   return 'Strict'

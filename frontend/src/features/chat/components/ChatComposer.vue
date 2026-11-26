@@ -9,7 +9,7 @@
         {{ modeChangeError }}
       </div>
       <div
-        v-if="goalError && !goal && !isGoalSetupOpen && !isManagedChat"
+        v-if="goalError && !goal && !isGoalSetupOpen && !isCrossReviewOpen && !isManagedChat"
         class="composer-mode-error composer-goal-error"
         role="alert"
       >
@@ -130,6 +130,7 @@
             :goal-disabled-reason="goalSetupDisabledReason"
             @attachment="triggerFilePicker"
             @goal="isGoalEditing = false; isGoalSetupOpen = true"
+            @cross-review="isGoalEditing = false; isCrossReviewOpen = true"
             @schedule="appStore.openScheduledTasks(props.tabId)"
           />
           <input
@@ -202,7 +203,7 @@ import ChatModelPicker from './ChatModelPicker.vue'
 import ChatModePicker from './ChatModePicker.vue'
 import ChatReviewTray from '@/features/chat/review/ChatReviewTray.vue'
 const { modeChangeError, isAddMenuOpen, modeOptions, isModelPickerAvailable } = requireChatOwner(chatSettingsKey)
-const { goalError, goal, isGoalSetupOpen, hydrateGoal, isGoalMutating, goalInputBlocked, goalSteerOnly, goalComposerReason, goalSetupDisabledReason, isGoalEditing, goalImageRecovery } = requireChatOwner(chatGoalKey)
+const { goalError, goal, isGoalSetupOpen, isCrossReviewOpen, hydrateGoal, isGoalMutating, goalInputBlocked, goalSteerOnly, goalComposerReason, goalSetupDisabledReason, isGoalEditing, goalImageRecovery } = requireChatOwner(chatGoalKey)
 const { attachments, isPreparingAttachments, removeAttachment, handlePaste, attachmentDisabledReason, triggerFilePicker, fileInputEl, handleFilePick } = requireChatOwner(chatAttachmentsKey)
 const { openImageLightbox } = requireChatOwner(chatImagesKey)
 const { isSending, composerError, isSubmissionReady, turnInFlight, composerTurnInFlight, draftMessage, stopArmed, canStop, isCancelling, cancelActiveTurn, canSend, submit } = requireChatOwner(chatDeliveryKey)
