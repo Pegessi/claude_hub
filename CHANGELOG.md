@@ -7,6 +7,10 @@
 
 ## Released
 
+### feat(feishu): guide realtime investigation in two beats
+
+- Send a situational heads-up before read-only investigation, then deliver a grounded follow-up; direct questions can receive a single answer.
+
 ### fix(chat): align sub-agent dock rows, route managed Chat unarchive, and prevent hidden Needs you sessions
 
 - Refactor `ChatSubagentRow` into a 2×3 CSS Grid so the timestamp and `View ›` action align to a shared right edge without overlapping the summary line, and fade the narrow gutter rail action via `opacity` instead of `display: none` to prevent hover layout jitter.

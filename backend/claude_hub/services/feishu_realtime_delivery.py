@@ -7,6 +7,8 @@ import sqlite3
 from collections.abc import Callable
 from contextlib import closing
 
+from claude_hub.models import WorkspaceAttachmentCreate
+
 from .dot.events_gateway import (
     ExternalEvent,
     has_external_event_receipt,
@@ -48,6 +50,7 @@ async def deliver_realtime_triage(
     config: FeishuRealtimeEventConfig,
     *,
     still_unanswered: Callable[[], bool] = lambda: True,
+    attachments: list[WorkspaceAttachmentCreate] | None = None,
 ) -> bool:
     from .dot import get_dot_service
 
@@ -55,27 +58,66 @@ async def deliver_realtime_triage(
     if await has_external_event_receipt(event.source, event.dedupe_key, dot):
         return True
     decision, notified = await asyncio.to_thread(_read_delivery, dot.store, event.dedupe_key)
-    if decision is None:
-        decision = await diagnose_realtime_event(event, config)
+
+    async def send_card(item: RealtimeDecision) -> bool:
+        payload = event.payload
+        context = " · ".join(
+            str(payload.get(k) or "") for k in ("chat_name", "chat_id", "sender_id")
+        )
+        parts = [f"**Source**: {event.title}\n{context}", f"**Summary**\n{item.summary}"]
+        if item.reply_draft:
+            parts.append(f"**Suggested reply**\n{item.reply_draft}")
+        if event.url:
+            parts.append(f"[Open source]({event.url})")
+        return await dot.notify("\n\n".join(parts), title=event.title) in {"sent", "repeat"}
+
+    async def initial(item: RealtimeDecision) -> bool:
+        nonlocal decision, notified
+        # An existing reservation represents an already attempted first card, even
+        # if the process died before receiving the remote send result.
+        if decision is not None and decision.decision == "investigate" and notified:
+            return still_unanswered() and FeishuRealtimeEventConfig.from_runtime().enabled
+        decision, notified = item, False
+        await asyncio.to_thread(_save_delivery, dot.store, event.dedupe_key, item, False)
+        if not still_unanswered() or not FeishuRealtimeEventConfig.from_runtime().enabled:
+            return False
+        await asyncio.to_thread(_save_delivery, dot.store, event.dedupe_key, item, True)
+        notified = True
+        if not await send_card(item):
+            await asyncio.to_thread(_save_delivery, dot.store, event.dedupe_key, item, False)
+            notified = False
+            return False
+        return True
+
+    if decision is None or decision.decision == "investigate":
+        result = await diagnose_realtime_event(
+            event,
+            config,
+            on_initial=initial,
+            resume_investigation=decision is not None and notified,
+            attachments=attachments,
+        )
+        if result.decision == "investigate":
+            if not still_unanswered():
+                await record_suppressed_external_event(event.source, event.dedupe_key, dot)
+                await asyncio.to_thread(_forget_delivery, dot.store, event.dedupe_key)
+                return True
+            return False
+        decision, notified = result, False
         await asyncio.to_thread(_save_delivery, dot.store, event.dedupe_key, decision, False)
     if decision.decision == "skip" or (not notified and not still_unanswered()):
         await record_suppressed_external_event(event.source, event.dedupe_key, dot)
         await asyncio.to_thread(_forget_delivery, dot.store, event.dedupe_key)
         return True
-    # Disabling intake while diagnosis runs must also suppress outbound delivery.
     if not FeishuRealtimeEventConfig.from_runtime().enabled:
         return False
-    payload = event.payload
-    context = " · ".join(str(payload.get(k) or "") for k in ("chat_name", "chat_id", "sender_id"))
-    parts = [f"**Source**: {event.title}\n{context}", f"**Summary**\n{decision.summary}"]
-    if decision.reply_draft:
-        parts.append(f"**Suggested reply**\n{decision.reply_draft}")
-    if event.url:
-        parts.append(f"[Open source]({event.url})")
     if not notified:
-        if await dot.notify("\n\n".join(parts), title=event.title) not in {"sent", "repeat"}:
-            return False
+        # Reserve before the network call: a crash with an ambiguous result must not
+        # replay the card. Explicit send failure releases the reservation for retry.
         await asyncio.to_thread(_save_delivery, dot.store, event.dedupe_key, decision, True)
+        if not await send_card(decision):
+            await asyncio.to_thread(_save_delivery, dot.store, event.dedupe_key, decision, False)
+            return False
     passive = event.model_copy(
         update={
             "event_type": "triage." + event.event_type,

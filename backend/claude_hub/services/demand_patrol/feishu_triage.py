@@ -7,6 +7,7 @@ import json
 import os
 import re
 import shutil
+import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -23,6 +24,7 @@ from claude_hub.models import (
     ExecutionTarget,
     ManagedSession,
     SessionKind,
+    WorkspaceAttachmentCreate,
     WorkspaceSessionRole,
 )
 from claude_hub.services import managed_chat
@@ -570,6 +572,7 @@ async def _run_workspace_triage_turn(
     prompt: str,
     *,
     timeout_seconds: float,
+    attachments: list[WorkspaceAttachmentCreate] | None = None,
 ) -> str:
     from claude_hub.api.agent_stream import get_managed_tailer_manager
     from claude_hub.models import AgentStreamEvent, AgentStreamEventType
@@ -577,7 +580,7 @@ async def _run_workspace_triage_turn(
     from claude_hub.services.agent_stream.base import is_substantive_answer
 
     manager = get_managed_tailer_manager()
-    call_id = f"patrol-triage-{session.id}"
+    call_id = f"patrol-triage-{session.id}-{uuid.uuid4().hex}"
     queue: asyncio.Queue[AgentStreamEvent] | None = None
     last_error = ""
     try:
@@ -587,6 +590,7 @@ async def _run_workspace_triage_turn(
                 session.id,
                 prompt,
                 call_id=call_id,
+                attachments=attachments,
             )
         except (
             DeliveryUncertain,

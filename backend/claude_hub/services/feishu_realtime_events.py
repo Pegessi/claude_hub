@@ -12,6 +12,7 @@ from typing import Any
 
 from pydantic import HttpUrl
 
+from claude_hub.models import WorkspaceAttachmentCreate
 from claude_hub.services.dot.events_gateway import (
     ExternalEvent,
     record_suppressed_external_event,
@@ -855,7 +856,13 @@ class FeishuRealtimeEventRouter:
             else True
         )
 
-    async def _deliver_event(self, event: ExternalEvent, cfg: FeishuRealtimeEventConfig) -> bool:
+    async def _deliver_event(
+        self,
+        event: ExternalEvent,
+        cfg: FeishuRealtimeEventConfig,
+        *,
+        attachments: list[WorkspaceAttachmentCreate] | None = None,
+    ) -> bool:
         if self._event_sink is not None:
             return self._deliver_event_res(await self._event_sink(event))
         from claude_hub.services.feishu_realtime_delivery import deliver_realtime_triage
@@ -864,6 +871,7 @@ class FeishuRealtimeEventRouter:
             return await deliver_realtime_triage(
                 event,
                 cfg,
+                **({"attachments": attachments} if attachments else {}),
                 still_unanswered=lambda: not self.has_owner_replied(
                     chat_id=str(
                         event.payload.get("web_chat_id") or event.payload.get("chat_id") or ""
@@ -1094,7 +1102,25 @@ class FeishuRealtimeEventRouter:
             return False
         delivery_err: str | None = None
         try:
-            if not await self._deliver_event(event, cfg):
+            attachments = None
+            if self._event_sink is None and (user_msg.has_images or user_msg.image_refs):
+                from .feishu_ai_images import prepare_images
+
+                try:
+                    images, _ = await prepare_images(uc, user_msg, [])
+                except Exception:
+                    logger.warning("Realtime image acquisition failed for %s", cmid, exc_info=True)
+                    event.payload["image_unavailable"] = True
+                else:
+                    attachments = [
+                        WorkspaceAttachmentCreate(
+                            filename=i.filename, mime_type=i.mime_type, data_url=i.data_url
+                        )
+                        for i in images
+                    ]
+            if not await self._deliver_event(
+                event, cfg, **({"attachments": attachments} if attachments else {})
+            ):
                 delivery_err = "rejected"
         except asyncio.CancelledError:
             raise

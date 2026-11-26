@@ -121,7 +121,7 @@ async def test_ephemeral_session_archived_on_every_outcome(
     assert request.env["MASO_MODEL"] == "flash-model_reasoning_high"
     assert all(s.archived for s in manager.sessions.values())
     prompt = turn.call_args.args[1]
-    assert "plain-text" in prompt and "Do not modify files" in prompt
+    assert "Do not modify files" in prompt and "untrusted" in prompt
 
 
 @pytest.mark.asyncio
@@ -364,3 +364,91 @@ async def test_raw_advertised_reasoning_variant_is_a_valid_default(
     )
     result = await agent.resolve_realtime_agent(FeishuRealtimeEventConfig())
     assert result.env["MASO_MODEL"] == option.id
+
+
+@pytest.mark.asyncio
+async def test_two_beat_same_session_and_retry_reservation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, live_catalog: None
+) -> None:
+    monkeypatch.setenv("CLAUDE_HUB_HOME", str(tmp_path / "hub"))
+    dot = DotService(DotStore(tmp_path / "dot"))
+    dot.notify = AsyncMock(return_value="sent")  # type: ignore[method-assign]
+    monkeypatch.setattr("claude_hub.services.dot.get_dot_service", lambda: dot)
+    manager = FakeWorkspaceManager()
+    monkeypatch.setattr(lifecycle, "workspace_manager", manager)
+    turn = AsyncMock(
+        side_effect=[
+            '{"decision":"investigate","summary":"Looking into it","reply_draft":""}',
+            RuntimeError("interrupted"),
+            '{"decision":"notify","summary":"Found the cause","reply_draft":"Try this"}',
+        ]
+    )
+    monkeypatch.setattr(lifecycle, "_run_workspace_triage_turn", turn)
+    with pytest.raises(RuntimeError, match="interrupted"):
+        await delivery.deliver_realtime_triage(event(), FeishuRealtimeEventConfig())
+    assert await delivery.deliver_realtime_triage(event(), FeishuRealtimeEventConfig())
+    assert dot.notify.await_count == 2
+    assert turn.call_args_list[0].args[0] is turn.call_args_list[1].args[0]
+    assert "heads-up was already sent" in turn.call_args_list[2].args[1]
+    assert "screenshots" in turn.call_args_list[1].args[1]
+    assert all(session.archived for session in manager.sessions.values())
+
+
+@pytest.mark.asyncio
+async def test_owner_reply_suppresses_second_beat(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, live_catalog: None
+) -> None:
+    monkeypatch.setenv("CLAUDE_HUB_HOME", str(tmp_path / "hub"))
+    dot = DotService(DotStore(tmp_path / "dot"))
+    dot.notify = AsyncMock(return_value="sent")  # type: ignore[method-assign]
+    monkeypatch.setattr("claude_hub.services.dot.get_dot_service", lambda: dot)
+    manager = FakeWorkspaceManager()
+    monkeypatch.setattr(lifecycle, "workspace_manager", manager)
+    unanswered = True
+
+    async def turn(*args: object, **kwargs: object) -> str:
+        nonlocal unanswered
+        if unanswered:
+            return '{"decision":"investigate","summary":"Investigating"}'
+        return '{"decision":"notify","summary":"Found it"}'
+
+    async def notify(*args: object, **kwargs: object) -> str:
+        nonlocal unanswered
+        unanswered = False
+        return "sent"
+
+    dot.notify.side_effect = notify
+    monkeypatch.setattr(lifecycle, "_run_workspace_triage_turn", turn)
+    assert await delivery.deliver_realtime_triage(
+        event(), FeishuRealtimeEventConfig(), still_unanswered=lambda: unanswered
+    )
+    dot.notify.assert_awaited_once()
+    assert all(session.archived for session in manager.sessions.values())
+
+
+@pytest.mark.asyncio
+async def test_image_attachment_reaches_the_investigation_session(
+    monkeypatch: pytest.MonkeyPatch, live_catalog: None
+) -> None:
+    from claude_hub.models import WorkspaceAttachmentCreate
+
+    manager = FakeWorkspaceManager()
+    monkeypatch.setattr(lifecycle, "workspace_manager", manager)
+    turn = AsyncMock(
+        side_effect=[
+            '{"decision":"investigate","summary":"Looking"}',
+            '{"decision":"notify","summary":"Found"}',
+        ]
+    )
+    monkeypatch.setattr(lifecycle, "_run_workspace_triage_turn", turn)
+    image = WorkspaceAttachmentCreate(
+        filename="image.png", mime_type="image/png", data_url="data:image/png;base64,AA=="
+    )
+    await agent.diagnose_realtime_event(
+        event(),
+        FeishuRealtimeEventConfig(),
+        on_initial=AsyncMock(return_value=True),
+        attachments=[image],
+    )
+    assert turn.call_args_list[0].kwargs["attachments"] == [image]
+    assert turn.call_args_list[0].args[0] is turn.call_args_list[1].args[0]
