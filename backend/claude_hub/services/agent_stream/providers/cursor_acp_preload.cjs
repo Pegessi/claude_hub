@@ -117,7 +117,14 @@
       }
       try {
         const result = await origRun.apply(this, runArgs);
-        if (context) context.retriableError = undefined;
+        if (context?.retriableError) {
+          context.retriableError = undefined;
+          if (!runArgs[0]?.canceled && !runArgs[0]?.signal?.aborted) {
+            // A successful background followup may emit only turnEnded, which
+            // ACP does not forward. Resolve its earlier inline error explicitly.
+            await reportRuntime(context, { event: "recovered" });
+          }
+        }
         return result;
       } catch (error) {
         // onErrorNotRetried only covers attempt=0. Catch also covers exhausted

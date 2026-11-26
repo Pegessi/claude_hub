@@ -1299,6 +1299,10 @@ class CursorSession(ProcessSession):
                 return
             event = _cursor_runtime_record(params, self._runtime.redact_diagnostic)
             if event is not None:
+                if event["type"] == "acp_recovered":
+                    if self._transient_turn_error:
+                        self._transient_turn_recovered = True
+                    return
                 if event["type"] == "acp_error":
                     self._turn_error_emitted = True
                     self._restart_before_send = event.pop("restart_before_send")

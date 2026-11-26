@@ -15,7 +15,8 @@
   after exhausted transport recovery or authentication errors; never replay a
   failed user prompt automatically.
 - Resolve retriable errors after background-completion handling finishes, so
-  a successful followup in the same prompt is not marked failed or restarted.
+  a successful followup in the same prompt is not marked failed or restarted,
+  including followups that end without new text or tool updates.
 
 ### feat(feishu): backfill shared realtime cards and quiet active p2p conversations
 

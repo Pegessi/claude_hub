@@ -32,7 +32,9 @@ actual SDK reconnect/connected callbacks and original run error diagnostics.
 The run catch also covers exhausted retries, which `onErrorNotRetried` misses
 after attempt zero. Retriable errors are held until `processPrompt` finishes its
 background-completion handling: a successful followup run clears the pending
-error, while a `connected` callback cannot clear it. Notifications are scoped to the actual agent store and
+error and explicitly resolves the Python inline transient error, even without
+new text or tool updates. A `connected` callback cannot clear it. Notifications
+are scoped to the actual agent store and
 active prompt; cancelled, retired, child-session and old-generation updates
 cannot reopen a parent turn. Diagnostic fields are bounded and allowlisted;
 error text passes Hub's existing redaction before persistence. Error objects,
@@ -47,7 +49,8 @@ is loaded, and no failed prompt is resubmitted automatically.
 
 ## Validation
 
-`./scripts/verify.sh all` passed all nine standard targets: 7,928 backend tests
+Initial validation before cross-review: `./scripts/verify.sh all` passed all nine
+standard targets: 7,928 backend tests
 passed and 10 skipped; 1,572 frontend tests passed. Evidence:
 `/home/tiger/evo_workspace/outputs/cursor-reliability-20261126/verify-all.log`.
 Focused Cursor recovery tests also passed (10 selected). Tests cover concurrent
@@ -81,10 +84,10 @@ Terminal diagnostics replace the older inline transient message in the Python
 provider, avoiding duplicate ERROR events and stale causes. Authentication errors
 retain their immediate diagnostic path. No retry loop or prompt replay is added.
 
-Five regression cases feed actual preload output into the Python provider,
-adapter and native consumer: successful followup, failed followup, connected
-without recovery, no followup and cancellation. The focused Cursor selection
-passes 15 tests. The installed SDK's actual `processPrompt` and background drain
+The first repair's five regression cases feed actual preload output into the
+Python provider, adapter and native consumer: successful followup, failed
+followup, connected without recovery, no followup and cancellation. Its focused
+Cursor selection passed 15 tests. The installed SDK's actual `processPrompt` and background drain
 also pass offline success/failure probes, with resource/model/transport
 collaborators substituted; the successful case acks and emits no terminal error,
 while the failed case nacks and preserves its final request diagnostic. Evidence:
@@ -93,6 +96,21 @@ and `p2-focused.log` under the same output directory. These are deterministic
 fault-injection checks, not real upstream network-failure tests. The earlier live
 probe explicitly invoked `restart_for_recovery()` and does not establish the
 failure-triggered automatic recovery path against a live provider.
+
+Fresh independent review of `72b58e63` found the remaining terminal-only followup
+case: the primary run can emit a valid answer and then fail, while a successful
+background run emits only `turnEnded`. The installed SDK accepts and acks this,
+but its ACP presenter emits no parent update; Python retained the earlier inline
+error and marked the turn failed. The original counterexample is retained in
+`cross-review/fresh-review-terminal-only-sdk.json` and
+`cross-review/fresh-review-terminal-only-consumer.json`.
+
+The preload now sends a private recovery notification only when a real successful
+run resolves its pending retriable error. The Python handler resolves only the
+transient error, preserving terminal errors, cancellation and ownership fences.
+A sixth integrated regression covers terminal-only success after a valid answer;
+the existing diagnostics test also checks stale/child recovery rejection and
+that a recovery notice cannot clear a terminal failure.
 
 External authentication availability, long-duration upstream reliability and
 shared-service restart continuity are not guaranteed by this patch. No shared

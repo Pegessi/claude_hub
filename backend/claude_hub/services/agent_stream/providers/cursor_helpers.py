@@ -418,6 +418,8 @@ def _cursor_runtime_record(
     params: Dict[str, Any], redact: Callable[[str], str]
 ) -> Optional[Dict[str, Any]]:
     """Normalize the preload's bounded diagnostics, never raw errors/headers."""
+    if params.get("event") == "recovered":
+        return {"type": "acp_recovered"}
     if params.get("event") == "connection":
         state = params.get("state")
         if state not in {"reconnecting", "connected"}:

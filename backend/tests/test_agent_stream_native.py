@@ -6596,6 +6596,25 @@ async def test_cursor_runtime_diagnostics_and_next_send_recovery(
         await notification({**failed, "sessionId": "child-session"})
         await notification(failed, generation - 1)
         assert not native._turn_error_emitted
+        await native._handle_notification(
+            {
+                "method": "session/update",
+                "params": {
+                    "sessionId": "same-conversation",
+                    "update": {
+                        "sessionUpdate": "agent_message_chunk",
+                        "content": {"type": "text", "text": "\n\nError: RetriableError: stalled"},
+                    },
+                },
+            },
+            generation=generation,
+        )
+        recovered = {"sessionId": "same-conversation", "event": "recovered"}
+        await notification({**recovered, "sessionId": "child-session"})
+        await notification(recovered, generation - 1)
+        assert not native._transient_turn_recovered
+        await notification(recovered)
+        assert native._transient_turn_recovered
         await notification(
             {
                 "sessionId": "same-conversation",
@@ -6613,6 +6632,8 @@ async def test_cursor_runtime_diagnostics_and_next_send_recovery(
         assert error is not None and error["type"] == "acp_error"
         assert "errorCode=42" in error["message"]
         assert "never persist" not in json.dumps(error)
+        await notification(recovered)
+        assert native._turn_error_emitted  # recovery never clears a terminal error
         # ACP's fallback message must not hide/duplicate the detailed error.
         await native._handle_notification(
             {
@@ -6702,7 +6723,8 @@ async def test_cursor_load_timeout_retries_fresh_process_with_diagnostics(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "ending", ["recovered", "failed", "connected_only", "no_followup", "cancelled"]
+    "ending",
+    ["recovered", "recovered_silent", "failed", "connected_only", "no_followup", "cancelled"],
 )
 async def test_cursor_preload_background_completion_outcome(
     ending: str, tmp_path: Path, monkeypatch: MonkeyPatch
@@ -6734,6 +6756,10 @@ async def test_cursor_preload_background_completion_outcome(
         this.sessionId='background-recovery'; this.agentStore={};
         this.connection={async extNotification(method,params) {records.push({method,params});}};
         this.sharedServices={agentClient:{async run(ctx,b,action,d,e,f,g,h,store,j,opts) {
+          if (ending==='recovered_silent') {
+            if (action==='followup') return;
+            text('done');
+          }
           if (action==='followup' && ending==='recovered') {text('done'); return;}
           if (ending==='connected_only') opts.onConnectionStateChange({state:'connected'});
           throw Object.assign(new Error(action+' transport exhausted'), {
@@ -6808,7 +6834,7 @@ async def test_cursor_preload_background_completion_outcome(
         if failed:
             action = "primary" if ending == "no_followup" else "followup"
             assert f"requestId={action}" in errors[0].payload["message"]
-        if ending == "recovered":
+        if ending in {"recovered", "recovered_silent"}:
             assert events[-1].payload["assistant_text"] == "done"
         assert native._restart_before_send is failed
         assert not native.turn_in_flight
