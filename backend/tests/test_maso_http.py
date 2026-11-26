@@ -1325,6 +1325,100 @@ async def test_stream_disconnect_quarantines_without_aborting_or_retrying_prompt
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["root-stream", "child-stream", "status-monitor"])
+async def test_transport_uncertainty_preserves_goal_for_explicit_recovery(
+    tmp_path, monkeypatch, failure: str
+) -> None:
+    from unittest.mock import AsyncMock
+
+    from claude_hub.api import agent_stream as api
+    from claude_hub.models import GoalDispatchState, GoalRunCreate, GoalRunStatus
+    from claude_hub.services import goal_run
+    from claude_hub.services.goal_run import GoalRunController, GoalRunStore
+
+    tab_id = f"goal-{uuid.uuid4().hex}"
+    record = session(id=f"terminal-tab-{tab_id}", tab_id=tab_id)
+    server = MasoServer()
+    provider = transport(server, record)
+    observed = asyncio.Event()
+
+    async def observer(event) -> None:
+        await api._notify_goal_turn_completed(event)
+        if event.type == AgentStreamEventType.TURN_COMPLETED:
+            observed.set()
+
+    tailer = SessionTailer(
+        workspace_id=record.workspace_id,
+        session_id=record.id,
+        adapter=MasoEventAdapter(),
+        session_getter=lambda: record,
+        native_transport=provider,
+        post_persist_observers=[observer],
+    )
+
+    async def dispatch(goal, prompt):
+        await tailer.send_message(
+            prompt,
+            [],
+            goal.pending_step_id,
+            turn_metadata={"origin": "goal", "protocol": "goal-continuation-v1"},
+        )
+        return goal.pending_step_id
+
+    manager = GoalRunController(GoalRunStore(tmp_path / "goals.json"), dispatch)
+    monkeypatch.setattr(goal_run, "get_goal_manager", lambda: manager)
+    monkeypatch.setattr(api.workspace_manager, "on_scheduled_chat_turn_completed", AsyncMock())
+    completion = await tailer.subscribe_completion()
+    try:
+        goal = await manager.create_and_start(
+            record.tab_id, GoalRunCreate(objective="Verify the feature", client_request_id="start")
+        )
+        stream = server.streams[-1]
+        stream.emit("post_llm_response", {"agent_id": "main", "content": "Recovered response."})
+        for child in ("child-one", "child-two", "child-three"):
+            stream.emit("agent_start", {"agent_id": child})
+        if failure != "root-stream":
+            server.running = False
+            stream.emit("agent_end", {"agent_id": "main", "stop_reason": "completed"})
+        stream.emit(
+            "tool_result",
+            {"agent_id": "child-one", "tool_call_id": "check", "tool": "Read", "output": "ok"},
+        )
+        if failure == "status-monitor":
+            server.fail_status = True
+        else:
+            stream.queue.put_nowait(None)
+        async with asyncio.timeout(3):
+            while True:
+                terminal = await completion.get()
+                if terminal.type == AgentStreamEventType.TURN_COMPLETED:
+                    break
+        await asyncio.wait_for(observed.wait(), 3)
+        assert terminal.payload["status"] == "failed"
+        assert terminal.payload["delivery_uncertain"] is True
+        assert terminal.payload["quarantined_turn_id"] == goal.current_turn_id
+        parked = manager.get(goal.id)
+        assert parked.status == GoalRunStatus.PAUSED
+        assert parked.dispatch_state == GoalDispatchState.UNCERTAIN
+        assert parked.current_turn_id == goal.current_turn_id
+        assert parked.completed_at is None
+        assert parked.turns_completed == 1
+        # Losing observation cannot authorize resending a prompt or stopping
+        # remote children. The same quarantine survives the Goal transition.
+        assert provider._delivery_path.exists()
+        assert len([1 for _, path, _ in server.calls if path.endswith("/messages")]) == 1
+        assert not any(path.endswith(("/control", "/exit")) for _, path, _ in server.calls)
+        page = await tailer._store.read_since(-1, 100)
+        errors = [e for e in page.events if e.type == AgentStreamEventType.ERROR]
+        terminals = [e for e in page.events if e.type == AgentStreamEventType.TURN_COMPLETED]
+        assert len(errors) == len(terminals) == 1
+        assert errors[0].stream_sequence + 1 == terminals[0].stream_sequence
+    finally:
+        tailer.unsubscribe_completion(completion)
+        await tailer.stop()
+
+
+@pytest.mark.asyncio
 async def test_chat_only_and_unsupported_edit_are_rejected_before_mutation() -> None:
     with pytest.raises(ValidationError, match="HTTP Chat"):
         TerminalTabCreate(name="bad", agent_type=AgentType.MASO)
@@ -1771,7 +1865,10 @@ async def test_native_cron_policy_failure_is_fail_closed_and_retryable(
 
 
 @pytest.mark.asyncio
-async def test_native_children_keep_one_hub_turn_through_multiple_root_wakeups() -> None:
+@pytest.mark.parametrize("child_reason", ["completed", "error", "aborted"])
+async def test_native_children_keep_one_hub_turn_through_multiple_root_wakeups(
+    child_reason,
+) -> None:
     server = MasoServer()
     record = session()
     provider = transport(server, record)
@@ -1812,7 +1909,9 @@ async def test_native_children_keep_one_hub_turn_through_multiple_root_wakeups()
             server.running = True
             stream.emit("agent_start", {"agent_id": "main"})
             stream.emit("turn_start", {"agent_id": "main", "turn": 0})
-            stream.emit("agent_end", {"agent_id": child, "stop_reason": "completed"})
+            if child_reason == "error":
+                stream.emit("agent_error", {"agent_id": child, "error": "request failed"})
+            stream.emit("agent_end", {"agent_id": child, "stop_reason": child_reason})
             stream.emit(
                 "tool_use",
                 {"agent_id": "main", "tool_call_id": f"read-{index}", "tool": "Read"},

@@ -255,6 +255,104 @@ async def test_unrelated_completion_is_ignored_and_stop_pauses_goal(tmp_path: Pa
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "status,metadata,expected",
+    [
+        ("failed", {"retryable": True}, GoalRunStatus.PAUSED),
+        ("failed", {"delivery_uncertain": True}, GoalRunStatus.PAUSED),
+        ("failed", {"retryable": True, "delivery_uncertain": True}, GoalRunStatus.PAUSED),
+        ("failed", {}, GoalRunStatus.FAILED),
+        ("failed", {"retryable": False}, GoalRunStatus.FAILED),
+        ("failed", {"retryable": "true", "delivery_uncertain": "false"}, GoalRunStatus.FAILED),
+        ("cancelled", {"retryable": True, "delivery_uncertain": True}, GoalRunStatus.PAUSED),
+        ("completed", {"retryable": True}, GoalRunStatus.COMPLETE),
+    ],
+    ids=["retryable", "uncertain", "both", "fatal", "not-retryable", "invalid", "stop", "success"],
+)
+async def test_completion_bridge_preserves_failure_contract(
+    tmp_path, monkeypatch, status, metadata, expected
+):
+    from datetime import datetime, timezone
+    from unittest.mock import AsyncMock
+
+    from claude_hub.api import agent_stream as api
+    from claude_hub.models import AgentStreamEvent, AgentStreamEventType, AgentType
+    from claude_hub.services import goal_run
+
+    dispatch = AsyncMock(return_value="unexpected-replay")
+    manager = GoalRunController(GoalRunStore(tmp_path / "goals.json"), dispatch)
+    goal = manager.create("tab-1", request())
+    arm_goal(manager, goal.id, "goal-turn")
+    monkeypatch.setattr(goal_run, "get_goal_manager", lambda: manager)
+    monkeypatch.setattr(api.workspace_manager, "on_scheduled_chat_turn_completed", AsyncMock())
+    event = AgentStreamEvent(
+        stream_sequence=1,
+        session_id="terminal-tab-tab-1",
+        tab_id="tab-1",
+        agent_type=AgentType.MASO,
+        type=AgentStreamEventType.TURN_COMPLETED,
+        turn_id="goal-turn",
+        created_at=datetime.now(timezone.utc),
+        payload={
+            "status": status,
+            "assistant_text": response_with_checkpoint("complete"),
+            "usage": {"total_tokens": 25, "quality": "exact"},
+            **metadata,
+        },
+    )
+    await api._notify_goal_turn_completed(event)
+    await api._notify_goal_turn_completed(event)
+    result = manager.get(goal.id)
+    assert result.status == expected
+    assert result.turns_completed == 1 and result.token_usage == 25
+    assert (result.completed_at is None) == (expected == GoalRunStatus.PAUSED)
+    uncertain = status == "failed" and metadata.get("delivery_uncertain") is True
+    assert result.current_turn_id == ("goal-turn" if uncertain else None)
+    assert result.dispatch_state == (
+        GoalDispatchState.UNCERTAIN if uncertain else GoalDispatchState.IDLE
+    )
+    assert result.signal_recovery_attempts == 0
+    dispatch.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("uncertain", [False, True])
+async def test_recoverable_completion_can_resume_same_goal_after_restart(tmp_path, uncertain):
+    from unittest.mock import AsyncMock
+
+    path = tmp_path / "goals.json"
+    dispatch = AsyncMock(return_value="resumed-turn")
+    cancel = AsyncMock(side_effect=RuntimeError("remote cleanup unavailable"))
+    manager = GoalRunController(GoalRunStore(path), dispatch, cancel)
+    goal = manager.create("tab-1", request())
+    arm_goal(manager, goal.id, "failed-turn")
+    await manager.on_turn_completed(
+        "tab-1", "failed-turn", "failed", "", retryable=True, delivery_uncertain=uncertain
+    )
+    manager = GoalRunController(GoalRunStore(path), dispatch, cancel)
+    manager.recover()
+    if uncertain:
+        with pytest.raises(GoalPolicyError, match="remote cleanup unavailable"):
+            await manager.resume(goal.id, "resume")
+        dispatch.assert_not_awaited()
+        assert cancel.call_args.args[0].current_turn_id == "failed-turn"
+        assert manager.get(goal.id).dispatch_state == GoalDispatchState.UNCERTAIN
+        cancel.side_effect = None
+    resumed = await manager.resume(goal.id, "resume")
+    assert resumed.id == goal.id and resumed.status == GoalRunStatus.ACTIVE
+    assert resumed.current_turn_id == "resumed-turn"
+    await manager.resume(goal.id, "resume")
+    await manager.on_turn_completed(
+        "tab-1", "failed-turn", "failed", "", retryable=True, delivery_uncertain=uncertain
+    )
+    dispatch.assert_awaited_once()
+    assert manager.get(goal.id).current_turn_id == "resumed-turn"
+    assert manager.get(goal.id).turns_completed == 1
+    if not uncertain:
+        cancel.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_usage_quality_conservatively_degrades_across_turns(tmp_path: Path) -> None:
     async def dispatch(goal, prompt):
         return "turn-2"

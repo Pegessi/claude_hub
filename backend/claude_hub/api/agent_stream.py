@@ -133,6 +133,8 @@ async def _notify_goal_turn_completed(event: AgentStreamEvent) -> None:
                 or ""
             ),
             payload.get("usage") if isinstance(payload.get("usage"), dict) else None,
+            retryable=payload.get("retryable") is True,
+            delivery_uncertain=payload.get("delivery_uncertain") is True,
         )
     finally:
         # Goal and scheduled Chat turns share the transcript observer, but one

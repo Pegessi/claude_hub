@@ -772,6 +772,9 @@ class GoalRunController:
         status: str,
         assistant_text: str,
         usage: GoalTurnUsage | dict[str, Any] | None = None,
+        *,
+        retryable: bool = False,
+        delivery_uncertain: bool = False,
     ) -> GoalRun | None:
         handled, native = await self.native.refresh(tab_id)
         if handled:
@@ -795,7 +798,15 @@ class GoalRunController:
             # second reviewer with a replayed (or unrelated) response.
             if turn_id in goal.completed_turn_ids or goal.strict_review_in_progress:
                 return goal
-            result = self._on_turn_completed_locked(tab_id, turn_id, status, assistant_text, usage)
+            result = self._on_turn_completed_locked(
+                tab_id,
+                turn_id,
+                status,
+                assistant_text,
+                usage,
+                retryable=retryable,
+                delivery_uncertain=delivery_uncertain,
+            )
         if result is not None and result.strict_review_in_progress:
             review_text = assistant_text
             if goal.signal_recovery_text and goal.current_turn_id == turn_id:
@@ -971,6 +982,9 @@ class GoalRunController:
         status: str,
         assistant_text: str,
         usage: GoalTurnUsage | dict[str, Any] | None = None,
+        *,
+        retryable: bool = False,
+        delivery_uncertain: bool = False,
     ) -> GoalRun | None:
         goal = self.store.current_for_tab(tab_id)
         if goal is None or turn_id in goal.completed_turn_ids:
@@ -1032,6 +1046,21 @@ class GoalRunController:
             goal.status_message = "current Goal turn was stopped; resume to continue"
             return self.store.put(goal)
         if status.lower() not in {"complete", "completed", "success", "succeeded"}:
+            if delivery_uncertain or retryable:
+                # A failed observation is not proof that remote work failed.
+                # Reuse explicit resume/reconciliation, never replay a prompt
+                # automatically while the provider may still be executing it.
+                goal.status = GoalRunStatus.PAUSED
+                goal.paused_at = utc_now()
+                if delivery_uncertain:
+                    goal.current_turn_id = turn_id
+                    goal.dispatch_state = GoalDispatchState.UNCERTAIN
+                    goal.status_message = (
+                        "turn delivery is uncertain; inspect remote execution before resuming"
+                    )
+                else:
+                    goal.status_message = "turn failed recoverably; resume the Goal to retry"
+                return self.store.put(goal)
             goal.status = GoalRunStatus.FAILED
             goal.status_message = f"turn ended with status {status}"
             goal.completed_at = utc_now()

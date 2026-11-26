@@ -7,6 +7,15 @@
 
 ## Released
 
+### fix(goals): preserve recoverable turn failures for explicit resume
+
+- Keep transport delivery uncertainty and retryable failure metadata across the
+  completion observer instead of irreversibly failing the Goal. Pause without
+  automatic replay; retain uncertain turn identity for existing reconciliation
+  before explicit resume. Unrecoverable failures and user Stop keep their semantics.
+- Cover native stream loss during root execution and child waits, status-monitor
+  loss, child failures, duplicate completions and cold recovery with isolated tests.
+
 ### fix(dot): leave recipe briefs free of hardcoded acceptance checklists
 
 - Retire the `## Recipe acceptance checklist` section and its `acceptance_checks`
