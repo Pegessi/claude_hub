@@ -112,6 +112,26 @@ A sixth integrated regression covers terminal-only success after a valid answer;
 the existing diagnostics test also checks stale/child recovery rejection and
 that a recovery notice cannot clear a terminal failure.
 
+Final code candidate `40ab175175b52851b5491535ca9ed2230270363a` passed all nine
+`./scripts/verify.sh all` targets: 7,935 backend tests passed, 9 skipped, and
+1,572 frontend tests passed. The expanded focused selection passed 18 tests.
+Logs are `p2-silent-verify-all.log` and `p2-silent-focused.log` in the output
+directory above; staged checks also passed.
+
+Fresh independent review covered the complete seven-file diff from base
+`03926258def403a722bc5c17519698c47d6778cf` and found no actionable P0–P3 issues.
+The reviewer independently ran the installed SDK contract and Python consumer
+probes for recovery with text, terminal-only recovery, recovery followed by a
+new retriable or authentication failure, and cancellation. Both recovery cases
+completed without ERROR or restart; later failures retained exactly one final
+error and the restart marker; cancellation remained cancelled. Evidence and
+limitations are recorded in `cross-review/fresh-review-40ab1751.md` and
+`cross-review/fresh-review-40ab1751-consumer.json`.
+
+This closes the cross-review P2 within the code-delivery scope of initiator Task
+`ec360b7a-c8d4-471d-912c-da4fd04509bd`. The branch remains unmerged and undeployed;
+integration and shared-service operations are outside this delivery.
+
 External authentication availability, long-duration upstream reliability and
 shared-service restart continuity are not guaranteed by this patch. No shared
 Hub service restart or deployment is part of this change.
