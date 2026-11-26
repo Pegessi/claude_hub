@@ -6701,6 +6701,123 @@ async def test_cursor_load_timeout_retries_fresh_process_with_diagnostics(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "ending", ["recovered", "failed", "connected_only", "no_followup", "cancelled"]
+)
+async def test_cursor_preload_background_completion_outcome(
+    ending: str, tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    """Feed actual preload output through the provider, adapter and consumer.
+
+    ACP catches the first run error, then drains background completions in
+    finally. The installed SDK contract probe verifies this multi-run shape.
+    """
+    import os
+    import shutil
+    import subprocess
+
+    from claude_hub.services.agent_stream.providers.cursor_helpers import _inject_acp_preload_env
+    from claude_hub.services.agent_stream.store import AgentStreamStore
+    from claude_hub.services.agent_stream.tailer import SessionTailer
+
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node required for the Cursor preload")
+    script = r"""
+    const ending = process.argv[2], records = [];
+    const text = text => records.push({method:'session/update', params:{
+      sessionId:'background-recovery', update:{sessionUpdate:'agent_message_chunk',
+        content:{type:'text',text}},
+    }});
+    class Session {
+      constructor() {
+        this.sessionId='background-recovery'; this.agentStore={};
+        this.connection={async extNotification(method,params) {records.push({method,params});}};
+        this.sharedServices={agentClient:{async run(ctx,b,action,d,e,f,g,h,store,j,opts) {
+          if (action==='followup' && ending==='recovered') {text('done'); return;}
+          if (ending==='connected_only') opts.onConnectionStateChange({state:'connected'});
+          throw Object.assign(new Error(action+' transport exhausted'), {
+            name:'RetriableError', kind:'RetriableError', requestId:action,
+          });
+        }}};
+      }
+      async processPrompt(request,token) {
+        const run = action => this.sharedServices.agentClient.run(
+          token,2,action,4,5,6,7,8,this.agentStore,10,{});
+        try {await run('primary');}
+        catch(error) {text('\n\nError: '+String(error));}
+        finally {
+          if (ending==='cancelled') token.canceled=true;
+          else if (ending!=='no_followup') await run('followup');
+        }
+      }
+    }
+    globalThis.__claudeHubCursorAcpPreload.patchAgentSessionClass(Session);
+    (async () => {
+      const session=new Session(), token={canceled:false};
+      let response;
+      try {
+        await session.processPrompt({},token);
+        response={result:{stopReason:token.canceled?'cancelled':'end_turn'}};
+      } catch(error) {response={error:{code:-32603,message:String(error)}};}
+      console.log(JSON.stringify({records,response}));
+    })().catch(error=>{console.error(error);process.exitCode=1});
+    """
+    result = subprocess.run(
+        [node, "-e", script, "acp", ending],
+        env=_inject_acp_preload_env(dict(os.environ)),
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode == 0, result.stderr
+    emitted = json.loads(result.stdout)
+    proc = _InteractiveAcpProc(session_id="background-recovery")
+    native = CursorNativeSession(_session(AgentType.CURSOR))
+    monkeypatch.setattr(native, "_build_provider_env", AsyncMock(return_value={"PATH": "/bin"}))
+    monkeypatch.setattr(native, "_spawn_subprocess", AsyncMock(return_value=proc))
+    monkeypatch.setattr(
+        importlib.import_module("claude_hub.services.workspace_manager"), "STATE_ROOT", tmp_path
+    )
+    tailer = SessionTailer(
+        workspace_id="ws-background",
+        session_id="sess-background",
+        adapter=CursorCliTranscriptAdapter(),
+        session_getter=lambda: native.session,
+        store=AgentStreamStore("ws-background", "sess-background"),
+        native_transport=native,
+    )
+    queue = await tailer.subscribe()
+    try:
+        await tailer.send_message("test", [], client_turn_id="turn-background")
+        prompt = next(r for r in proc.requests if r.get("method") == "session/prompt")
+        for record in emitted["records"]:
+            proc.stdout.push_json({"jsonrpc": "2.0", **record})
+        proc.stdout.push_json({"jsonrpc": "2.0", "id": prompt["id"], **emitted["response"]})
+        events = []
+        while True:
+            event = await asyncio.wait_for(queue.get(), 2)
+            events.append(event)
+            if event.type == AgentStreamEventType.TURN_COMPLETED:
+                break
+        failed = ending in {"failed", "connected_only", "no_followup"}
+        expected = "failed" if failed else "cancelled" if ending == "cancelled" else "completed"
+        assert events[-1].payload["status"] == expected
+        errors = [e for e in events if e.type == AgentStreamEventType.ERROR]
+        assert len(errors) == int(failed)
+        if failed:
+            action = "primary" if ending == "no_followup" else "followup"
+            assert f"requestId={action}" in errors[0].payload["message"]
+        if ending == "recovered":
+            assert events[-1].payload["assistant_text"] == "done"
+        assert native._restart_before_send is failed
+        assert not native.turn_in_flight
+        assert len([r for r in proc.requests if r.get("method") == "session/prompt"]) == 1
+    finally:
+        await tailer.stop()
+
+
+@pytest.mark.asyncio
 async def test_cursor_retriable_recovery_completes_stream_turn(
     tmp_path: Path, monkeypatch: MonkeyPatch
 ) -> None:

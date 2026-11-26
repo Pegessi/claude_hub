@@ -14,6 +14,8 @@
 - Resume the same conversation on a fresh process before the next user send
   after exhausted transport recovery or authentication errors; never replay a
   failed user prompt automatically.
+- Resolve retriable errors after background-completion handling finishes, so
+  a successful followup in the same prompt is not marked failed or restarted.
 
 ### feat(feishu): backfill shared realtime cards and quiet active p2p conversations
 

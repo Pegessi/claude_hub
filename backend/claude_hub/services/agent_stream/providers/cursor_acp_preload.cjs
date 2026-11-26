@@ -116,12 +116,22 @@
         runArgs[10] = options;
       }
       try {
-        return await origRun.apply(this, runArgs);
+        const result = await origRun.apply(this, runArgs);
+        if (context) context.retriableError = undefined;
+        return result;
       } catch (error) {
         // onErrorNotRetried only covers attempt=0. Catch also covers exhausted
         // retries, before ACP replaces ActionRequiredError with "sign in".
+        if (context) context.retriableError = undefined;
         if (!runArgs[0]?.canceled && !runArgs[0]?.signal?.aborted) {
-          await reportRuntime(context, errorDiagnostic(error));
+          const diagnostic = errorDiagnostic(error);
+          if (context && diagnostic.kind === "RetriableError") {
+            // processPrompt can run background-completion followups in finally.
+            // Only a later successful run, not "connected", resolves this error.
+            context.retriableError = diagnostic;
+          } else {
+            await reportRuntime(context, diagnostic);
+          }
         }
         throw error;
       }
@@ -211,6 +221,10 @@
         try {
           return await origProcessPrompt.apply(this, args);
         } finally {
+          const token = args[1];
+          if (context.retriableError && !token?.canceled && !token?.signal?.aborted) {
+            await reportRuntime(context, context.retriableError);
+          }
           context.active = false;
           if (store && activeStores.get(store) === context) activeStores.delete(store);
         }

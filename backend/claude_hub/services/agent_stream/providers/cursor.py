@@ -1302,6 +1302,9 @@ class CursorSession(ProcessSession):
                 if event["type"] == "acp_error":
                     self._turn_error_emitted = True
                     self._restart_before_send = event.pop("restart_before_send")
+                    # Final diagnostics supersede the earlier inline retry error.
+                    self._transient_turn_error = None
+                    self._transient_turn_recovered = False
                 await self._enqueue_notification(event, generation=generation)
             return
         if record.get("method") != "session/update":

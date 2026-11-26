@@ -28,9 +28,11 @@ made. Shared Hub shutdowns remain a separate interruption cause.
 ## Change
 
 The existing preload uses ACP's supported `extNotification` channel to expose
-actual SDK reconnect/connected callbacks and the final `agentClient.run` error.
-The final catch also covers exhausted retries, which `onErrorNotRetried` misses
-after attempt zero. Notifications are scoped to the actual agent store and
+actual SDK reconnect/connected callbacks and original run error diagnostics.
+The run catch also covers exhausted retries, which `onErrorNotRetried` misses
+after attempt zero. Retriable errors are held until `processPrompt` finishes its
+background-completion handling: a successful followup run clears the pending
+error, while a `connected` callback cannot clear it. Notifications are scoped to the actual agent store and
 active prompt; cancelled, retired, child-session and old-generation updates
 cannot reopen a parent turn. Diagnostic fields are bounded and allowlisted;
 error text passes Hub's existing redaction before persistence. Error objects,
@@ -62,11 +64,35 @@ The probe processes were stopped. An earlier probe returned empty text after
 resume; the later complete pass does not establish long-duration reliability.
 This changes no existing Chat's model and is not a same-model acceptance result.
 
-Independent read-only review of code candidate `47f3ddfd` against `03926258`
-found no P1/P2 blockers. The reviewer checked the complete diff, relevant caller
-paths and installed Cursor SDK contracts, including callback ownership, native
-retry budgets, cancellation and same-conversation recovery. No code changed
-after that review; this follow-up only records final validation evidence.
+The first independent review of `47f3ddfd` found no blockers. Two subsequent
+independent cross-reviewers of `86db6471` found one P2 and superseded that
+conclusion: ACP may run a successful background-completion followup after its
+main run fails, but the initial patch permanently marked the prompt failed.
+The cross-review reproduced this using installed SDK control flow and separate
+Python provider/normalizer/consumer probes. Evidence is retained under
+`/home/tiger/evo_workspace/outputs/cursor-reliability-20261126/cross-review/`.
+
+## Cross-review repair (November 27)
+
+The existing prompt-owned preload context now retains the latest retriable run
+error only until the entire prompt finishes. A later successful run clears it;
+another failed run replaces it. Cancellation suppresses the deferred diagnostic.
+Terminal diagnostics replace the older inline transient message in the Python
+provider, avoiding duplicate ERROR events and stale causes. Authentication errors
+retain their immediate diagnostic path. No retry loop or prompt replay is added.
+
+Five regression cases feed actual preload output into the Python provider,
+adapter and native consumer: successful followup, failed followup, connected
+without recovery, no followup and cancellation. The focused Cursor selection
+passes 15 tests. The installed SDK's actual `processPrompt` and background drain
+also pass offline success/failure probes, with resource/model/transport
+collaborators substituted; the successful case acks and emits no terminal error,
+while the failed case nacks and preserves its final request diagnostic. Evidence:
+`cross-review/p2-sdk-drain-recovered.json`, `cross-review/p2-sdk-drain-failed.json`
+and `p2-focused.log` under the same output directory. These are deterministic
+fault-injection checks, not real upstream network-failure tests. The earlier live
+probe explicitly invoked `restart_for_recovery()` and does not establish the
+failure-triggered automatic recovery path against a live provider.
 
 External authentication availability, long-duration upstream reliability and
 shared-service restart continuity are not guaranteed by this patch. No shared
@@ -74,5 +100,5 @@ Hub service restart or deployment is part of this change.
 
 The isolated feature worktree, its backend `.venv` and frontend `node_modules`
 are retained for the concrete integration follow-up. Small task-owned probe and
-verification evidence remains under the local output directory (under 1 MB).
+verification evidence remains under the local output directory.
 No task-owned probe or review server remains running.
