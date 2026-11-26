@@ -54,10 +54,25 @@ failure, redaction boundaries, watchdog activity, duplicate error suppression,
 same-conversation restart and successful subsequent turns. A real CLI probe
 uses a separate task-owned conversation and isolated Hub runtime. The requested
 `gemini-4-argon-high` is absent from the current account model catalog and the CLI
-rejects new sessions using it. A separate `composer-2.5` probe succeeded on its
-first round; real resume/cancel validation is still being investigated. This
-changes no existing Chat's model and is not a same-model acceptance result.
+rejects new sessions using it. A separate `composer-2.5` probe passed initial
+send, process replacement with remembered context in the same conversation,
+cancellation, and a successful send after cancellation. Its summary is retained
+at `/home/tiger/evo_workspace/outputs/cursor-reliability-20261126/live-probe-result.json`.
+The probe processes were stopped. An earlier probe returned empty text after
+resume; the later complete pass does not establish long-duration reliability.
+This changes no existing Chat's model and is not a same-model acceptance result.
+
+Independent read-only review of code candidate `47f3ddfd` against `03926258`
+found no P1/P2 blockers. The reviewer checked the complete diff, relevant caller
+paths and installed Cursor SDK contracts, including callback ownership, native
+retry budgets, cancellation and same-conversation recovery. No code changed
+after that review; this follow-up only records final validation evidence.
 
 External authentication availability, long-duration upstream reliability and
 shared-service restart continuity are not guaranteed by this patch. No shared
 Hub service restart or deployment is part of this change.
+
+The isolated feature worktree, its backend `.venv` and frontend `node_modules`
+are retained for the concrete integration follow-up. Small task-owned probe and
+verification evidence remains under the local output directory (under 1 MB).
+No task-owned probe or review server remains running.
