@@ -47,11 +47,49 @@
       if (opts.enableAgentRetries === undefined) {
         opts.enableAgentRetries = true;
       }
-      if (opts.maxRetries === undefined) {
-        opts.maxRetries = 8;
-      }
+      // Keep the SDK's separate server/transport budgets. maxRetries imposes
+      // a shared cap and can exhaust transport recovery on earlier server errors.
     }
     return opts;
+  }
+
+  // agentClient is shared across ACP sessions. Associate each run with its
+  // actual store rather than a process-global "current session" callback.
+  const activeStores = new WeakMap();
+
+  function errorDiagnostic(error) {
+    const detail = error && error.displayInfo;
+    const result = { event: "error" };
+    for (const key of ["kind", "action", "requestId"]) {
+      const value = error && error[key];
+      if (typeof value === "string") result[key] = value.slice(0, 160);
+    }
+    for (const key of ["connectCode", "errorCode", "inferenceRequestErrorType"]) {
+      const value = detail && detail[key];
+      if (typeof value === "number" || typeof value === "string") {
+        result[key] = typeof value === "string" ? value.slice(0, 160) : value;
+      }
+    }
+    // Hub applies its normal diagnostic redaction before using this text.
+    // Never serialize the error object: causes/headers can contain credentials.
+    if (error && typeof error.message === "string") {
+      result.message = error.message.slice(0, 1500);
+    }
+    return result;
+  }
+
+  async function reportRuntime(context, payload) {
+    if (!context || !context.active) return;
+    const session = context.session;
+    if (!session.connection || typeof session.connection.extNotification !== "function") return;
+    try {
+      await session.connection.extNotification("_claude_hub/cursor_runtime", {
+        sessionId: session.sessionId,
+        ...payload,
+      });
+    } catch {
+      // Reporting must not replace the provider result or break its retries.
+    }
   }
 
   function patchAgentClient(ac) {
@@ -59,11 +97,34 @@
       return;
     }
     const origRun = ac.run;
-    const patchedRun = function (...runArgs) {
+    const patchedRun = async function (...runArgs) {
+      const context = activeStores.get(runArgs[8]);
       if (runArgs.length >= 11) {
-        patchAcpRunOptions(runArgs[10]);
+        const options = patchAcpRunOptions({ ...runArgs[10] });
+        const onConnectionStateChange = options.onConnectionStateChange;
+        options.onConnectionStateChange = function (state) {
+          if (state && ["reconnecting", "connected"].includes(state.state)) {
+            const payload = { event: "connection", state: state.state };
+            if (Number.isSafeInteger(state.attempt) && state.attempt > 0) {
+              payload.attempt = state.attempt;
+            }
+            // Only real SDK progress, never a timer-generated heartbeat.
+            void reportRuntime(context, payload);
+          }
+          return onConnectionStateChange?.apply(this, arguments);
+        };
+        runArgs[10] = options;
       }
-      return origRun.apply(this, runArgs);
+      try {
+        return await origRun.apply(this, runArgs);
+      } catch (error) {
+        // onErrorNotRetried only covers attempt=0. Catch also covers exhausted
+        // retries, before ACP replaces ActionRequiredError with "sign in".
+        if (!runArgs[0]?.canceled && !runArgs[0]?.signal?.aborted) {
+          await reportRuntime(context, errorDiagnostic(error));
+        }
+        throw error;
+      }
     };
     patchedRun.__claudeHubPatched = true;
     ac.run = patchedRun;
@@ -144,7 +205,15 @@
           patchModelManager(this.sharedServices.modelManager);
         }
         syncRunEverythingMetadata(this);
-        return origProcessPrompt.apply(this, args);
+        const context = { session: this, active: true };
+        const store = this.agentStore;
+        if (store && typeof store === "object") activeStores.set(store, context);
+        try {
+          return await origProcessPrompt.apply(this, args);
+        } finally {
+          context.active = false;
+          if (store && activeStores.get(store) === context) activeStores.delete(store);
+        }
       };
     }
   }

@@ -243,6 +243,12 @@ class CursorCliTranscriptAdapter(AgentStreamAdapter):
         # "session/update"``; inline transport errors use ``type == "acp_error"``.
         if raw.get("method") == "session/update":
             return self._normalize_acp_update(raw.get("params"), ctx)
+        if raw.get("type") == "acp_status":
+            if raw.get("state") in {"reconnecting", "connected"} and isinstance(
+                raw.get("text"), str
+            ):
+                events.append(ctx.event(AgentStreamEventType.STATUS, {"text": raw["text"]}))
+            return events
         if raw.get("type") == "acp_error":
             msg = raw.get("message")
             if isinstance(msg, str) and msg:

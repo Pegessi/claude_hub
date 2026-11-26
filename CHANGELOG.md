@@ -7,6 +7,14 @@
 
 ## Released
 
+### fix(cursor): retain recovery progress and refresh failed runtimes
+
+- Surface real ACP reconnect progress and original terminal error diagnostics,
+  preserving the SDK's separate retry budgets and checkpoint/cancellation rules.
+- Resume the same conversation on a fresh process before the next user send
+  after exhausted transport recovery or authentication errors; never replay a
+  failed user prompt automatically.
+
 ### feat(feishu): backfill shared realtime cards and quiet active p2p conversations
 
 - Render Source as plaintext chat/sender names with IDs; preserve the fast Summary

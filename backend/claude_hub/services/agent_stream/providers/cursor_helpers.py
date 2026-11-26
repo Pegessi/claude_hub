@@ -8,7 +8,7 @@ import re
 import sqlite3
 import uuid
 from pathlib import Path
-from typing import AbstractSet, Any, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import AbstractSet, Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 _ACP_PRELOAD_PATH = Path(__file__).with_name("cursor_acp_preload.cjs").resolve()
 
@@ -393,6 +393,68 @@ def _format_acp_error_text(text: str) -> str:
     if _CONTENT_POLICY_REFUSAL_SUBSTR in cleaned and _CONTENT_POLICY_HINT not in cleaned:
         return f"{cleaned}{_CONTENT_POLICY_HINT}"
     return cleaned
+
+
+def _cursor_inline_error(update: Dict[str, Any]) -> Optional[str]:
+    if update.get("sessionUpdate") != "agent_message_chunk":
+        return None
+    content = update.get("content")
+    text = content.get("text") if isinstance(content, dict) else None
+    if not isinstance(text, str):
+        return None
+    if text.startswith("\n\nError:"):
+        return text.lstrip("\n").removeprefix("Error: ")
+    if text in {
+        "\n\nPlease sign in to continue",
+        "\n\nUpgrade your plan to continue",
+        "\n\nAdd a payment method to continue",
+        "\n\nCheck your settings to continue",
+    }:
+        return text.strip()
+    return None
+
+
+def _cursor_runtime_record(
+    params: Dict[str, Any], redact: Callable[[str], str]
+) -> Optional[Dict[str, Any]]:
+    """Normalize the preload's bounded diagnostics, never raw errors/headers."""
+    if params.get("event") == "connection":
+        state = params.get("state")
+        if state not in {"reconnecting", "connected"}:
+            return None
+        text = "Cursor connection restored" if state == "connected" else "Cursor reconnecting"
+        attempt = params.get("attempt")
+        if type(attempt) is int and 0 < attempt <= 100:
+            text += f" (attempt {attempt})"
+        return {"type": "acp_status", "state": state, "text": text}
+    if params.get("event") != "error" or params.get("kind") == "CancelledError":
+        return None
+    message = params.get("message")
+    if not isinstance(message, str) or not message.strip():
+        message = "Cursor request failed"
+    fields = []
+    for key in (
+        "kind",
+        "action",
+        "connectCode",
+        "errorCode",
+        "inferenceRequestErrorType",
+        "requestId",
+    ):
+        value = params.get(key)
+        if type(value) is int or (
+            isinstance(value, str) and re.fullmatch(r"[a-zA-Z0-9_.:-]{1,160}", value)
+        ):
+            fields.append(f"{key}={value}")
+    detail = _format_acp_error_text(redact(message[:1500]))
+    if fields:
+        detail += " [" + redact(", ".join(fields)) + "]"
+    return {
+        "type": "acp_error",
+        "message": detail,
+        "restart_before_send": params.get("kind") == "RetriableError"
+        or params.get("action") == "login",
+    }
 
 
 def _extract_permission_detail(tool_call: Dict[str, Any]) -> str:

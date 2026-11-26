@@ -28,6 +28,8 @@ from .cursor_helpers import (
     _CONTENT_POLICY_HINT,
     _CONTENT_POLICY_REFUSAL_SUBSTR,
     _cursor_config_root,
+    _cursor_inline_error,
+    _cursor_runtime_record,
     _ensure_acp_meta_file,
     _extract_permission_detail,
     _format_acp_error_text,
@@ -130,6 +132,7 @@ class CursorSession(ProcessSession):
         self._turn_error_emitted = False
         self._transient_turn_error: Optional[str] = None
         self._transient_turn_recovered = False
+        self._restart_before_send = False
 
     @property
     def active_thread_id(self) -> Optional[str]:
@@ -178,6 +181,9 @@ class CursorSession(ProcessSession):
 
     async def _prepare_for_send(self) -> None:
         if self._turn_in_flight:
+            return
+        if self._restart_before_send:
+            await self.restart_for_recovery()
             return
         if not self._started or self._process is None:
             return
@@ -278,6 +284,7 @@ class CursorSession(ProcessSession):
                 self._started = True
                 self._handshake_complete = True
                 self._last_error = None
+                self._restart_before_send = False
                 self._launch_fingerprint = fingerprint
                 return
 
@@ -780,6 +787,8 @@ class CursorSession(ProcessSession):
         if self._turn_error_emitted or (
             self._transient_turn_error and not self._transient_turn_recovered
         ):
+            if self._transient_turn_error and not self._transient_turn_recovered:
+                self._restart_before_send = True
             payload: Dict[str, Any] = {
                 "type": "result",
                 "subtype": "error",
@@ -1279,6 +1288,22 @@ class CursorSession(ProcessSession):
     async def _handle_notification(self, record: Dict[str, Any], *, generation: int) -> None:
         if self._replaying_history or self._suppress_active_turn_updates:
             return
+        if record.get("method") == "_claude_hub/cursor_runtime":
+            params = record.get("params")
+            if (
+                generation != self._stdout_generation
+                or not self.turn_in_flight
+                or not isinstance(params, dict)
+                or params.get("sessionId") != self._acp_session_id
+            ):
+                return
+            event = _cursor_runtime_record(params, self._runtime.redact_diagnostic)
+            if event is not None:
+                if event["type"] == "acp_error":
+                    self._turn_error_emitted = True
+                    self._restart_before_send = event.pop("restart_before_send")
+                await self._enqueue_notification(event, generation=generation)
+            return
         if record.get("method") != "session/update":
             return
         params = record.get("params")
@@ -1288,51 +1313,23 @@ class CursorSession(ProcessSession):
         if not isinstance(update, dict):
             return
         session_id = params.get("sessionId")
-        update_kind = update.get("sessionUpdate")
-
-        # Catch inline ACP error chunks emitted by agent-session.ts catch block
-        # on the parent session so they surface as structured ERROR events
-        # instead of fake prose, without letting sub-agent error chunks poison
-        # the parent turn.
-        if update_kind == "agent_message_chunk" and (
-            not self._acp_session_id or session_id == self._acp_session_id
-        ):
-            content = update.get("content")
-            text = content.get("text") if isinstance(content, dict) else None
-            if isinstance(text, str) and text.startswith("\n\nError:"):
-                raw_err = text.lstrip("\n")
-                if raw_err.startswith("Error: "):
-                    raw_err = raw_err[len("Error: ") :]
-                if raw_err.startswith("RetriableError:"):
-                    self._transient_turn_error = _format_acp_error_text(raw_err)
-                    self._transient_turn_recovered = False
-                    return
-                self._turn_error_emitted = True
-                await self._enqueue_notification(
-                    {
-                        "type": "acp_error",
-                        "message": _format_acp_error_text(raw_err),
-                        "session_id": session_id,
-                    },
-                    generation=generation,
-                )
+        # The preload preserves the original terminal error before ACP replaces
+        # it with a generic sign-in/plan message. Older CLIs retain this fallback.
+        raw_err = _cursor_inline_error(update)
+        if raw_err is not None and (not self._acp_session_id or session_id == self._acp_session_id):
+            if self._turn_error_emitted:
                 return
-            if isinstance(text, str) and text in {
-                "\n\nPlease sign in to continue",
-                "\n\nUpgrade your plan to continue",
-                "\n\nAdd a payment method to continue",
-                "\n\nCheck your settings to continue",
-            }:
-                self._turn_error_emitted = True
-                await self._enqueue_notification(
-                    {
-                        "type": "acp_error",
-                        "message": _format_acp_error_text(text.strip()),
-                        "session_id": session_id,
-                    },
-                    generation=generation,
-                )
+            if raw_err.startswith("RetriableError:"):
+                self._transient_turn_error = _format_acp_error_text(raw_err)
+                self._transient_turn_recovered = False
                 return
+            self._turn_error_emitted = True
+            self._restart_before_send = raw_err == "Please sign in to continue"
+            await self._enqueue_notification(
+                {"type": "acp_error", "message": _format_acp_error_text(raw_err)},
+                generation=generation,
+            )
+            return
 
         if (
             self._transient_turn_error

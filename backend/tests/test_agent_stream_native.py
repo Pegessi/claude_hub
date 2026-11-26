@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import importlib
 import json
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -5822,7 +5823,7 @@ async def test_cursor_acp_session_load_error_boundary_and_persistence_ordering(
 def test_cursor_acp_retry_preload_enables_checkpoint_retries_and_scrubs_node_options() -> None:
     """Regression for ``RetriableError: [resource_exhausted] Error`` aborting
     ACP turns on ``attempt=0``: ``cursor_acp_preload.cjs`` enables
-    ``enableAgentRetries=True`` and ``maxRetries=8`` on ``agent-session.ts``'s
+    ``enableAgentRetries=True`` and the SDK's native retry budgets on ``agent-session.ts``'s
     ``agentClient.run`` options via ``Module._load`` (without polluting
     ``Object.prototype``) and scrubs itself from ``NODE_OPTIONS`` so child
     tool shells do not inherit the preload flag."""
@@ -5875,9 +5876,9 @@ def test_cursor_acp_retry_preload_enables_checkpoint_retries_and_scrubs_node_opt
       nodeOptionsAfterLoad: process.env.NODE_OPTIONS || "",
       inProtoEnable: "enableAgentRetries" in frozen,
       inProtoMaxRetries: "maxRetries" in frozen,
-      wEnable: w.enableAgentRetries,
-      wMaxRetries: w.maxRetries,
-      explicitOffEnable: explicitOff.enableAgentRetries,
+      wEnable: capturedOpts[0].enableAgentRetries,
+      wMaxRetries: capturedOpts[0].maxRetries ?? null,
+      explicitOffEnable: capturedOpts[1].enableAgentRetries,
     }));
     """
     # Strip the fake quoted require before spawning node so node only loads _ACP_PRELOAD_PATH.
@@ -5896,8 +5897,83 @@ def test_cursor_acp_retry_preload_enables_checkpoint_retries_and_scrubs_node_opt
     assert parsed["inProtoEnable"] is False
     assert parsed["inProtoMaxRetries"] is False
     assert parsed["wEnable"] is True
-    assert parsed["wMaxRetries"] == 8
+    assert parsed["wMaxRetries"] is None
     assert parsed["explicitOffEnable"] is False
+
+
+def test_cursor_preload_reports_owned_reconnects_and_final_errors() -> None:
+    import os
+    import shutil
+    import subprocess
+
+    from claude_hub.services.agent_stream.providers.cursor_helpers import _inject_acp_preload_env
+
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node required for the Cursor preload")
+    script = r"""
+    const assert = require('node:assert/strict');
+    const hooks = globalThis.__claudeHubCursorAcpPreload;
+    const notifications = [], optionsSeen = [], callbacks = [];
+    const failure = Object.assign(new Error('upstream authentication failed'), {
+      kind: 'ActionRequiredError', action: 'login', requestId: 'request-1',
+      displayInfo: {errorCode: 42, inferenceRequestErrorType: 'AUTHENTICATION'},
+      headers: {Authorization: 'must-not-escape'}, cause: {token: 'must-not-escape'},
+    });
+    const ac = {async run(ctx, b, c, d, e, f, g, h, store, j, opts) {
+      optionsSeen.push(opts);
+      opts.onConnectionStateChange({state: 'reconnecting', attempt: 2, secret: 'must-not-escape'});
+      await new Promise(r => setImmediate(r));
+      opts.onConnectionStateChange({state: 'connected'});
+      if (store.fail) throw failure;
+      return 'ok';
+    }};
+    class Session {
+      constructor(id, fail, canceled=false) {
+        this.sessionId=id;
+        this.agentStore={fail};
+        this.ctx={canceled};
+        this.sharedServices={agentClient:ac};
+        this.connection={async extNotification(method, params) {
+          notifications.push({method, params});
+          if (id==='broken-reporting') throw new Error('notification failed');
+        }};
+      }
+      async processPrompt() {
+        try {
+          return await ac.run(this.ctx,2,3,4,5,6,7,8,this.agentStore,10,{
+            onConnectionStateChange: s => callbacks.push([this.sessionId,s.state]),
+          });
+        } catch(e) { assert.equal(e, failure); return 'failed'; }
+      }
+    }
+    hooks.patchAgentSessionClass(Session);
+    (async () => {
+      const a=new Session('a',true), b=new Session('b',false);
+      assert.deepEqual(await Promise.all([a.processPrompt(),b.processPrompt()]), ['failed','ok']);
+      assert.equal(await new Session('cancelled',true,true).processPrompt(), 'failed');
+      assert.equal(await new Session('broken-reporting',true).processPrompt(), 'failed');
+      const count=notifications.length;
+      optionsSeen[0].onConnectionStateChange({state:'reconnecting',attempt:9});
+      await new Promise(r => setImmediate(r));
+      assert.equal(notifications.length,count); // no late callbacks after turn end
+      const errors=notifications.filter(n=>n.params.event==='error');
+      assert.deepEqual(errors.map(n=>n.params.sessionId), ['a','broken-reporting']);
+      assert.equal(errors[0].params.errorCode,42);
+      assert.equal(optionsSeen[0].enableAgentRetries,true);
+      assert.equal(optionsSeen[0].maxRetries,undefined);
+      assert.equal(callbacks.length,9); // original callback still called, including late event
+      assert.equal(JSON.stringify(notifications).includes('must-not-escape'),false);
+      assert(notifications.every(n=>n.method==='_claude_hub/cursor_runtime'));
+      console.log(JSON.stringify({ok:true,notifications:notifications.length}));
+    })().catch(e=>{console.error(e);process.exitCode=1});
+    """
+    env = _inject_acp_preload_env(dict(os.environ))
+    result = subprocess.run(
+        [node, "-e", script, "acp"], env=env, capture_output=True, text=True, timeout=10
+    )
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["ok"] is True
 
 
 @pytest.mark.asyncio
@@ -6481,6 +6557,106 @@ async def test_cursor_retriable_error_requires_recovery_and_success(ending: str)
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "kind,action,restart",
+    [
+        ("ActionRequiredError", "login", True),
+        ("RetriableError", "", True),
+        ("ActionRequiredError", "upgrade", False),
+    ],
+)
+async def test_cursor_runtime_diagnostics_and_next_send_recovery(
+    kind: str, action: str, restart: bool, monkeypatch: MonkeyPatch
+) -> None:
+    cursor_module = importlib.import_module("claude_hub.services.agent_stream.providers.cursor")
+    monkeypatch.setattr(cursor_module, "_migrate_legacy_cli_store_for_acp", lambda *args: None)
+    procs = [_InteractiveAcpProc(session_id="same-conversation") for _ in range(2)]
+    native = CursorNativeSession(_session(AgentType.CURSOR))
+    native._build_provider_env = AsyncMock(return_value={"PATH": "/bin"})  # type: ignore[method-assign]
+    native._spawn_subprocess = AsyncMock(side_effect=procs)  # type: ignore[method-assign]
+    await native.start()
+    try:
+        await native.send_message("first user request", [])
+        generation = native._stdout_generation
+
+        async def notification(params: Dict[str, Any], gen: int = generation) -> None:
+            await native._handle_notification(
+                {"method": "_claude_hub/cursor_runtime", "params": params}, generation=gen
+            )
+
+        failed = {
+            "sessionId": "same-conversation",
+            "event": "error",
+            "kind": kind,
+            "action": action,
+            "message": "upstream request rejected",
+            "errorCode": 42,
+            "headers": {"Authorization": "never persist"},
+        }
+        await notification({**failed, "sessionId": "child-session"})
+        await notification(failed, generation - 1)
+        assert not native._turn_error_emitted
+        await notification(
+            {
+                "sessionId": "same-conversation",
+                "event": "connection",
+                "state": "reconnecting",
+                "attempt": 2,
+            }
+        )
+        status = await asyncio.wait_for(native.read_line(), 1)
+        assert status is not None and status["type"] == "acp_status"
+        assert "attempt 2" in status["text"]
+        assert not native._turn_error_emitted
+        await notification(failed)
+        error = await asyncio.wait_for(native.read_line(), 1)
+        assert error is not None and error["type"] == "acp_error"
+        assert "errorCode=42" in error["message"]
+        assert "never persist" not in json.dumps(error)
+        # ACP's fallback message must not hide/duplicate the detailed error.
+        await native._handle_notification(
+            {
+                "method": "session/update",
+                "params": {
+                    "sessionId": "same-conversation",
+                    "update": {
+                        "sessionUpdate": "agent_message_chunk",
+                        "content": {"type": "text", "text": "\n\nPlease sign in to continue"},
+                    },
+                },
+            },
+            generation=generation,
+        )
+        prompt = next(r for r in procs[0].requests if r.get("method") == "session/prompt")
+        procs[0].stdout.push_json(
+            {"jsonrpc": "2.0", "id": prompt["id"], "result": {"stopReason": "end_turn"}}
+        )
+        result = await asyncio.wait_for(native.read_line(), 1)
+        assert result is not None and result["type"] == "result" and result["is_error"]
+        assert native._spawn_subprocess.await_count == 1
+        assert len([r for r in procs[0].requests if r.get("method") == "session/prompt"]) == 1
+        native.acknowledge_turn_complete()
+        await notification(failed)  # no owning turn: do not reopen failed state
+        await native.send_message("second explicit user request", [])
+        assert native._spawn_subprocess.await_count == (2 if restart else 1)
+        active = procs[1] if restart else procs[0]
+        if restart:
+            load = next(r for r in active.requests if r.get("method") == "session/load")
+            assert load["params"]["sessionId"] == "same-conversation"
+        prompts = [r for r in active.requests if r.get("method") == "session/prompt"]
+        assert prompts[-1]["params"]["prompt"][-1]["text"].endswith("second explicit user request")
+        assert not native._restart_before_send
+        active.stdout.push_json(
+            {"jsonrpc": "2.0", "id": prompts[-1]["id"], "result": {"stopReason": "end_turn"}}
+        )
+        result = await asyncio.wait_for(native.read_line(), 1)
+        assert result is not None and result["type"] == "result" and not result["is_error"]
+        native.acknowledge_turn_complete()
+    finally:
+        await native.stop()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("failures", [1, 2])
 async def test_cursor_load_timeout_retries_fresh_process_with_diagnostics(
     monkeypatch: MonkeyPatch, failures: int
@@ -6550,6 +6726,28 @@ async def test_cursor_retriable_recovery_completes_stream_turn(
     try:
         await tailer.send_message("test", [], client_turn_id="turn-recovery")
         prompt = next(r for r in proc.requests if r.get("method") == "session/prompt")
+        tailer._last_event_at = time.monotonic() - 100
+        before_reconnect = tailer._last_event_at
+        proc.stdout.push_json(
+            {
+                "jsonrpc": "2.0",
+                "method": "_claude_hub/cursor_runtime",
+                "params": {
+                    "sessionId": "recovery-stream",
+                    "event": "connection",
+                    "state": "reconnecting",
+                    "attempt": 2,
+                },
+            }
+        )
+        while True:
+            reconnect = await asyncio.wait_for(queue.get(), 1)
+            assert reconnect.type != AgentStreamEventType.TURN_COMPLETED
+            if reconnect.type == AgentStreamEventType.STATUS:
+                assert "reconnecting" in reconnect.payload["text"]
+                break
+        assert tailer._last_event_at > before_reconnect
+        assert native.turn_in_flight
         for kind, text in (
             (
                 "agent_message_chunk",
