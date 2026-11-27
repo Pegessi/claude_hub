@@ -3,10 +3,11 @@
 from claude_hub.services.task_transitions import apply_task_update
 
 from .._constants import *  # noqa: F401,F403
+from ..subagent_review import _SubagentTaskReviewMixin
 from .autonomous import _AutonomousReportMixin
 
 
-class _ReportReviewRequestMixin(_AutonomousReportMixin):
+class _ReportReviewRequestMixin(_SubagentTaskReviewMixin, _AutonomousReportMixin):
     async def _request_goal_packet_supplement(
         self,
         task: WorkspaceTask,
@@ -145,6 +146,9 @@ class _ReportReviewRequestMixin(_AutonomousReportMixin):
         workspace = self.workspaces.get(task.workspace_id)
         if not workspace:
             raise KeyError(task.workspace_id)
+        if self._should_use_subagent_task_review(workspace, task, trigger_report):
+            self._start_subagent_task_review(workspace, task, trigger_report)
+            return
         prior_sessions = set(self.sessions)
         reviewer = await self._select_or_create_reviewer(workspace, task)
         if not self._liveness_review_claim_valid(task):

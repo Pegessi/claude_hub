@@ -17,6 +17,14 @@ from .._constants import (
 )
 from .assignment import _AssignmentPromptsMixin
 
+BLIND_REVIEW_RULES = """Blind review rules:
+1. Input boundary: assess task goals and acceptance criteria, the actual Git diff and validation output. The worker's reasoning is unavailable; independently verify claims in code and the repository.
+2. Scope: report only defects introduced by this change or unmet task requirements and acceptance criteria. Do not report pre-existing defects.
+3. Severity: only P0 (functional failure, crash, data safety, or unmet core acceptance) and P1 (likely failure or missing necessary validation) are blocking. Style and defensive suggestions are P2, at most 1-2, and never cause review_failed.
+4. Evidence: each finding needs an exact path:line, a concrete failure scenario, and a short fix. Report only well-supported defects; if there are no blocking findings, pass without inventing issues.
+5. Convergence: on re-review verify the previous blocking findings and the worker's code-level rebuttal. Accept a supported rebuttal and do not overturn the previous direction without cause.
+"""
+
 
 class _ReviewPromptsMixin(_AssignmentPromptsMixin):
     _SUMMARY_VERBOSE_FIELD_MAX = 240

@@ -263,6 +263,7 @@ class _TaskLivenessMixin(_WorkspaceManagerBase):
             and self._sealed_cycle_verdict_state(task.id, task.review_cycle)
             in {AgentReportState.REVIEW_PASSED, AgentReportState.REVIEW_FAILED}
         )
+        resume = resume and not getattr(self, "_review_failure_cap_reached")(task)
         session_id = task.review_session_id if reviewing else task.session_id
         session = self.sessions.get(session_id or "")
         bound = (
@@ -277,6 +278,8 @@ class _TaskLivenessMixin(_WorkspaceManagerBase):
             or session.status == ManagedSessionStatus.STOPPED
         )
         active, blocked, pending, interruption, completion = False, "", False, "", False
+        if reviewing and getattr(self, "_subagent_review_is_active")(task):
+            active, dead = True, False
         activity = [task.started_at or task.updated_at]
         if reviewing:
             activity = [
@@ -1204,7 +1207,6 @@ class _TaskLivenessMixin(_WorkspaceManagerBase):
 
     def _observe_task_lifecycles(self, workspace_id: str) -> int:
         """Record lifecycle changes and emit one ``lifecycle`` event per change."""
-
         tasks = [task for task in self.tasks.values() if task.workspace_id == workspace_id]
         if not tasks:
             return 0
@@ -1285,7 +1287,6 @@ class _TaskLivenessMixin(_WorkspaceManagerBase):
 
     def _notice_never_wanted(self, task: WorkspaceTask, reason: str) -> bool:
         """Reasons nobody outside the work should be paged about."""
-
         if reason in SELF_REPORTED_REASONS:
             return True
         # Owner loss under workspace control is resolved within minutes

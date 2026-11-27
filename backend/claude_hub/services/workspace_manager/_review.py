@@ -7,6 +7,38 @@ from ._constants import *  # noqa: F401,F403
 
 
 class _ReviewMixin(_WorkspaceManagerBase):
+    def _review_failure_cap_reached(self, task: WorkspaceTask) -> bool:
+        return (
+            self._sealed_cycle_verdict_state(task.id, task.review_cycle)
+            == AgentReportState.REVIEW_FAILED
+            and self._implementation_review_failure_count(task.id) >= 3
+        )
+
+    def _implementation_review_failure_count(self, task_id: str) -> int:
+        """Count failed implementation rounds once, excluding the plan gate."""
+        task = self.tasks[task_id]
+        reports = [r for r in self.reports_for_workspace(task.workspace_id) if r.task_id == task_id]
+        # The plan gate is triggered by a worker WORKING report before any
+        # implementation completion report. AgentReport does not store packets.
+        plan_cycles: set[int] = set()
+        if task.task_mode == WorkspaceTaskMode.REVIEWED and task.goal_packet is not None:
+            for r in sorted(reports, key=lambda item: item.created_at):
+                if r.session_id == task.session_id and r.state in {
+                    AgentReportState.COMPLETED,
+                    AgentReportState.READY_FOR_REVIEW,
+                }:
+                    break
+                if r.session_id == task.session_id and r.state == AgentReportState.WORKING:
+                    plan_cycles.add(r.review_cycle)
+
+        return len(
+            {
+                r.review_cycle
+                for r in reports
+                if r.state == AgentReportState.REVIEW_FAILED and r.review_cycle not in plan_cycles
+            }
+        )
+
     def _reviewer_is_busy_with_other_task(
         self, reviewer: "ManagedSession", current_task_id: str
     ) -> bool:
@@ -284,6 +316,8 @@ class _ReviewMixin(_WorkspaceManagerBase):
         task: WorkspaceTask,
         reviewer: ManagedSession,
         report: AgentReport,
+        *,
+        autonomous_next_phase_override: AutonomousRunPhase | None = None,
     ) -> None:
         if report.state == AgentReportState.REVIEW_STARTED:
             return
@@ -462,9 +496,12 @@ class _ReviewMixin(_WorkspaceManagerBase):
             # derive autonomous_next_phase so the REVIEW_FAILED re-dispatch
             # guard still works correctly for autonomous tasks.
             if task.task_mode == WorkspaceTaskMode.AUTONOMOUS:
-                _run, autonomous_next_phase = self._autonomous_run_after_evaluation(
-                    task, reviewer, report, now=now
-                )
+                if autonomous_next_phase_override is not None:
+                    autonomous_next_phase = autonomous_next_phase_override
+                else:
+                    _run, autonomous_next_phase = self._autonomous_run_after_evaluation(
+                        task, reviewer, report, now=now
+                    )
             logger.info(
                 "Reviewer terminal decision already applied; _handle_review_report "
                 "skipping writes workspace_id=%s task_id=%s reviewer=%s decision=%s",
@@ -485,10 +522,11 @@ class _ReviewMixin(_WorkspaceManagerBase):
                 )
             return
         updated_task = self.tasks[task.id]
+        failure_count = self._implementation_review_failure_count(updated_task.id)
+        if failure_count >= 3:
+            return
         if updated_task.task_mode == WorkspaceTaskMode.AUTONOMOUS:
             if autonomous_next_phase != AutonomousRunPhase.REVISING:
-                return
-            if updated_task.review_attempts > MAX_AUTOMATED_REVIEW_FAILURES:
                 return
         feedback = (
             "Autonomous evaluator requested changes.\n\n"
@@ -499,7 +537,15 @@ class _ReviewMixin(_WorkspaceManagerBase):
             f"Reviewer session: {reviewer.id}\n"
             f"Review attempt: {updated_task.review_attempts}\n\n"
             f"{report.message}\n\n"
-            "Address the required fixes, rerun appropriate validation, and report completed again."
+            f"Rework round {failure_count} of at most 2. The independent blind reviewer "
+            "did not see your context; check every blocking finding against the current code.\n"
+            "1. For a real defect, fix it, rerun validation, and report completed.\n"
+            "2. For a false positive or an established architectural tradeoff, do not add "
+            "defensive code merely to appease the reviewer. Preserve the design and rebut it "
+            "in the report message with concrete path:line and factual evidence.\n"
+            "3. If every blocking finding is false and no code change is needed, report "
+            'state="needs_input" with path:line rebuttal evidence for human decision; '
+            "do not resubmit for another review."
         )
         try:
             await self.continue_task(updated_task.id, ContinueTaskRequest(message=feedback))
