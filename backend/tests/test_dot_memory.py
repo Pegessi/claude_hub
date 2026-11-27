@@ -402,7 +402,7 @@ def test_prepare_turn_rotation_rules(store: DotStore) -> None:
     first = service.prepare_turn("hello", None)
     assert first.rotate and first.new_session and first.prepared_generation
     assert "You are Dot" in first.system_pack
-    assert "dot review" in first.system_pack, "the review step is in every session"
+    assert "dot review" in first.system_pack, "the optional review tool stays documented"
     assert service.associate_conversation(
         "provider-1", prepared_generation=first.prepared_generation, tab_id="tab-dot"
     )
@@ -471,14 +471,16 @@ def test_the_users_turn_shows_events_but_leaves_them_to_the_wake_up(store: DotSt
     plan = service.prepare_turn("hi", None)
     assert "Build broke" in plan.turn_pack and plan.delivered_event_ids == []
     assert "Events waiting for your next wake-up" in plan.turn_pack
-    assert "answer the user first" in plan.turn_pack
+    # The standing review nag no longer rides along on the user's turn.
+    assert "## Waiting for your review" not in plan.turn_pack
+    assert "answer the user first" not in plan.turn_pack
     assert len(store.list_inbox()) == 1
     assert service.associate_conversation(
         "provider-1", prepared_generation=plan.prepared_generation, tab_id="tab-dot"
     )
     wake = service.prepare_turn(WAKE_MESSAGE, "provider-1")
     assert "New events since your last turn" in wake.turn_pack and wake.delivered_event_ids
-    assert "Consider the evidence against each done-when item" in wake.turn_pack
+    assert "## Waiting for your review" not in wake.turn_pack
 
 
 def test_events_cut_from_the_pack_stay_unread(store: DotStore) -> None:

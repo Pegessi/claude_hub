@@ -254,7 +254,11 @@ async def test_delegate_holds_a_weak_brief_until_fixed_or_confirmed(
     assert "## Done when (check each one)\n1. notes/fa3.md has 5 bullets" in brief
     assert "\n2. each bullet cites a section" in brief
     assert "## Output\nnotes/fa3.md in the repo" in brief
-    assert 'Map each "Done when" item to evidence' in brief and "open gap" in brief
+    assert (
+        'Map each "Done when" item to the exact' in brief
+        and "verification command" in brief
+        and "open gap" in brief
+    )
     work = result["work"]
     assert work["done_when"] == GOOD["done_when"] and "brief_warnings" not in work
 
@@ -330,7 +334,11 @@ async def test_review_loop_learns_from_brief_misses(
     assert card is not None and "## Done when\n1. notes/fa3.md has 5 bullets" in card.body
     assert [item["task_id"] for item in store.pending_reviews()] == ["task-1", "task-2", "task-3"]
     pack = build_turn_pack(store, None, "", first_turn=False, session_turn=2).text
-    assert "## Waiting for your review" in pack and "the worker had to ask a question" in pack
+    # Pending verdicts no longer render as a standing nag section in every turn.
+    assert "## Waiting for your review" not in pack
+    assert "dot review" not in pack
+    # The tracked work list still names the delegated tasks.
+    assert "task-1" in pack and "task-w" in pack
 
     with pytest.raises(KeyError):
         await service.review("nope", verdict="ok")
@@ -563,7 +571,9 @@ def test_reviews_survive_a_full_inbox(service: DotService) -> None:
         store.add_inbox("task_done", f"event {index} " + "x" * 390)
     built = build_turn_pack(store, None, "", first_turn=False, session_turn=2)
     assert all(f"- [task-{index}] Paper {index}" in built.text for index in range(8))
-    assert "`claude-hub dot review --help`" in built.text
+    # No review-nag section: the tasks stay visible only via Tracked work.
+    assert "## Waiting for your review" not in built.text
+    assert "dot review" not in built.text
     assert len(built.text) <= 5000
     assert 0 < len(built.delivered_event_ids) < 12, "the rest of the events wait for a later turn"
 

@@ -69,6 +69,45 @@ def _final_review_report(task: Any, reports: list[Any]) -> Any:
     return None
 
 
+def _build_delegate_receipt(
+    *,
+    goal: str,
+    checks: list[str],
+    agent_type: str,
+    model: Optional[str],
+    session_kind: Any,
+    use_ephemeral: Optional[bool],
+    auto_worktree: bool,
+    readonly: bool,
+    why: str,
+) -> str:
+    """The four-line contract card shown to the user right after delegation."""
+    goal_line = _first_line(goal, 200) or goal.strip()[:200]
+    acceptance = " | ".join(
+        f"{index}) {_first_line(check, 140)}" for index, check in enumerate(checks, 1)
+    )
+    # SessionKind is imported lazily inside delegate() to avoid import cycles;
+    # compare on its wire value instead.
+    is_chat = getattr(session_kind, "value", session_kind) == "chat"
+    surface = "chat+ephemeral" if is_chat and use_ephemeral else "chat" if is_chat else "terminal"
+    model_label = f"{agent_type}:{model.strip()}" if model else agent_type
+    if readonly:
+        isolation = "readonly investigation (no edits, no worktree)"
+    elif auto_worktree:
+        isolation = "isolated git worktree (auto-push off)"
+    else:
+        isolation = "workspace path (no worktree)"
+    why_label = f" · why: {why}" if why else ""
+    return "\n".join(
+        [
+            f"① Goal: {goal_line}",
+            f"② Done when: {acceptance}",
+            f"③ Execution: {model_label} · {surface} · {isolation}{why_label}",
+            "④ Notify: only when it finishes or is truly stuck; routine progress stays quiet.",
+        ]
+    )
+
+
 class DotWorkService(DotSessionService, ABC):
     async def receive_hub_notice(self, task_id: str, kind: str, text: str, key: str) -> bool:
         """Take a Hub lifecycle notice to judge; Dot decides whether the user hears it.
@@ -110,6 +149,8 @@ class DotWorkService(DotSessionService, ABC):
         stall_hours: Optional[float] = None,
         session_id: Optional[str] = None,
         confirm: bool = False,
+        readonly: bool = False,
+        why: str = "",
         actor_key: str,
     ) -> dict[str, Any]:
         """Check the brief, then register (and start) one Hub Task and track it.
@@ -122,6 +163,9 @@ class DotWorkService(DotSessionService, ABC):
         from ....models.schemas import (
             AgentType,
             EnsureWorkspaceAgentRequest,
+            ExecutionTarget,
+            GoalPacket,
+            GoalPacketStatus,
             SessionKind,
             StartTaskRequest,
             TaskSourceReference,
@@ -133,7 +177,11 @@ class DotWorkService(DotSessionService, ABC):
         from ... import workspace_manager
         from ...agent_stream.providers.spec import get_spec
         from ...maso_discovery import discover_maso_service
-        from ...work_pipeline import provision_task_worktree, read_infowall_demand_summary
+        from ...work_pipeline import (
+            _resolve_canonical_git_repo_root,
+            provision_task_worktree,
+            read_infowall_demand_summary,
+        )
         from ...workspace_manager._task_execution import TaskExecutionConflict
 
         checks = [" ".join(item.split()) for item in done_when if item.strip()]
@@ -144,8 +192,26 @@ class DotWorkService(DotSessionService, ABC):
             demand_id.strip() if isinstance(demand_id, str) and demand_id.strip() else None
         )
         caller_context = context.strip()
+        effective_why = " ".join(why.split())[:500]
+        # Triage is always a read-only investigation; an explicit --readonly flag
+        # gets the same safe defaults even without naming the recipe.
+        effective_readonly = bool(readonly) or recipe == "triage_diagnose"
+        if effective_readonly:
+            if not task_mode:
+                task_mode = WorkspaceTaskMode.SUBAGENT.value
+            if not recipe:
+                recipe = WorkspaceTaskRecipe.TRIAGE_DIAGNOSE.value
 
         session_kind = None
+        use_ephemeral: Optional[bool] = ephemeral
+        ws_obj = None
+        chat_agents = {
+            AgentType.CLAUDE,
+            AgentType.CODEX,
+            AgentType.CURSOR,
+            AgentType.MASO,
+            AgentType.ANTIGRAVITY,
+        }
         if session_id:
             target = workspace_manager.sessions.get(session_id)
             if (
@@ -159,20 +225,46 @@ class DotWorkService(DotSessionService, ABC):
             session_kind = target.session_kind
         else:
             parsed_agent = AgentType(agent_type)
-            if (
+            # Defensive getattr: older test doubles may not expose ``workspaces``.
+            ws_obj = getattr(workspace_manager, "workspaces", {}).get(workspace_id)
+            target_is_local = (
+                ws_obj is None or getattr(ws_obj, "target", None) == ExecutionTarget.LOCAL
+            )
+            explicit_chat = (
                 parsed_agent in {AgentType.MASO, AgentType.ANTIGRAVITY}
-                or model
-                or env_preset
+                or bool(model)
+                or bool(env_preset)
                 or ephemeral is not None
                 or recipe == "triage_diagnose"
-            ) and parsed_agent in {
-                AgentType.CLAUDE,
-                AgentType.CODEX,
-                AgentType.CURSOR,
-                AgentType.MASO,
-                AgentType.ANTIGRAVITY,
-            }:
+            )
+            if parsed_agent in chat_agents and (target_is_local or explicit_chat):
+                # Lightweight fast lane: local agent work defaults to a Chat
+                # session instead of falling back to a heavy Terminal.
                 session_kind = SessionKind.CHAT
+            if target_is_local and parsed_agent in chat_agents:
+                use_ephemeral = True if ephemeral is None else bool(ephemeral)
+
+        # Local writable code work gets an isolated Git worktree by default; the
+        # probe is best-effort: a non-Git directory simply stays on the workspace
+        # path instead of failing the delegation.
+        auto_worktree = False
+        if (
+            not session_id
+            and not effective_readonly
+            and ws_obj is not None
+            and getattr(ws_obj, "target", None) == ExecutionTarget.LOCAL
+            and getattr(ws_obj, "path", None)
+        ):
+            try:
+                await _resolve_canonical_git_repo_root(ws_obj.path)
+            except Exception:
+                logger.debug(
+                    "dot: workspace %s path is not a Git repo; skipping auto worktree",
+                    workspace_id,
+                    exc_info=True,
+                )
+            else:
+                auto_worktree = True
 
         import contextlib
         import hashlib
@@ -282,6 +374,29 @@ class DotWorkService(DotSessionService, ABC):
                 fields["infowall_demand_id"] = cleaned_demand_id
             if session_kind is not None:
                 fields["session_kind"] = session_kind
+            if auto_worktree:
+                # Dot's fast lane isolates work but never pushes on its own.
+                fields["auto_worktree"] = True
+                fields["auto_push_remote"] = False
+            out_of_scope_items = (
+                [line.strip() for line in out_of_scope.splitlines() if line.strip()]
+                if out_of_scope.strip()
+                else []
+            )
+            # The delegate call is the approved contract: the worker starts on it
+            # directly instead of stopping for a separate Goal Packet round.
+            fields["goal_packet"] = GoalPacket(
+                status=GoalPacketStatus.APPROVED,
+                objective=goal.strip(),
+                acceptance_criteria=checks,
+                out_of_scope=out_of_scope_items,
+            )
+            # Forward-compatible with the flat contract fields once they land on
+            # WorkspaceTaskCreate; extra="forbid" makes the dynamic check required.
+            if "goal" in WorkspaceTaskCreate.model_fields:
+                fields["goal"] = goal.strip()
+                fields["done_when"] = checks
+                fields["out_of_scope"] = out_of_scope_items
             task, _replayed = await workspace_manager.register_task(
                 workspace_id, WorkspaceTaskCreate(**fields), actor_key
             )
@@ -312,13 +427,26 @@ class DotWorkService(DotSessionService, ABC):
                     created_ephemeral_session_id: str | None = None
                     try:
                         target_session_id = session_id or getattr(task, "session_id", None)
-                        if not target_session_id and (
-                            model
-                            or env_preset
-                            or ephemeral is not None
-                            or AgentType(agent_type) == AgentType.MASO
+                        # Defensive hasattr: test doubles without agent provisioning
+                        # keep the plain start_task fallback instead of crashing.
+                        can_provision_chat = hasattr(workspace_manager, "ensure_workspace_agent")
+                        default_local_chat = (
+                            bool(use_ephemeral)
+                            and session_kind == SessionKind.CHAT
+                            and ws_obj is not None
+                            and getattr(ws_obj, "target", None) == ExecutionTarget.LOCAL
+                        )
+                        if (
+                            not target_session_id
+                            and can_provision_chat
+                            and (
+                                model
+                                or env_preset
+                                or ephemeral is not None
+                                or AgentType(agent_type) == AgentType.MASO
+                                or default_local_chat
+                            )
                         ):
-                            ws_obj = getattr(workspace_manager, "workspaces", {}).get(workspace_id)
                             provisioned_wt_path: str | None = None
                             if (
                                 ws_obj is not None
@@ -344,7 +472,10 @@ class DotWorkService(DotSessionService, ABC):
                                 spec = get_spec(parsed_agent)
                                 if spec.model_env_key:
                                     agent_env[spec.model_env_key] = model.strip()
-                            use_ephemeral = True if ephemeral is None else bool(ephemeral)
+                            # Outer scope already defaulted local Chat to ephemeral;
+                            # here the explicit-trigger paths (model/preset/maso)
+                            # get the same default when nothing was requested.
+                            use_ephemeral = True if use_ephemeral is None else bool(use_ephemeral)
                             live_before_agent = getattr(workspace_manager, "tasks", {}).get(task.id)
                             if live_before_agent is not None:
                                 if live_before_agent.status.value != "todo":
@@ -416,7 +547,23 @@ class DotWorkService(DotSessionService, ABC):
                         item = self.store.upsert_work(task.id, status=task.status.value)
             finally:
                 await asyncio.to_thread(self.store.commit, f"dot: delegate {task.id}")
-            return {"held": False, "warnings": warnings, "work": item}
+            receipt_summary = _build_delegate_receipt(
+                goal=goal.strip(),
+                checks=checks,
+                agent_type=agent_type,
+                model=model,
+                session_kind=session_kind,
+                use_ephemeral=use_ephemeral,
+                auto_worktree=auto_worktree,
+                readonly=effective_readonly,
+                why=effective_why,
+            )
+            return {
+                "held": False,
+                "warnings": warnings,
+                "work": item,
+                "receipt_summary": receipt_summary,
+            }
 
     async def review(
         self,
