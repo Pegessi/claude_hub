@@ -339,6 +339,23 @@ async def test_update_task_persists_contract_fields_and_syncs_goal_packet(
     assert updated.goal_packet.acceptance_criteria == ["new check 1", "new check 2"]
     assert updated.goal_packet.out_of_scope == ["no deploy"]
 
+    # Explicit clear removes approved goal_packet even when validation_plan existed
+    with_plan = await manager.update_task(
+        task.id,
+        WorkspaceTaskUpdate(
+            goal_packet=updated.goal_packet.model_copy(update={"validation_plan": ["pytest"]})
+        ),
+    )
+    assert with_plan.goal_packet is not None and with_plan.goal_packet.validation_plan == ["pytest"]
+    cleared = await manager.update_task(
+        task.id,
+        WorkspaceTaskUpdate(goal="", done_when=[], out_of_scope=[]),
+    )
+    assert cleared.goal is None
+    assert cleared.done_when == []
+    assert cleared.out_of_scope == []
+    assert cleared.goal_packet is None
+
 
 @pytest.mark.asyncio
 async def test_rework_cap_counts_first_failure_even_when_worker_sent_working_report(

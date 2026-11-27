@@ -90,3 +90,29 @@ test('legacy tasks open with empty optional fields and failed saves retain the d
   assert.equal(actions.showEditTaskModal.value, true)
   assert.equal(actions.editTaskForm.done_when, 'Must survive a failed save')
 })
+
+test('legacy goal_packet tasks prefill contract fields and title-only edits omit contract mutations', async t => {
+  const calls = []
+  const actions = taskActions(t, async (...args) => calls.push(args))
+  actions.openEditTaskModal({
+    id: 'legacy-gp',
+    title: 'Old title',
+    prompt: 'Keep packet',
+    goal_packet: {
+      status: 'approved',
+      objective: 'Legacy packet objective',
+      acceptance_criteria: ['Criterion A'],
+      out_of_scope: ['Out B'],
+      validation_plan: ['pytest'],
+    },
+  })
+  assert.equal(actions.editTaskForm.goal, 'Legacy packet objective')
+  assert.equal(actions.editTaskForm.done_when, 'Criterion A')
+  assert.equal(actions.editTaskForm.out_of_scope, 'Out B')
+  actions.editTaskForm.title = 'Renamed title'
+  await actions.handleUpdateTask()
+  assert.equal(calls[0][1].title, 'Renamed title')
+  assert.equal('goal' in calls[0][1], false)
+  assert.equal('done_when' in calls[0][1], false)
+  assert.equal('out_of_scope' in calls[0][1], false)
+})

@@ -210,7 +210,7 @@ class _TaskUpdatesMixin(_WorkspaceManagerBase):
             update["out_of_scope"] = next_out_of_scope
             if "goal_packet" not in payload.model_fields_set:
                 existing_gp = task.goal_packet
-                if next_goal or next_done_when:
+                if next_goal or next_done_when or next_out_of_scope:
                     if existing_gp is not None:
                         gp_status = (
                             existing_gp.status
@@ -226,7 +226,7 @@ class _TaskUpdatesMixin(_WorkspaceManagerBase):
                                 "updated_at": now,
                             }
                         )
-                    else:
+                    elif next_goal or next_done_when:
                         update["goal_packet"] = GoalPacket(
                             status=GoalPacketStatus.APPROVED,
                             objective=next_goal or effective_title,
@@ -235,13 +235,18 @@ class _TaskUpdatesMixin(_WorkspaceManagerBase):
                             created_at=now,
                             updated_at=now,
                         )
-                elif existing_gp is not None and not (
-                    existing_gp.validation_plan
-                    or existing_gp.assumptions
-                    or existing_gp.handoff_requirements
-                    or existing_gp.status == GoalPacketStatus.PENDING_REVIEW
-                ):
-                    update["goal_packet"] = None
+                elif existing_gp is not None:
+                    if existing_gp.status == GoalPacketStatus.PENDING_REVIEW:
+                        update["goal_packet"] = existing_gp.model_copy(
+                            update={
+                                "objective": effective_title,
+                                "acceptance_criteria": [],
+                                "out_of_scope": [],
+                                "updated_at": now,
+                            }
+                        )
+                    else:
+                        update["goal_packet"] = None
         if payload.goal_packet is not None:
             update["goal_packet"] = payload.goal_packet
         if payload.review_profiles is not None:

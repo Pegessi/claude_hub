@@ -64,6 +64,12 @@ export function useWorkspaceTaskActions(inputs: WorkspaceTaskActionsInputs) {
 
   const editingTaskId = ref<string | null>(null)
 
+  const initialEditContract = reactive({
+    goal: null as string | null,
+    done_when: [] as string[],
+    out_of_scope: [] as string[],
+  })
+
   const startOptions = reactive<Record<string, TaskStartOptions>>({})
 
   const editTaskForm = reactive({
@@ -120,14 +126,38 @@ export function useWorkspaceTaskActions(inputs: WorkspaceTaskActionsInputs) {
     closeMarkdownPreviewModal()
   }
 
+  function normalizeLines(raw: string): string[] {
+    return raw.split(/\r?\n/).map(line => line.trim()).filter(Boolean)
+  }
+
+  function sameStringList(a: string[], b: string[]): boolean {
+    return a.length === b.length && a.every((val, idx) => val === b[idx])
+  }
+
   function openEditTaskModal(task: WorkspaceTask) {
     if (!canEditTask(task)) return
+    const packet = task.goal_packet
+    const effectiveGoal = (task.goal ?? packet?.objective ?? '').trim()
+    const effectiveDoneWhen = (
+      task.done_when && task.done_when.length > 0
+        ? task.done_when
+        : (packet?.acceptance_criteria ?? [])
+    ).map(item => item.trim()).filter(Boolean)
+    const effectiveOutOfScope = (
+      task.out_of_scope && task.out_of_scope.length > 0
+        ? task.out_of_scope
+        : (packet?.out_of_scope ?? [])
+    ).map(item => item.trim()).filter(Boolean)
+
     editingTaskId.value = task.id
     editTaskForm.title = task.title
     editTaskForm.prompt = task.prompt
-    editTaskForm.goal = task.goal || ''
-    editTaskForm.done_when = (task.done_when || []).join('\n')
-    editTaskForm.out_of_scope = (task.out_of_scope || []).join('\n')
+    editTaskForm.goal = effectiveGoal
+    editTaskForm.done_when = effectiveDoneWhen.join('\n')
+    editTaskForm.out_of_scope = effectiveOutOfScope.join('\n')
+    initialEditContract.goal = effectiveGoal || null
+    initialEditContract.done_when = [...effectiveDoneWhen]
+    initialEditContract.out_of_scope = [...effectiveOutOfScope]
     editTaskForm.session_id = task.session_id || ''
     editTaskForm.related_task_id = task.related_task_id || ''
     editTaskForm.clear_context = Boolean(task.clear_context)
@@ -142,6 +172,9 @@ export function useWorkspaceTaskActions(inputs: WorkspaceTaskActionsInputs) {
     editTaskForm.goal = ''
     editTaskForm.done_when = ''
     editTaskForm.out_of_scope = ''
+    initialEditContract.goal = null
+    initialEditContract.done_when = []
+    initialEditContract.out_of_scope = []
     editTaskForm.session_id = ''
     editTaskForm.related_task_id = ''
     editTaskForm.clear_context = false
@@ -157,15 +190,25 @@ export function useWorkspaceTaskActions(inputs: WorkspaceTaskActionsInputs) {
       return
     }
     await runPending(taskActionKey('edit', taskId), async () => {
+      const nextGoal = editTaskForm.goal.trim() || null
+      const nextDoneWhen = normalizeLines(editTaskForm.done_when)
+      const nextOutOfScope = normalizeLines(editTaskForm.out_of_scope)
+      const contractChanged = (
+        nextGoal !== initialEditContract.goal
+        || !sameStringList(nextDoneWhen, initialEditContract.done_when)
+        || !sameStringList(nextOutOfScope, initialEditContract.out_of_scope)
+      )
       const payload: WorkspaceTaskUpdate = {
         title: editTaskForm.title.trim(),
         prompt: editTaskForm.prompt.trim(),
-        goal: editTaskForm.goal.trim() || null,
-        done_when: editTaskForm.done_when.split(/\r?\n/).map(line => line.trim()).filter(Boolean),
-        out_of_scope: editTaskForm.out_of_scope.split(/\r?\n/).map(line => line.trim()).filter(Boolean),
         session_id: editTaskForm.session_id || null,
         related_task_id: editTaskForm.related_task_id || null,
         clear_context: editTaskForm.clear_context ? true : null,
+      }
+      if (contractChanged) {
+        payload.goal = nextGoal
+        payload.done_when = nextDoneWhen
+        payload.out_of_scope = nextOutOfScope
       }
       await workspaceStore.updateTask(taskId, payload)
       // Clear cached start options so they re-read from the updated task
