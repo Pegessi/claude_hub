@@ -60,6 +60,9 @@ class WorkspaceTaskCreate(BaseModel):
     origin: WorkspaceTaskOrigin = WorkspaceTaskOrigin.HUMAN
     related_task_id: Optional[str] = None
     attachments: List["WorkspaceAttachmentCreate"] = Field(default_factory=list)
+    goal: Optional[str] = None
+    done_when: List[str] = Field(default_factory=list)
+    out_of_scope: List[str] = Field(default_factory=list)
     goal_packet: Optional[GoalPacket] = None
     review_profiles: List[ReviewProfile] = Field(default_factory=list)
     autonomy_policy: Optional[AutonomyPolicy] = None
@@ -142,6 +145,9 @@ class WorkspaceTaskUpdate(BaseModel):
     title: Optional[str] = None
     prompt: Optional[str] = None
     status: Optional[WorkspaceTaskStatus] = None
+    goal: Optional[str] = None
+    done_when: List[str] = Field(default_factory=list)
+    out_of_scope: List[str] = Field(default_factory=list)
     goal_packet: Optional[GoalPacket] = None
     task_mode: Optional[WorkspaceTaskMode] = None
     recipe: Optional[WorkspaceTaskRecipe] = None
@@ -201,6 +207,9 @@ class WorkspaceTask(BaseModel):
     title: str
     prompt: str
     attachments: List[WorkspaceAttachment] = Field(default_factory=list)
+    goal: Optional[str] = None
+    done_when: List[str] = Field(default_factory=list)
+    out_of_scope: List[str] = Field(default_factory=list)
     goal_packet: Optional[GoalPacket] = None
     review_profiles: List[ReviewProfile] = Field(default_factory=list)
     agent_type: AgentType

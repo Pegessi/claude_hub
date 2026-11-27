@@ -796,8 +796,11 @@ async def test_ensure_workspace_agent_accepts_non_git_descendant_cwd(
         )
 
 
-def test_find_compatible_dispatcher_requires_strict_compatibility(
-    tmp_path: Path, monkeypatch: MonkeyPatch
+@pytest.mark.parametrize(
+    "requested_role", [WorkspaceSessionRole.ORCHESTRATOR, WorkspaceSessionRole.WORKER]
+)
+def test_legacy_dispatcher_is_readable_but_not_reused_as_workspace_agent(
+    tmp_path: Path, monkeypatch: MonkeyPatch, requested_role: WorkspaceSessionRole
 ) -> None:
     manager = WorkspaceManager()
     monkeypatch.setattr(manager, "_save_state", lambda: None)
@@ -825,14 +828,23 @@ def test_find_compatible_dispatcher_requires_strict_compatibility(
         created_at=now,
         updated_at=now,
     )
-    manager.sessions[dispatcher.id] = dispatcher
-    manager.workspaces[ws.id] = ws.model_copy(update={"dispatcher_session_id": dispatcher.id})
+    # Persisted legacy records remain readable and visible without converting
+    # their role into a generic execution seat.
+    restored = ManagedSession.model_validate(
+        manager._normalize_session_item(dispatcher.model_dump(mode="json"))
+    )
+    assert restored.role == WorkspaceSessionRole.DISPATCHER
+    manager.sessions[restored.id] = restored
+    manager.workspaces[ws.id] = ws.model_copy(update={"dispatcher_session_id": restored.id})
+    assert manager._dispatcher_session(manager.workspaces[ws.id]) == restored
+    assert manager.sessions_for_workspace(ws.id)[0].id == restored.id
+    assert manager._workspace_agents(ws.id) == []
 
     match = manager._find_compatible_workspace_agent(
         ws,
         EnsureWorkspaceAgentRequest(
-            agent_type=AgentType.CLAUDE,
-            role=WorkspaceSessionRole.DISPATCHER,
+            agent_type=AgentType.CODEX,
+            role=requested_role,
             reuse_existing=True,
             cwd=str(repo),
         ),
@@ -3299,8 +3311,9 @@ def test_update_workspace_remote_cwd_only_collision_fails_closed(
     assert manager.workspaces[ws_a.id].remote_cwd == "~/target"
 
 
-def test_find_compatible_internal_dispatcher_empty_env_reuses(
-    tmp_path: Path, monkeypatch: MonkeyPatch
+@pytest.mark.parametrize("reuse_existing", [False, True])
+def test_new_dispatcher_requests_rejected_even_with_existing_legacy_session(
+    tmp_path: Path, monkeypatch: MonkeyPatch, reuse_existing: bool
 ) -> None:
     manager = WorkspaceManager()
     monkeypatch.setattr(manager, "_save_state", lambda: None)
@@ -3327,16 +3340,13 @@ def test_find_compatible_internal_dispatcher_empty_env_reuses(
     )
     manager.sessions[dispatcher.id] = dispatcher
 
-    match = manager._find_compatible_workspace_agent(
-        ws,
+    with pytest.raises(ValueError, match="Dispatcher sessions are deprecated"):
         EnsureWorkspaceAgentRequest(
             agent_type=AgentType.CODEX,
             role=WorkspaceSessionRole.DISPATCHER,
-            reuse_existing=True,
-        ),
-    )
-    assert match is not None
-    assert match.id == dispatcher.id
+            reuse_existing=reuse_existing,
+        )
+    assert manager.sessions[dispatcher.id] == dispatcher
 
 
 @pytest.mark.asyncio

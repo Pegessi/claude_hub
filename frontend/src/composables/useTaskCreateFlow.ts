@@ -79,6 +79,9 @@ export function useTaskCreateFlow() {
     session_kind: 'terminal' as SessionKind,
     title: '',
     prompt: '',
+    goal: '',
+    done_when: '',
+    out_of_scope: '',
     task_mode: 'reviewed' as WorkspaceTaskMode,
     execution_complexity: 'auto' as WorkspaceTaskExecutionComplexity,
     max_iterations: 3,
@@ -267,6 +270,9 @@ export function useTaskCreateFlow() {
           ...(recordOnly ? { reporter_key: generateTaskReporterKey() } : {}),
           title: taskForm.title.trim(),
           prompt: taskForm.prompt.trim(),
+          goal: taskForm.goal.trim() || null,
+          done_when: taskForm.done_when.split(/\r?\n/).map(line => line.trim()).filter(Boolean),
+          out_of_scope: taskForm.out_of_scope.split(/\r?\n/).map(line => line.trim()).filter(Boolean),
           session_kind: taskForm.session_kind,
           task_mode: taskForm.task_mode,
           execution_complexity: taskForm.execution_complexity,
@@ -384,6 +390,9 @@ export function useTaskCreateFlow() {
     taskForm.session_kind = 'terminal'
     taskForm.title = ''
     taskForm.prompt = ''
+    taskForm.goal = ''
+    taskForm.done_when = ''
+    taskForm.out_of_scope = ''
     taskForm.task_mode = 'reviewed'
     taskForm.execution_complexity = 'auto'
     taskForm.max_iterations = 3

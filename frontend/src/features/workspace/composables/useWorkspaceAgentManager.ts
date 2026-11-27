@@ -6,7 +6,6 @@ import {
 } from 'vue'
 import {
   type ManagedSession,
-  type WorkspaceSessionRole,
   type AgentType,
   type SessionKind,
   type ExecutionTarget,
@@ -82,7 +81,6 @@ export function useWorkspaceAgentManager(inputs: WorkspaceAgentManagerInputs) {
 
   const agentOptionsForm = reactive({
     title: '',
-    role: 'orchestrator' as WorkspaceSessionRole,
     agent_type: 'codex' as AgentType,
     session_kind: 'terminal' as SessionKind,
     target: 'local' as ExecutionTarget,
@@ -94,23 +92,14 @@ export function useWorkspaceAgentManager(inputs: WorkspaceAgentManagerInputs) {
     env_text: defaultPresetTextForAgent('codex'),
   })
 
-  const agentManagerView = ref<'agents' | 'reviewers'>('agents')
+  const agentManagerSessions = computed<ManagedSession[]>(() => [
+    ...workspaceAgents.value,
+    ...reviewerSessions.value,
+    ...(dispatcherAgent.value ? [dispatcherAgent.value] : []),
+    ...(residentAgent.value ? [residentAgent.value] : []),
+  ])
 
-  const agentManagerSessions = computed<ManagedSession[]>(() =>
-    agentManagerView.value === 'reviewers'
-      ? reviewerSessions.value
-      : [
-          ...workspaceAgents.value,
-          ...(dispatcherAgent.value ? [dispatcherAgent.value] : []),
-          ...(residentAgent.value ? [residentAgent.value] : []),
-        ],
-  )
-
-  const agentManagerEmptyText = computed(() =>
-    agentManagerView.value === 'reviewers'
-      ? 'No reviewers in this workspace.'
-      : 'No agents in this workspace.',
-  )
+  const agentManagerEmptyText = 'No agents in this workspace.'
 
   const selectedAgentRemoteProfile = computed(() =>
     remoteProfiles.value.find(profile => profile.id === agentOptionsForm.remote_profile_id) || null
@@ -221,7 +210,6 @@ export function useWorkspaceAgentManager(inputs: WorkspaceAgentManagerInputs) {
   function resetAgentOptionsForm() {
     const workspace = activeWorkspace.value
     agentOptionsForm.title = ''
-    agentOptionsForm.role = 'orchestrator'
     agentOptionsForm.agent_type = 'codex'
     agentOptionsForm.session_kind = 'terminal'
     agentOptionsForm.target = workspace?.target ?? 'local'
@@ -280,7 +268,7 @@ export function useWorkspaceAgentManager(inputs: WorkspaceAgentManagerInputs) {
         agent_type: agentOptionsForm.agent_type,
         session_kind: agentOptionsForm.session_kind,
         title: agentOptionsForm.title.trim() || null,
-        role: agentOptionsForm.role,
+        role: 'orchestrator',
         reuse_existing: false,
         target: agentOptionsForm.target,
         cwd: agentOptionsForm.target === 'local' ? cwd || null : null,
@@ -337,7 +325,6 @@ export function useWorkspaceAgentManager(inputs: WorkspaceAgentManagerInputs) {
     openSwitchEnvModal,
     showAgentOptionsModal,
     closeAgentOptionsModal,
-    agentManagerView,
     agentManagerSessions,
     agentManagerEmptyText,
     handleCreateAdvancedAgent,

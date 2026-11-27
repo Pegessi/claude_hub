@@ -143,7 +143,7 @@ def test_task_status_from_report(
     assert policy.task_status_from_report(state) == expected
 
 
-def test_completion_evidence_gaps_only_apply_to_completion_style_reports() -> None:
+def test_completion_evidence_does_not_force_backfill() -> None:
     assert (
         policy.completion_evidence_gaps(
             AgentReportState.WORKING,
@@ -152,11 +152,14 @@ def test_completion_evidence_gaps_only_apply_to_completion_style_reports() -> No
         )
         == []
     )
-    assert policy.completion_evidence_gaps(
-        AgentReportState.COMPLETED,
-        has_goal_packet=False,
-        has_acceptance_check=False,
-    ) == ["stored Goal Packet", "acceptance_check evidence"]
+    assert (
+        policy.completion_evidence_gaps(
+            AgentReportState.COMPLETED,
+            has_goal_packet=False,
+            has_acceptance_check=False,
+        )
+        == []
+    )
     assert (
         policy.completion_evidence_gaps(
             AgentReportState.READY_FOR_REVIEW,

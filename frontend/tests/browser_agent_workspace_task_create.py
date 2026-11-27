@@ -138,6 +138,7 @@ async def main(browser_run: BrowserRun) -> None:
     unknown_requests: list[tuple[str, str]] = []
     create_calls: list[dict] = []
     agent_create_calls: list[dict] = []
+    task_update_calls: list[dict] = []
     managed_sessions: dict[str, list[dict]] = {"ws-1": [], "ws-2": []}
     created_by_key: dict[tuple[str, str], dict] = {}
     board_tasks = {
@@ -205,6 +206,9 @@ async def main(browser_run: BrowserRun) -> None:
             )
         task.update(
             prompt=body["prompt"],
+            goal=body.get("goal"),
+            done_when=body.get("done_when", []),
+            out_of_scope=body.get("out_of_scope", []),
             attachments=persisted_attachments,
             agent_type=body.get("agent_type", "codex"),
             session_kind=body.get("session_kind", "terminal"),
@@ -360,6 +364,7 @@ async def main(browser_run: BrowserRun) -> None:
                     r"/api/workspaces/(ws-1|ws-2)/tasks",
                     path,
                 )
+                update_match = re.fullmatch(r"/api/workspaces/tasks/([A-Za-z0-9._-]+)", path)
                 agent_match = re.fullmatch(
                     r"/api/workspaces/(ws-1|ws-2)/agent",
                     path,
@@ -395,6 +400,17 @@ async def main(browser_run: BrowserRun) -> None:
                     }
                     managed_sessions[workspace_id].append(session)
                     body = session
+                elif method == "PATCH" and update_match and not parsed.query:
+                    task_id = update_match.group(1)
+                    submitted = json.loads(request.post_data or "{}")
+                    task_update_calls.append(submitted)
+                    body = next(
+                        task
+                        for tasks in board_tasks.values()
+                        for task in tasks
+                        if task["id"] == task_id
+                    )
+                    body.update(submitted)
                 elif method == "GET" and capabilities_match and not parsed.query:
                     workspace_id = capabilities_match.group(1)
                     mode = capability_modes[workspace_id]
@@ -560,7 +576,7 @@ async def main(browser_run: BrowserRun) -> None:
         await expect(workspace_picker).to_contain_text("Workspace One")
         await expect(page.get_by_role("button", name="Add Task", exact=True)).to_be_enabled()
 
-        # Workspace workers and reviewers choose their execution surface before
+        # Workspace agents choose their execution surface before
         # provider selection. MASO is Chat-only, and selecting Remote must force
         # the form back to Terminal rather than offering unsupported native Chat.
         await page.get_by_role("button", name="Manage Agents", exact=True).click()
@@ -568,6 +584,8 @@ async def main(browser_run: BrowserRun) -> None:
             has=page.get_by_role("heading", name="Manage Agents", exact=True)
         )
         await expect(agent_modal).to_be_visible()
+        await expect(agent_modal.locator(".agent-manager-view-switch")).to_have_count(0)
+        await expect(agent_modal.locator('option[value="reviewer"]')).to_have_count(0)
         await agent_modal.get_by_role("button", name="Chat", exact=True).click()
         agent_type = agent_modal.get_by_label("Agent Type", exact=True)
         await expect(agent_type.locator('option[value="maso"]')).to_have_count(1)
@@ -590,6 +608,25 @@ async def main(browser_run: BrowserRun) -> None:
         assert agent_payload["role"] == "orchestrator"
         assert agent_payload["target"] == "local"
         assert agent_payload["title"] == "MASO Chat reviewer"
+        # A historical reviewer remains visible beside generic agents, with its
+        # existing Open/Delete controls, without a separate role-selection page.
+        legacy_reviewer = dict(managed_sessions["ws-1"][0])
+        legacy_reviewer.update(
+            id="legacy-reviewer",
+            tab_id="legacy-reviewer-tab",
+            title="Legacy reviewer",
+            role="reviewer",
+        )
+        managed_sessions["ws-1"].append(legacy_reviewer)
+        await page.evaluate("""async () => {
+          const {useWorkspaceStore} = await import('/src/stores/workspaceStore.ts');
+          await useWorkspaceStore().fetchBoard('ws-1');
+        }""")
+        reviewer_row = agent_modal.locator(".agent-row").filter(has_text="Legacy reviewer")
+        await expect(reviewer_row).to_be_visible()
+        await expect(reviewer_row.get_by_role("button", name="Open", exact=True)).to_be_enabled()
+        await expect(reviewer_row.get_by_role("button", name="Delete", exact=True)).to_be_enabled()
+        await expect(agent_modal.get_by_text("MASO Chat reviewer", exact=True)).to_be_visible()
         await page.screenshot(path=output / "managed-chat-agent.png", full_page=True)
         await agent_modal.get_by_role("button", name="Cancel", exact=True).click()
 
@@ -790,6 +827,13 @@ async def main(browser_run: BrowserRun) -> None:
         create_mode = "success_board_failure"
         modal = await open_add_task()
         await fill_task(modal, "Created despite refresh failure")
+        await modal.get_by_label("Goal (optional)", exact=True).fill(
+            "  Deliver the agreed outcome  "
+        )
+        await modal.get_by_label("Done when (optional)", exact=True).fill(
+            "  Unit checks pass  \n\n  Browser flow works  \n"
+        )
+        await modal.get_by_label("Out of scope (optional)", exact=True).fill("  No deployment  ")
         before = len(create_calls)
         await modal.get_by_role("button", name="Create Task", exact=True).click()
         await expect(page.get_by_role("heading", name="Add Task")).to_have_count(0)
@@ -800,6 +844,10 @@ async def main(browser_run: BrowserRun) -> None:
             )
         ).to_be_visible()
         assert len(create_calls) == before + 1
+        assert create_calls[-1]["body"]["goal"] == "Deliver the agreed outcome"
+        assert create_calls[-1]["body"]["done_when"] == ["Unit checks pass", "Browser flow works"]
+        assert create_calls[-1]["body"]["out_of_scope"] == ["No deployment"]
+        assert "goal_packet" not in create_calls[-1]["body"]
 
         # Exercise the real paste listener. Draft previews are cleared on close;
         # the frozen request keeps its attachment through an uncertain result.
@@ -1369,7 +1417,26 @@ async def main(browser_run: BrowserRun) -> None:
         assert not await page.evaluate(
             "['INPUT', 'TEXTAREA'].includes(document.activeElement?.tagName || '')"
         )
-        await edit_task_modal.get_by_role("button", name="Cancel", exact=True).click()
+        await expect(edit_task_modal.get_by_label("Goal (optional)", exact=True)).to_have_value(
+            "Deliver the agreed outcome"
+        )
+        await expect(
+            edit_task_modal.get_by_label("Done when (optional)", exact=True)
+        ).to_have_value("Unit checks pass\nBrowser flow works")
+        for width in (390, 720, 1280):
+            await page.set_viewport_size({"width": width, "height": 844})
+            field = edit_task_modal.get_by_label("Done when (optional)", exact=True)
+            await field.fill("  Revised acceptance  \n\n  Regression checks pass  ")
+            box = await field.bounding_box()
+            assert box and box["x"] >= 0 and box["x"] + box["width"] <= width
+            await page.screenshot(path=output / f"task-contract-edit-{width}.png")
+        await edit_task_modal.get_by_role("button", name="Save task", exact=True).click()
+        assert task_update_calls[-1]["done_when"] == [
+            "Revised acceptance",
+            "Regression checks pass",
+        ]
+        assert task_update_calls[-1]["goal"] == "Deliver the agreed outcome"
+        assert task_update_calls[-1]["out_of_scope"] == ["No deployment"]
         await expect(edit_task_modal).to_have_count(0)
 
         assert not blocked_requests, blocked_requests

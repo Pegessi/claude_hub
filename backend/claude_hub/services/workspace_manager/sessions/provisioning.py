@@ -108,7 +108,9 @@ class _SessionProvisioningMixin(_WorkspaceManagerBase):
             async with self.workspace_mutation_lock(workspace_id):
                 session = await self._create_managed_session(workspace, payload)
             bootstrap_prompt = (
-                self._build_session_bootstrap_prompt(workspace, session) if bootstrap else ""
+                self._build_session_bootstrap_prompt(workspace, session)
+                if bootstrap and session.role == WorkspaceSessionRole.RESIDENT
+                else ""
             )
             if bootstrap_prompt:
                 await self._wait_for_agent_prompt(session)

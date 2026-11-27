@@ -76,6 +76,10 @@ class EnsureWorkspaceAgentRequest(BaseModel):
 
     @model_validator(mode="after")
     def _validate_managed_session_admission(self) -> "EnsureWorkspaceAgentRequest":
+        if self.role == WorkspaceSessionRole.DISPATCHER:
+            raise ValueError("Dispatcher sessions are deprecated; create a workspace agent instead")
+        if self.role == WorkspaceSessionRole.WORKER:
+            self.role = WorkspaceSessionRole.ORCHESTRATOR
         validate_workspace_session_surface(self.agent_type, self.session_kind)
         if self.session_kind == SessionKind.CHAT:
             if (

@@ -127,6 +127,9 @@ class _NormalizeMixin(_WorkspaceManagerBase):
             normalized["closed_reason"] = None
         if not isinstance(normalized.get("archive_closure"), dict):
             normalized["archive_closure"] = None
+        normalized.setdefault("goal", None)
+        normalized["done_when"] = self._normalize_string_list(normalized.get("done_when"))
+        normalized["out_of_scope"] = self._normalize_string_list(normalized.get("out_of_scope"))
         normalized["goal_packet"] = self._normalize_goal_packet(normalized.get("goal_packet"))
         normalized["autonomy_policy"] = self._normalize_autonomy_policy(
             normalized.get("autonomy_policy"),
@@ -436,6 +439,8 @@ class _NormalizeMixin(_WorkspaceManagerBase):
 
     def _normalize_session_item(self, item: dict[str, Any]) -> dict[str, Any]:
         normalized = dict(item)
+        if normalized.get("role") == WorkspaceSessionRole.WORKER.value:
+            normalized["role"] = WorkspaceSessionRole.ORCHESTRATOR.value
         normalized.setdefault("runtime_status", self._runtime_from_managed_status(normalized))
         normalized.setdefault("current_task_id", normalized.get("task_id"))
         normalized.setdefault("queued_count", 0)

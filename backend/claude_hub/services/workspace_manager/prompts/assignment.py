@@ -41,127 +41,75 @@ class _AssignmentPromptsMixin(_BootstrapPromptsMixin):
             workspace_id=workspace.id,
         )
         assignment_attempt = max(task.dispatch_attempt, 1)
-        goal_packet_call_id = self._report_prompt_call_id(
-            task.id, "goal-packet", attempt=assignment_attempt
-        )
         started_call_id = self._report_prompt_call_id(
             task.id, "started", attempt=assignment_attempt
         )
-        progress_call_id = self._report_prompt_call_id(
-            task.id, "assignment-progress", attempt=assignment_attempt
-        )
-        recipe_block = self._recipe_assignment_block(workspace, task, session)
         explicit_gp_gate = (
             task.goal_packet is not None
             and task.goal_packet.status == GoalPacketStatus.PENDING_REVIEW
         )
-        streamlined_spec_pipeline = (
-            task.recipe == WorkspaceTaskRecipe.SPEC_IMPLEMENT_REVIEW and not explicit_gp_gate
+        criteria = task.done_when or (
+            task.goal_packet.acceptance_criteria if task.goal_packet else []
         )
-        if streamlined_spec_pipeline:
-            gp_workflow_block = (
-                "Pipeline execution (spec_implement_review): Do NOT stop and wait for a separate "
-                "Goal Packet approval round before coding. Proceed straight through implementation "
-                f"in your isolated feature worktree ({task.worktree_path or session.workspace_path}) "
-                f"on branch {task.worktree_branch or 'your feature branch'}, run local verification, "
-                "commit your changes cleanly on the feature branch, and submit a `completed` report "
-                'with `review_decision="request"` so an independent reviewer session can audit '
-                "your diff.\n\n"
-            )
-            gp_example_block = ""
+        boundaries = task.out_of_scope or (
+            task.goal_packet.out_of_scope if task.goal_packet else []
+        )
+        objective = task.goal or (task.goal_packet.objective if task.goal_packet else task.title)
+        contract = f"Goal: {objective}\n"
+        if criteria:
+            contract += "Done when:\n" + "".join(f"- {item}\n" for item in criteria)
+            contract += "On completion, attach verification evidence for each criterion.\n"
+        elif explicit_gp_gate:
+            contract += "Include brief acceptance criteria when reporting the supplied plan.\n"
         else:
-            gp_workflow_block = (
-                "Before substantive implementation, derive a Goal Packet from the task prompt and include it "
-                "in your first working report. The packet must preserve the user's outcome, record assumptions "
-                "(do not silently narrow ambiguous scope), and include concrete reviewer-checkable acceptance "
-                "criteria, a validation plan, out-of-scope boundaries, and handoff requirements. For reviewed "
-                "tasks the Goal Packet is an approval gate: after posting it, stop and wait for reviewer "
-                "feedback; do not begin substantive implementation until the backend continues the task after "
-                "review_passed.\n\n"
+            contract += (
+                "In your first working report, list brief acceptance criteria in message; "
+                "do not pause for approval, continue implementation immediately.\n"
             )
-            gp_example_block = (
-                "Goal Packet report example (first working report for reviewed tasks):\n"
-                f"{INTERNAL_API_CURL} -X POST {self._report_base_url(session)}/api/workspaces/sessions/{session.id}/reports "
-                "-H 'Content-Type: application/json' "
-                f'-d \'{{"task_id":"{task.id}","state":"working",'
-                f'"call_id":"{goal_packet_call_id}",'
-                '"message":"Goal Packet; awaiting approval.","message_en":"Goal Packet; awaiting approval.",'
-                '"message_zh":"目标包已创建，等待审核。","goal_packet":{'
-                '"objective":"...","acceptance_criteria":["..."],"validation_plan":["..."],'
-                '"assumptions":["..."],"out_of_scope":["..."],"handoff_requirements":["..."]}}\'\n\n'
+        if boundaries:
+            contract += "Out of scope:\n" + "".join(f"- {item}\n" for item in boundaries)
+        if explicit_gp_gate:
+            workflow = (
+                "The caller explicitly requested Goal Packet approval. Post a working report "
+                "for the supplied plan, then stop and wait for reviewer feedback. Begin substantive "
+                "implementation only after the backend continues this task after review_passed.\n\n"
             )
+        else:
+            workflow = "Start implementation directly using this contract; no separate plan approval round.\n\n"
         return (
             "New workspace task assigned.\n\n"
-            f"Workspace: {workspace.name}\n"
-            f"Task ID: {task.id}\n"
-            f"Task title: {task.title}\n"
-            f"Task mode: {task.task_mode.value}\n"
-            f"Task recipe: {task.recipe.value}\n"
+            f"Workspace: {workspace.name}\nTask ID: {task.id}\nTask title: {task.title}\n"
+            f"Task mode: {task.task_mode.value}\nTask recipe: {task.recipe.value}\n"
             f"Task execution complexity: {task.execution_complexity.value}\n"
             f"{self._session_environment_lines(workspace, session)}\n"
             f"State snapshot: {self.snapshot_path(workspace.id)}\n"
             f"Dispatch reason: {task.dispatch_reason or 'not specified'}\n\n"
-            f"{clear_note}"
-            f"{failure_note}"
-            f"Task description:\n{task.prompt}\n\n"
-            f"{attachment_note}"
-            f"{lesson_context_block}"
-            f"{recipe_block}"
+            f"{clear_note}{failure_note}Task description:\n{task.prompt}\n\n"
+            f"{attachment_note}{lesson_context_block}{contract}\n"
+            f"{self._recipe_assignment_block(workspace, task, session)}"
             f"{self._execution_complexity_assignment_block(task)}"
             f"{self._autonomous_assignment_block(task, session.agent_type)}"
             f"{self._task_context_contract_block()}"
-            "Start by reading the state snapshot; use the task description to choose the correct project "
-            "directory. Check for uncommitted changes before editing.\n\n"
-            f"{gp_workflow_block}"
-            "Report state: started -> working (as you progress) -> blocked/needs_input if stuck -> "
-            "ready_for_review when ready for AI reviewer -> completed when fully done. The task is not "
-            "done until a human accepts it.\n\n"
-            "For completed reports decide reviewer routing: review_decision=request (independent AI review "
-            "needed; always include review_reason), review_decision=skip (no-change analysis, manual "
-            "follow-up, or trivial low-risk changes only; still requires human acceptance), or "
-            "review_decision=auto (workspace default). The backend may still force review for nontrivial "
-            "changes.\n\n"
-            f"{gp_example_block}"
-            "Every report must include message_en (concise English) and message_zh (concise 中文); keep "
-            "the legacy `message` field as a short English fallback. Final reports must include "
-            "task_id/state/message/message_en/message_zh/changed_files/validation/risks/acceptance_check/"
-            "review_decision/review_reason/risk_level; acceptance_check maps each Goal Packet criterion "
-            "to passed/failed/partial/not_checked with evidence.\n\n"
-            "Every report MUST include a non-empty `call_id`. Use a stable, per-logical-report "
-            f"call_id that includes a cycle/round counter (e.g. `{task.id}-{{state}}-{{n}}` where "
-            "n increments for each new logical report) so repeated reports in the same state "
-            "(e.g. multiple working updates across review rounds) do not collide. If you "
-            "resubmit the SAME report after a failure or context reload, reuse the SAME call_id "
-            "so the Hub deduplicates it. Different reports (e.g. a working update vs. the final "
-            "report) use different call_ids.\n\n"
-            "Report endpoint (POST JSON for other states):\n"
+            "Read the state snapshot and check Git status before editing; preserve unrelated work.\n\n"
+            f"{workflow}"
+            "Report started -> working as needed -> completed/ready_for_review when done; use "
+            "blocked/needs_input only for a real blocker. Human acceptance closes the task. "
+            "Provide a clear message. Final reports include changed_files, validation, risks, "
+            "and criterion-by-criterion evidence (acceptance_check when available).\n"
+            "Choose review_decision=request for independent review; skip only for no-change analysis "
+            "or trivial low-risk work (with review_reason), or auto for workspace policy. The backend "
+            "can still require review. Include risk_level and note unverified criteria.\n\n"
+            "CLI report example:\n"
+            f"claude-hub session report {session.id} --task-id {task.id} --state started "
+            f'--message "Started" --call-id "{started_call_id}"\n\n'
+            "Fallback report endpoint (POST JSON):\n"
             f"{INTERNAL_API_CURL} -X POST {self._report_base_url(session)}/api/workspaces/sessions/{session.id}/reports "
             "-H 'Content-Type: application/json' "
             f'-d \'{{"task_id":"{task.id}","state":"started",'
-            f'"call_id":"{started_call_id}",'
-            '"message":"Started","message_en":"Started","message_zh":"已开始"}\'\n\n'
-            "Call-id ACK contract (at-least-once delivery to your tmux inbox):\n"
-            "Messages from your supervisor may be prefixed with a `[call_id:<id>]` marker "
-            "(followups, continue prompts, etc.). The Hub delivers each call_id to your "
-            "tmux input buffer. The Hub provides durable dedupe: within a single tmux "
-            "session lifetime a call_id is pasted at most once (tmux-server receipt), "
-            "and a call_id is never re-sent after you ACK it. If a previous tmux send "
-            "failed ambiguously, the call_id stays in an `uncertain` state and the "
-            "system does NOT auto-resend it — only an explicit operator retry may "
-            "re-deliver it. You do NOT need to keep a scratch-file list of processed "
-            "call_ids; just ACK every call_id you process by listing it in "
-            "`acked_call_ids` of your report.\n"
-            f"- The dispatch call_id `dispatch:{task.id}:{{attempt}}` is ACKed automatically by the Hub "
-            "when you submit any report; do NOT list it in acked_call_ids.\n"
-            "- For every other call_id you have processed, list it in `acked_call_ids` "
-            "of your report. Only call_ids currently pending for this task/session are "
-            "moved to delivered; unknown or future call_ids are ignored.\n"
-            "- A call_id you do NOT list stays in processing and will be cleaned up only "
-            "after you ACK it. List every call_id you process so the Hub can release it.\n"
-            "Example report body with ACKs:\n"
-            f'{{"task_id":"{task.id}","state":"working","call_id":"{progress_call_id}",'
-            '"message":"...","message_en":"...",'
-            '"message_zh":"...","acked_call_ids":["followup-abc123"]}\n'
+            f'"call_id":"{started_call_id}","message":"Started"}}\'\n\n'
+            "Every report needs a stable non-empty call_id, unique per logical report/cycle. "
+            "Reuse the SAME call_id only when retrying the same report. ACK processed followups "
+            "by including their call_ids in acked_call_ids; the dispatch call_id is ACKed automatically.\n"
         )
 
     def _build_subagent_assignment_prompt(
@@ -281,15 +229,27 @@ class _AssignmentPromptsMixin(_BootstrapPromptsMixin):
                 "evidence, (2) recommended next action, and (3) a copy-paste reply draft.\n\n"
             )
         if task.recipe == WorkspaceTaskRecipe.SPEC_IMPLEMENT_REVIEW:
-            wt_path = task.worktree_path or session.workspace_path or workspace.path
-            wt_branch = task.worktree_branch or "feature-branch"
+            if task.worktree_path:
+                location = (
+                    f"- Assigned isolated worktree: {task.worktree_path} (branch: {task.worktree_branch}). "
+                    "NEVER edit the primary main checkout. Commit verified changes on the feature branch.\n"
+                )
+            else:
+                location = (
+                    f"- Working directory: {session.workspace_path or workspace.path}. "
+                    "For Git work, use an isolated feature branch/worktree; for non-Git work, "
+                    "verify and report the resulting files in place.\n"
+                )
+            push_note = (
+                "- After independent review passes, the Hub will push the feature branch to origin.\n"
+                if task.auto_push_remote
+                else "- Automatic remote push is disabled; do not push without explicit authorization.\n"
+            )
             return (
-                "Pipeline recipe: spec_implement_review (Isolated Worktree Implementation & Independent Review)\n"
-                f"{demand_line}"
-                f"- Assigned isolated worktree: {wt_path} (branch: {wt_branch}). NEVER edit the primary main checkout.\n"
-                "- Implement the change and unit/integration tests directly in this worktree without waiting for a separate Goal Packet round.\n"
-                '- Run local verification, commit your changes on the feature branch, and submit `completed` with `review_decision="request"`.\n'
-                "- After independent review passes, the Hub will automatically push the feature branch to `origin`.\n\n"
+                "Pipeline recipe: spec_implement_review (Implementation & Independent Review)\n"
+                f"{demand_line}{location}"
+                '- Run local verification and submit completed with review_decision="request".\n'
+                f"{push_note}\n"
             )
         if task.recipe == WorkspaceTaskRecipe.EVAL_AND_REPORT:
             return (
@@ -447,6 +407,11 @@ class _AssignmentPromptsMixin(_BootstrapPromptsMixin):
         )
 
     def _execution_complexity_assignment_block(self, task: WorkspaceTask) -> str:
+        if not (
+            task.task_mode == WorkspaceTaskMode.AUTONOMOUS
+            and task.execution_complexity == WorkspaceTaskExecutionComplexity.COMPLEX
+        ):
+            return ""
         if task.execution_complexity == WorkspaceTaskExecutionComplexity.SIMPLE:
             guidance = "Small task. Execute directly; delegate only a bounded need that improves the outcome."
         elif task.execution_complexity == WorkspaceTaskExecutionComplexity.COMPLEX:
@@ -509,7 +474,11 @@ class _AssignmentPromptsMixin(_BootstrapPromptsMixin):
             "- Do not self-pass; evaluator routing is mandatory. Include concrete artifacts/changed_files/"
             "validation/risks/acceptance_check. On revision address ONLY blocking issues and preserve passing work.\n\n"
         )
-        contract = self._orchestrator_contract_block(task, agent_type)
+        contract = (
+            self._orchestrator_contract_block(task, agent_type)
+            if task.execution_complexity == WorkspaceTaskExecutionComplexity.COMPLEX
+            else ""
+        )
         return header + contract
 
     def _orchestrator_contract_block(

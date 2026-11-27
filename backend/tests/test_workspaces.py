@@ -647,10 +647,11 @@ def test_task_execution_complexity_prompts_and_legacy_normalization(
     started = client.post(f"/api/workspaces/tasks/{complex_task['id']}/start", json={}).json()
     assignment_prompt = sent_messages[-1][1]
     assert "Task execution complexity: complex" in assignment_prompt
-    assert "Selected complexity: complex" in assignment_prompt
-    # "Act as the orchestrator" idea preserved (shorter wording "Act as orchestrator"):
-    assert "orchestrator" in assignment_prompt.lower()
-    assert "decompose" in assignment_prompt.lower() or "delegate" in assignment_prompt.lower()
+    # Reviewed tasks execute directly; the long orchestration contract is
+    # reserved for explicitly complex autonomous work.
+    assert "Start implementation directly" in assignment_prompt
+    assert "subtask-envelope" not in assignment_prompt
+    assert "subagent-ledger" not in assignment_prompt
     sent_messages.clear()
 
     report_response = client.post(
@@ -1198,8 +1199,9 @@ def test_agent_report_stores_goal_packet_and_acceptance_check(
         json={"title": "Goal report", "prompt": "Report a Goal Packet"},
     ).json()
     started = client.post(f"/api/workspaces/tasks/{task['id']}/start", json={}).json()
-    assert "Goal Packet report example" in sent_messages[-1][1]
-    assert '"goal_packet"' in sent_messages[-1][1]
+    assert "list brief acceptance criteria" in sent_messages[-1][1]
+    assert "continue implementation immediately" in sent_messages[-1][1]
+    assert "stop and wait" not in sent_messages[-1][1]
     sent_messages.clear()
 
     goal_packet = {
@@ -2459,8 +2461,9 @@ def test_completed_report_creates_temporary_reviewer(
     assert reviewer.current_task_id == task["id"]
     assert reviewer.title == "Review me"
     assert renamed_tabs[-1] == (reviewer.tab_id, "Review me")
-    assert "independent reviewer agent" in sent_messages[-2][1]
-    assert "Review workspace task" in sent_messages[-1][1]
+    assert len(sent_messages) == 2  # worker assignment, then review assignment
+    assert "New workspace task assigned" in sent_messages[0][1]
+    assert "Review workspace task" in sent_messages[1][1]
 
     pass_response = pass_task_review(client, task["id"])
     assert pass_response.status_code == 201
@@ -4155,7 +4158,7 @@ def test_lessons_index_filters_by_relevance_without_full_body_leak(
 
 
 @pytest.mark.parametrize(
-    ("task_goal_packet", "acceptance_check", "expected_gap"),
+    ("task_goal_packet", "acceptance_check"),
     [
         (
             None,
@@ -4166,7 +4169,6 @@ def test_lessons_index_filters_by_relevance_without_full_body_leak(
                     "evidence": "Report summarizes the findings",
                 }
             ],
-            "stored Goal Packet",
         ),
         (
             {
@@ -4178,16 +4180,14 @@ def test_lessons_index_filters_by_relevance_without_full_body_leak(
                 "handoff_requirements": ["Summarize findings"],
             },
             [],
-            "acceptance_check evidence",
         ),
     ],
 )
-def test_completed_skip_review_requires_goal_packet_audit_evidence(
+def test_completed_skip_review_does_not_backfill_optional_plan_evidence(
     monkeypatch: MonkeyPatch,
     tmp_path: Path,
     task_goal_packet: dict[str, object] | None,
     acceptance_check: list[dict[str, str]],
-    expected_gap: str,
 ) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -4234,16 +4234,17 @@ def test_completed_skip_review_requires_goal_packet_audit_evidence(
     assert response.status_code == 201
     updated = workspace_manager.tasks[task["id"]]
     session = workspace_manager.sessions[started["session_id"]]
-    assert updated.status == WorkspaceTaskStatus.WORKING
+    assert updated.status == WorkspaceTaskStatus.REVIEW
     assert updated.review_session_id is None
-    assert updated.review_skipped_at is None
-    assert session.status == ManagedSessionStatus.WORKING
-    assert session.runtime_status == AgentRuntimeStatus.WORKING
-    assert len(sent_messages) == 1
-    assert "completion-style workspace report is missing" in sent_messages[0][1]
-    assert expected_gap in sent_messages[0][1]
-    assert "acceptance_check" in sent_messages[0][1]
-    assert "goal_packet" in sent_messages[0][1]
+    assert updated.review_skipped_at is not None
+    assert updated.human_acceptance_requested_at is not None
+    assert updated.human_accepted_at is None
+    assert session.runtime_status == AgentRuntimeStatus.IDLE
+    assert workspace_manager._can_dispatch_to(session)
+    # Optional structured planning/evidence remains accepted and stored, but
+    # absence cannot restart completed no-change work in a supplement loop.
+    assert response.json()["acceptance_check"] == acceptance_check
+    assert not sent_messages
 
 
 def test_completed_skip_review_allows_explicit_trivial_changed_files(
@@ -4775,7 +4776,7 @@ def test_review_failed_returns_feedback_to_original_agent(
     assert "add the missing assertion" in sent_messages[-1][1]
 
 
-def test_request_changes_succeeds_while_agent_holds_review_task(
+def test_request_changes_cannot_preempt_agent_reused_after_review(
     monkeypatch: MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -4824,26 +4825,22 @@ def test_request_changes_succeeds_while_agent_holds_review_task(
         json={"target_session_id": worker["id"]},
     )
     assert second_started.status_code == 201
-    # The original agent stays locked to the first task while it remains in
-    # REVIEW. The second task may queue behind it but cannot preempt it.
-    assert workspace_manager.tasks[second_task["id"]].status == WorkspaceTaskStatus.QUEUED
-    assert (
-        workspace_manager.sessions[first_started["session_id"]].current_task_id == first_task["id"]
-    )
-
-    # Because the agent still owns the first task's context, requesting changes
-    # works and re-engages the same session.
+    # Review completion frees the idle worker for the next task, even before
+    # human acceptance. A later rejection must not preempt that new assignment.
+    assert workspace_manager.tasks[second_task["id"]].status == WorkspaceTaskStatus.WORKING
+    assert workspace_manager.sessions[worker["id"]].current_task_id == second_task["id"]
+    message_count = len(sent_messages)
     response = client.post(
         f"/api/workspaces/tasks/{first_task['id']}/continue",
         json={"message": "Please adjust before human acceptance."},
     )
 
-    assert response.status_code == 200
-    assert workspace_manager.tasks[first_task["id"]].status == WorkspaceTaskStatus.WORKING
-    assert (
-        workspace_manager.sessions[first_started["session_id"]].current_task_id == first_task["id"]
-    )
-    assert workspace_manager.tasks[second_task["id"]].status == WorkspaceTaskStatus.QUEUED
+    assert response.status_code == 400
+    assert "busy with another task" in response.json()["detail"]
+    assert workspace_manager.tasks[first_task["id"]].status == WorkspaceTaskStatus.REVIEW
+    assert workspace_manager.sessions[worker["id"]].current_task_id == second_task["id"]
+    assert workspace_manager.tasks[second_task["id"]].status == WorkspaceTaskStatus.WORKING
+    assert len(sent_messages) == message_count
 
 
 def test_start_task_dispatches_to_resident_agent(
@@ -4997,9 +4994,9 @@ def test_start_task_dispatches_to_resident_agent(
     assert session.title == "Resident task"
     assert session.workspace_path == str(repo)
     assert renamed_tabs == [("tab-agent", "Resident task")]
-    assert len(sent_messages) == 2
-    assert "resident workspace agent" in sent_messages[0][1]
-    assert "Run this in the resident terminal" in sent_messages[1][1]
+    assert len(sent_messages) == 1
+    assert "New workspace task assigned" in sent_messages[0][1]
+    assert "Run this in the resident terminal" in sent_messages[0][1]
     assert renamed_tabs == [("tab-agent", "Resident task")]
 
     board_response = client.get(f"/api/workspaces/{workspace_response.json()['id']}/board")
@@ -5029,7 +5026,7 @@ def test_start_task_dispatches_to_resident_agent(
     assert board_response.json()["tasks"][0]["status"] == "working"
 
 
-def test_review_task_keeps_agent_locked_until_done(
+def test_review_passed_frees_agent_before_human_acceptance(
     monkeypatch: MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -5109,7 +5106,7 @@ def test_review_task_keeps_agent_locked_until_done(
         f"/api/workspaces/{workspace['id']}/tasks",
         json={
             "title": "Second task",
-            "prompt": "Run after the reviewed task is human-accepted",
+            "prompt": "Run while the reviewed task awaits human acceptance",
         },
     ).json()
     second_start = client.post(
@@ -5117,18 +5114,16 @@ def test_review_task_keeps_agent_locked_until_done(
         json={},
     )
 
-    # REVIEW status (even after review_passed) holds the agent so the
-    # implementation context is preserved for revisions or human rejection.
-    # The new task gets queued onto the same agent without preempting it.
+    # A passed review parks the result for human acceptance, not the idle
+    # worker seat. The next task starts immediately on that same agent.
     assert second_start.status_code == 201
     started_second = second_start.json()
-    assert started_second["status"] == "queued"
+    assert started_second["status"] == "working"
     assert started_second["session_id"] == session_id
     assert workspace_manager.tasks[first_task["id"]].status == WorkspaceTaskStatus.REVIEW
-    assert workspace_manager.sessions[session_id].current_task_id == first_task["id"]
+    assert workspace_manager.sessions[session_id].current_task_id == second_task["id"]
 
-    # Once the human accepts the first task it moves to DONE, releasing the
-    # agent and letting the queued second task start.
+    # Accepting the old result must not release or overwrite the new owner.
     accept_response = client.patch(
         f"/api/workspaces/tasks/{first_task['id']}",
         json={"status": "done"},
@@ -5137,7 +5132,7 @@ def test_review_task_keeps_agent_locked_until_done(
     assert workspace_manager.tasks[first_task["id"]].status == WorkspaceTaskStatus.DONE
     assert workspace_manager.tasks[second_task["id"]].status == WorkspaceTaskStatus.WORKING
     assert workspace_manager.sessions[session_id].current_task_id == second_task["id"]
-    assert "Run after the reviewed task is human-accepted" in sent_messages[-1][1]
+    assert "Run while the reviewed task awaits human acceptance" in sent_messages[-1][1]
 
 
 def test_reassigns_auto_queued_task_when_another_agent_becomes_free(
@@ -5195,7 +5190,6 @@ def test_reassigns_auto_queued_task_when_another_agent_becomes_free(
             "message": "Ready",
         },
     )
-    assert pass_task_review(client, first_task["id"]).status_code == 201
 
     second_task = client.post(
         f"/api/workspaces/{workspace['id']}/tasks",
@@ -5213,7 +5207,6 @@ def test_reassigns_auto_queued_task_when_another_agent_becomes_free(
             "message": "Ready",
         },
     )
-    assert pass_task_review(client, second_task["id"]).status_code == 201
 
     queued_task = client.post(
         f"/api/workspaces/{workspace['id']}/tasks",
@@ -5230,12 +5223,11 @@ def test_reassigns_auto_queued_task_when_another_agent_becomes_free(
     assert queued["session_id"] == first_agent["id"]
     assert queued["dispatch_reason"] == "Queued behind existing workspace agent"
 
-    accept_second = client.patch(
-        f"/api/workspaces/tasks/{second_task['id']}",
-        json={"status": "done"},
-    )
-
-    assert accept_second.status_code == 200
+    # Both seats were held by in-flight reviews. Finishing only the second
+    # review makes that seat reusable without waiting for human acceptance.
+    assert pass_task_review(client, second_task["id"]).status_code == 201
+    assert client.post(f"/api/workspaces/{workspace['id']}/dispatch").status_code == 204
+    assert workspace_manager.tasks[second_task["id"]].status == WorkspaceTaskStatus.REVIEW
     rebalanced = workspace_manager.tasks[queued_task["id"]]
     assert rebalanced.status == WorkspaceTaskStatus.WORKING
     assert rebalanced.session_id == second_agent["id"]
@@ -5329,20 +5321,12 @@ def test_reassigns_auto_queued_task_off_busy_working_agent(
     assert "Run on the next available agent" in sent_messages[-1][1]
 
 
-def test_reassigns_related_pinned_task_off_review_parked_agent(
+def test_reassigns_related_pinned_task_off_inflight_review_agent(
     monkeypatch: MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """A related-task-pinned queued task must not starve forever behind an agent
-    that is runtime-idle but still bound to a non-DONE review-parked task. When a
-    different agent is free, the pinned task migrates to it instead of waiting
-    indefinitely for a human to accept the parked review.
-
-    This reproduces the live deadlock: the related-pinned task carried
-    dispatch_reason="Related to task ..." (not "Queued behind existing workspace
-    agent"), so the original rebalancer skipped it entirely; the assigned agent
-    was idle on paper yet locked by a review-parked task, while other agents sat
-    idle."""
+    """Related-task affinity may yield to another idle agent while the preferred
+    agent is held by an in-flight review; explicit operator pins may not."""
 
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -5376,11 +5360,8 @@ def test_reassigns_related_pinned_task_off_review_parked_agent(
     ).json()
     first_agent = client.post(f"/api/workspaces/{workspace['id']}/agent", json={}).json()
 
-    # First agent runs a task and gets it parked in REVIEW (review passed but not
-    # human-accepted), so it stays runtime-idle yet bound to a non-DONE task.
-    # _can_dispatch_to is False for it indefinitely, but _can_assign_or_queue_to
-    # is True (it is holding an unresolved review task), so related-task dispatch
-    # still pins new work to it.
+    # An in-flight review still reserves its worker. Related-task continuity
+    # initially queues the follow-up there, but is only a soft preference.
     parked_task = client.post(
         f"/api/workspaces/{workspace['id']}/tasks",
         json={"title": "Review parked task", "prompt": "Hold first agent in review"},
@@ -5397,7 +5378,6 @@ def test_reassigns_related_pinned_task_off_review_parked_agent(
             "message": "Ready",
         },
     )
-    assert pass_task_review(client, parked_task["id"]).status_code == 201
     parked = workspace_manager.tasks[parked_task["id"]]
     assert parked.status == WorkspaceTaskStatus.REVIEW
     assert workspace_manager.sessions[first_agent["id"]].current_task_id == parked_task["id"]
@@ -5420,8 +5400,8 @@ def test_reassigns_related_pinned_task_off_review_parked_agent(
     assert queued["session_id"] == first_agent["id"]
     assert queued["dispatch_reason"] == f"Related to task {parked_task['id']}"
 
-    # A second idle agent comes online; a dispatch pass should migrate the
-    # related-pinned task off the review-parked first agent onto the free one.
+    # A second idle agent can take the follow-up without disturbing the
+    # preferred agent or its still-running reviewer.
     second_agent = client.post(f"/api/workspaces/{workspace['id']}/agent", json={}).json()
     dispatch_response = client.post(f"/api/workspaces/{workspace['id']}/dispatch")
     assert dispatch_response.status_code == 204
@@ -5437,13 +5417,13 @@ def test_reassigns_related_pinned_task_off_review_parked_agent(
     assert "Continue from the related task" in sent_messages[-1][1]
 
 
-def test_user_pinned_task_never_migrates_off_review_parked_agent(
+def test_user_pinned_task_waits_for_inflight_review_without_migration(
     monkeypatch: MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     """An explicit operator target pin ("User selected target agent") must wait
     for exactly that agent and never migrate to a free one, even when the pinned
-    agent is stuck holding a review-parked task. This guards the one
+    agent is held by an in-flight review. This guards the one
     dispatch_reason that stays non-migratable."""
 
     repo = tmp_path / "repo"
@@ -5494,7 +5474,6 @@ def test_user_pinned_task_never_migrates_off_review_parked_agent(
             "message": "Ready",
         },
     )
-    assert pass_task_review(client, parked_task["id"]).status_code == 201
 
     # Operator explicitly targets the busy first agent.
     pinned_task = client.post(
@@ -5521,6 +5500,15 @@ def test_user_pinned_task_never_migrates_off_review_parked_agent(
     assert held.status == WorkspaceTaskStatus.QUEUED
     assert held.session_id == first_agent["id"]
     assert held.dispatch_reason == "User selected target agent"
+    assert workspace_manager.sessions[second_agent["id"]].current_task_id is None
+
+    # When that exact worker becomes available after review, its operator-pinned
+    # task starts there; the other free agent must still not steal the pin.
+    assert pass_task_review(client, parked_task["id"]).status_code == 201
+    assert client.post(f"/api/workspaces/{workspace['id']}/dispatch").status_code == 204
+    started = workspace_manager.tasks[pinned_task["id"]]
+    assert started.status == WorkspaceTaskStatus.WORKING
+    assert started.session_id == first_agent["id"]
     assert workspace_manager.sessions[second_agent["id"]].current_task_id is None
 
 
@@ -9757,6 +9745,17 @@ def test_remote_workspace_explicit_remote_agent_uses_remote_tab_and_forwarded_re
     assert created_tabs[0]["remote_profile_id"] == "devbox"
     assert created_tabs[0]["remote_cwd"] == "~/repo"
     assert created_tabs[0]["remote_forward_port"] == 18173
+    assert sent_messages == []  # No empty bootstrap turn, including remotely.
+    task = client.post(
+        f"/api/workspaces/{workspace_response.json()['id']}/tasks",
+        json={"title": "Remote work", "prompt": "Inspect the remote project"},
+    ).json()
+    started = client.post(
+        f"/api/workspaces/tasks/{task['id']}/start",
+        json={"target_session_id": session["id"]},
+    )
+    assert started.status_code == 201
+    assert len(sent_messages) == 1
     assert "SSH development target: DevBox (devbox)" in sent_messages[0]
     assert "Remote working directory: ~/repo" in sent_messages[0]
     assert "http://127.0.0.1:18173/api/workspaces" in sent_messages[0]
@@ -10021,7 +10020,7 @@ def test_start_task_does_not_dispatch_to_stopped_resident_agent(
     assert "No idle or working workspace agent is available" in response.json()["detail"]
     assert "restart-agent-2" not in workspace_manager.sessions
     assert len(created_tabs) == 1
-    assert len(sent_messages) == 1
+    assert sent_messages == []
     board = client.get(f"/api/workspaces/{workspace_id}/board").json()
     assert board["tasks"][0]["status"] == "todo"
     assert board["tasks"][0]["session_id"] is None

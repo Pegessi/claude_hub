@@ -9,27 +9,6 @@
       <section class="modal-section modal-section--first">
         <div class="modal-section-header">
           <h4>Workspace Agents</h4>
-          <div
-            class="agent-manager-view-switch"
-            aria-label="Workspace agents view"
-          >
-            <button
-              type="button"
-              :data-active="agentManagerView === 'agents'"
-              @click="agentManagerView = 'agents'"
-            >
-              <span>Agents</span>
-              <strong>{{ workspaceAgents.length + (dispatcherAgent ? 1 : 0) + (residentAgent ? 1 : 0) }}</strong>
-            </button>
-            <button
-              type="button"
-              :data-active="agentManagerView === 'reviewers'"
-              @click="agentManagerView = 'reviewers'"
-            >
-              <span>Reviewers</span>
-              <strong>{{ reviewerSessions.length }}</strong>
-            </button>
-          </div>
         </div>
         <div class="agent-list">
           <article
@@ -135,20 +114,6 @@
             v-model="agentOptionsForm.title"
             placeholder="Workspace Agent"
           >
-        </div>
-
-        <div class="modal-field-row">
-          <div class="modal-field">
-            <label>Role</label>
-            <select v-model="agentOptionsForm.role">
-              <option value="orchestrator">
-                Agent
-              </option>
-              <option value="reviewer">
-                Reviewer
-              </option>
-            </select>
-          </div>
         </div>
 
         <div class="modal-field">
@@ -330,7 +295,6 @@ import {
 const {
   showAgentOptionsModal,
   closeAgentOptionsModal,
-  agentManagerView,
   agentManagerSessions,
   openSwitchEnvModal,
   agentManagerEmptyText,
@@ -342,10 +306,6 @@ const {
   isAgentOptionsCreateDisabled,
 } = useWorkspaceAgentManagerContext()
 const {
-  workspaceAgents,
-  dispatcherAgent,
-  residentAgent,
-  reviewerSessions,
   agentRoleLabel,
   taskTitle,
   isPending,

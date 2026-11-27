@@ -774,9 +774,8 @@ def test_task_prompts_render_stable_distinct_call_ids_for_two_real_cycles(
         workspace, task, session, lesson_context=[]
     )
     cycle_one_continue = manager._build_continue_prompt(task, ContinueTaskRequest(), session)
-    assert f"{task.id}-goal-packet-cycle-1-attempt-1" in cycle_one_assignment
+    assert "goal-packet-cycle" not in cycle_one_assignment
     assert f"{task.id}-started-cycle-1-attempt-1" in cycle_one_assignment
-    assert f"{task.id}-assignment-progress-cycle-1-attempt-1" in cycle_one_assignment
     assert f"{task.id}-continue-progress-cycle-1-attempt-1" in cycle_one_continue
     assert cycle_one_continue == manager._build_continue_prompt(
         task, ContinueTaskRequest(), session
@@ -787,7 +786,7 @@ def test_task_prompts_render_stable_distinct_call_ids_for_two_real_cycles(
     cycle_one_redispatch = manager._build_task_assignment_prompt(
         workspace, redispatched, session, lesson_context=[]
     )
-    assert f"{task.id}-assignment-progress-cycle-1-attempt-2" in cycle_one_redispatch
+    assert f"{task.id}-started-cycle-1-attempt-2" in cycle_one_redispatch
     assert cycle_one_redispatch != cycle_one_assignment
 
     task = task.model_copy(update={"review_cycle": 2})
@@ -796,7 +795,7 @@ def test_task_prompts_render_stable_distinct_call_ids_for_two_real_cycles(
         workspace, task, session, lesson_context=[]
     )
     cycle_two_continue = manager._build_continue_prompt(task, ContinueTaskRequest(), session)
-    assert f"{task.id}-goal-packet-cycle-2-attempt-1" in cycle_two_assignment
+    assert "goal-packet-cycle" not in cycle_two_assignment
     assert f"{task.id}-started-cycle-2-attempt-1" in cycle_two_assignment
     assert f"{task.id}-continue-progress-cycle-2-attempt-2" in cycle_two_continue
     assert "cycle-1" not in cycle_two_continue

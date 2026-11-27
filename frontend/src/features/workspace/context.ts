@@ -145,7 +145,6 @@ type WorkspaceAgentManagerContext = Pick<ReturnType<typeof useWorkspaceAgentMana
   | 'openSwitchEnvModal'
   | 'showAgentOptionsModal'
   | 'closeAgentOptionsModal'
-  | 'agentManagerView'
   | 'agentManagerSessions'
   | 'agentManagerEmptyText'
   | 'handleCreateAdvancedAgent'

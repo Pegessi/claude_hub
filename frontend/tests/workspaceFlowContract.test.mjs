@@ -1,0 +1,92 @@
+import assert from 'node:assert/strict'
+import test from 'node:test'
+import { loadWorkspaceFeature, vue } from './workspaceFeatureTestHarness.mjs'
+
+const { useWorkspaceAgentManager } = await loadWorkspaceFeature('composables/useWorkspaceAgentManager.ts')
+const { useWorkspaceTaskActions } = await loadWorkspaceFeature('composables/useWorkspaceTaskActions.ts')
+
+function ownScope(t, setup) {
+  const scope = vue.effectScope()
+  t.after(() => scope.stop())
+  return scope.run(setup)
+}
+
+test('one agent list retains historical reviewers and new agents always use the generic role', async t => {
+  const created = []
+  const inputs = {
+    defaultPresetTextForAgent: () => '',
+    reviewerSessions: vue.ref([{ id: 'legacy-reviewer', role: 'reviewer' }]),
+    workspaceAgents: vue.ref([{ id: 'generic', role: 'orchestrator' }]),
+    dispatcherAgent: vue.ref({ id: 'legacy-dispatcher', role: 'dispatcher' }),
+    residentAgent: vue.ref({ id: 'resident', role: 'resident' }),
+    isLoading: vue.ref(false), isPending: () => false,
+    activeWorkspace: vue.ref({ path: '/fixture/workspace', target: 'local' }),
+    getPresetText: () => '',
+    workspaceStore: { ensureWorkspaceAgent: async payload => created.push(payload) },
+    runPending: (_key, action) => action(), sessionActionKey: (action, id) => `${action}:${id}`,
+    terminalStore: { fetchTabs: async () => {} },
+    remoteProfiles: vue.ref([]), fetchRemoteProfiles: async () => {},
+  }
+  const manager = ownScope(t, () => useWorkspaceAgentManager(inputs))
+  assert.deepEqual(manager.agentManagerSessions.value.map(agent => agent.id), [
+    'generic', 'legacy-reviewer', 'legacy-dispatcher', 'resident',
+  ])
+  assert.equal('agentManagerView' in manager, false)
+  assert.equal('role' in manager.agentOptionsForm, false)
+  manager.openAgentOptionsModal()
+  manager.agentOptionsForm.title = '  General agent  '
+  await manager.handleCreateAdvancedAgent()
+  assert.equal(created[0].role, 'orchestrator')
+  assert.equal(created[0].title, 'General agent')
+  assert.equal(created[0].cwd, '/fixture/workspace')
+  inputs.reviewerSessions.value = []
+  assert.equal(manager.agentManagerSessions.value.some(agent => agent.role === 'reviewer'), false)
+})
+
+function taskActions(t, updateTask) {
+  return ownScope(t, () => useWorkspaceTaskActions({
+    selectedTaskId: vue.ref(null), selectedTask: vue.ref(null),
+    runPending: (_key, action) => action(), taskActionKey: (action, id) => `${action}:${id}`,
+    workspaceStore: { updateTask }, terminalStore: {},
+    expandedArtifactKey: vue.ref(null), closeMarkdownPreviewModal: () => {},
+    canEditTask: () => true, canUseManagedTaskActions: () => true, selectedSession: vue.ref(null),
+  }))
+}
+
+test('task edits round-trip optional contract fields and normalize newline acceptance items', async t => {
+  const calls = []
+  const actions = taskActions(t, async (...args) => calls.push(args))
+  actions.openEditTaskModal({
+    id: 'contract', title: 'Task', prompt: 'Implement',
+    goal: 'Ship the feature', done_when: ['Test passes', 'UI works'], out_of_scope: ['Deployment'],
+  })
+  assert.equal(actions.editTaskForm.goal, 'Ship the feature')
+  assert.equal(actions.editTaskForm.done_when, 'Test passes\nUI works')
+  assert.equal(actions.editTaskForm.out_of_scope, 'Deployment')
+  actions.editTaskForm.goal = '  Revised goal  '
+  actions.editTaskForm.done_when = '  Build passes  \r\n\r\n  Regression passes \n'
+  actions.editTaskForm.out_of_scope = '  No deployment  \n'
+  await actions.handleUpdateTask()
+  assert.equal(calls[0][0], 'contract')
+  assert.equal(calls[0][1].goal, 'Revised goal')
+  assert.deepEqual(calls[0][1].done_when, ['Build passes', 'Regression passes'])
+  assert.deepEqual(calls[0][1].out_of_scope, ['No deployment'])
+  assert.equal('goal_packet' in calls[0][1], false)
+  assert.equal(actions.showEditTaskModal.value, false)
+  assert.equal(actions.editTaskForm.goal, '')
+  assert.equal(actions.editTaskForm.done_when, '')
+  assert.equal(actions.editTaskForm.out_of_scope, '')
+})
+
+test('legacy tasks open with empty optional fields and failed saves retain the draft', async t => {
+  const actions = taskActions(t, async () => { throw new Error('save failed') })
+  actions.openEditTaskModal({ id: 'legacy', title: 'Legacy', prompt: 'Original prompt' })
+  assert.equal(actions.editTaskForm.goal, '')
+  assert.equal(actions.editTaskForm.done_when, '')
+  assert.equal(actions.editTaskForm.out_of_scope, '')
+  actions.editTaskForm.done_when = 'Must survive a failed save'
+  await assert.rejects(actions.handleUpdateTask(), /save failed/)
+  assert.equal(actions.editingTaskId.value, 'legacy')
+  assert.equal(actions.showEditTaskModal.value, true)
+  assert.equal(actions.editTaskForm.done_when, 'Must survive a failed save')
+})

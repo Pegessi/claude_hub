@@ -22,6 +22,9 @@ from claude_hub.cli.task_commands.group import task
 @click.argument("workspace_id")
 @click.option("--title", required=True, help="Task title.")
 @click.option("--prompt", required=True, help="Task prompt.")
+@click.option("--goal", default=None, help="Desired outcome (optional).")
+@click.option("--done-when", multiple=True, help="Acceptance criterion (repeatable).")
+@click.option("--out-of-scope", multiple=True, help="Excluded work (repeatable).")
 @click.option(
     "--agent-type",
     type=click.Choice(["claude", "codex", "cursor", "maso", "antigravity", "terminal"]),
@@ -112,6 +115,9 @@ def task_create(
     workspace_id: str,
     title: str,
     prompt: str,
+    goal: Optional[str],
+    done_when: tuple[str, ...],
+    out_of_scope: tuple[str, ...],
     agent_type: str,
     session_kind: Optional[str],
     task_mode: str,
@@ -142,6 +148,7 @@ def task_create(
         payload_json,
         title=title,
         prompt=prompt,
+        goal=goal,
         agent_type=agent_type,
         session_kind=session_kind,
         task_mode=effective_task_mode,
@@ -158,6 +165,10 @@ def task_create(
         clear_context=clear_context,
         timeout_seconds=timeout_seconds,
     )
+    if done_when:
+        body["done_when"] = list(done_when)
+    if out_of_scope:
+        body["out_of_scope"] = list(out_of_scope)
     if depends_on:
         body["depends_on_task_ids"] = list(depends_on)
     if attachment_json:
