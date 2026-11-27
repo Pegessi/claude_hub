@@ -240,7 +240,8 @@ class ProcessLaunchMixin(ProcessHost):
                 f"ttyd started for tab {self.tab_id} with PID {self.process.pid}, tmux session: {self.tmux_session}"
             )
 
-            # Enable tmux mouse mode and other options
+            # Enable tmux mouse mode and other options without blocking on a fixed sleep
+            self._tmux_session_known_ready = bool(session_exists)
             await self._configure_tmux()
 
             asyncio.create_task(self._log_stderr())

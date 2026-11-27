@@ -332,14 +332,30 @@ def _static_options(agent_type: str) -> List[StreamModelOption]:
     )
 
 
+_CODEX_CACHE_PARSED_MAX = 16
+_CODEX_CACHE_PARSED: Dict[Tuple[Optional[bytes], Tuple[str, ...]], List[StreamModelOption]] = {}
+
+
 def _codex_model_options(env: Dict[str, str]) -> List[StreamModelOption]:
     """Read this Codex home's catalog without freezing it in a process-wide TTL."""
     effective = {**os.environ, **env}
     home = Path(effective.get("HOME") or "~").expanduser()
     root = Path(effective.get("CODEX_HOME") or home / ".codex").expanduser()
     try:
-        payload = json.loads((root / "models_cache.json").read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+        raw_bytes: Optional[bytes] = (root / "models_cache.json").read_bytes()
+    except OSError:
+        raw_bytes = None
+    static_ids = tuple(option.id for option in _static_options("codex"))
+    cache_key = (raw_bytes, static_ids)
+    cached = _CODEX_CACHE_PARSED.get(cache_key)
+    if cached is not None:
+        return list(cached)
+    if raw_bytes is not None:
+        try:
+            payload = json.loads(raw_bytes.decode("utf-8"))
+        except ValueError:
+            payload = None
+    else:
         payload = None
     rows = provider_model_options.codex_cache_rows(payload)
     # The cache enriches known IDs and may advertise releases the persistent
@@ -355,9 +371,12 @@ def _codex_model_options(env: Dict[str, str]) -> List[StreamModelOption]:
             label=model,
             description="Codex fallback model; availability depends on your account.",
         )
-        for model in (option.id for option in _static_options("codex"))
+        for model in static_ids
         if model not in cache_ids
     )
+    if len(_CODEX_CACHE_PARSED) >= _CODEX_CACHE_PARSED_MAX:
+        _CODEX_CACHE_PARSED.pop(next(iter(_CODEX_CACHE_PARSED)), None)
+    _CODEX_CACHE_PARSED[cache_key] = list(options)
     return options
 
 

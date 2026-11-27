@@ -508,17 +508,15 @@ def read_latest_turn_completed_batch_sync(
                 if not present_entries:
                     continue
 
+                # Point queries on idx stream_kind(name, kind, sequence) seek straight to each stream's newest completion.
                 max_comp_by_sid: Dict[int, int] = {}
-                sids = [item[2] for item in present_entries]
-                for offset in range(0, len(sids), 500):
-                    chunk_sids = sids[offset : offset + 500]
-                    placeholders = ",".join("?" for _ in chunk_sids)
-                    for sid, max_seq in db.execute(
-                        f"SELECT name, max(sequence) FROM stream_events WHERE name IN ({placeholders}) AND kind='turn_completed' GROUP BY name",
-                        chunk_sids,
-                    ):
-                        if max_seq is not None:
-                            max_comp_by_sid[int(sid)] = int(max_seq)
+                for _, _, sid, _, _ in present_entries:
+                    row = db.execute(
+                        "SELECT max(sequence) FROM stream_events WHERE name=? AND kind='turn_completed'",
+                        (sid,),
+                    ).fetchone()
+                    if row is not None and row[0] is not None:
+                        max_comp_by_sid[sid] = int(row[0])
 
                 db_key = str(db_file)
                 for item_key, logical_name, sid, generation, dictionary in present_entries:
@@ -550,6 +548,160 @@ def read_latest_turn_completed_batch_sync(
                     legacy_unimported.append(item_key)
 
     return resolved, legacy_unimported
+
+
+def read_stream_summaries_batch_sync(
+    paths_by_key: Dict[str, Path],
+    max_chars: int = _REPLY_EXCERPT_MAX_CHARS,
+    max_scan_bytes: int = _REPLY_EXCERPT_SCAN_BYTES,
+) -> Dict[str, Optional[StreamSummary]]:
+    """Batch-read cached SQLite stream summaries in one connection per database."""
+    results: Dict[str, Optional[StreamSummary]] = {}
+    if not paths_by_key:
+        return results
+
+    grouped: Dict[Path, List[Tuple[str, Path, str]]] = {}
+    parent_locations: Dict[Path, Tuple[Path, str]] = {}
+    for item_key, path in paths_by_key.items():
+        parent = path.parent
+        cached_parent = parent_locations.get(parent)
+        if cached_parent is None:
+            db_file, logical_name = storage_location(path)
+            suffix = f"/{path.name}"
+            if logical_name.endswith(suffix):
+                parent_locations[parent] = (db_file, logical_name[: -len(suffix)])
+        else:
+            db_file = cached_parent[0]
+            logical_name = f"{cached_parent[1]}/{path.name}"
+        grouped.setdefault(db_file, []).append((item_key, path, logical_name))
+
+    for db_file, entries in grouped.items():
+        fallback_entries: List[Tuple[str, Path, str]] = []
+        db_key = str(db_file)
+        if db_file.exists():
+            try:
+                with connection(entries[0][1]) as db:
+                    db.execute("BEGIN")
+                    by_logical: Dict[str, Tuple[int, int, bytes]] = {}
+                    logical_names = [logical_name for _, _, logical_name in entries]
+                    for offset in range(0, len(logical_names), 500):
+                        chunk = logical_names[offset : offset + 500]
+                        placeholders = ",".join("?" for _ in chunk)
+                        for name_str, sid, gen, zdict in db.execute(
+                            f"SELECT name, id, generation, dictionary FROM streams WHERE name IN ({placeholders})",
+                            chunk,
+                        ):
+                            by_logical[str(name_str)] = (int(sid), int(gen), bytes(zdict))
+
+                    for item_key, path, logical_name in entries:
+                        stream_info = by_logical.get(logical_name)
+                        if stream_info is None:
+                            fallback_entries.append((item_key, path, logical_name))
+                            continue
+                        stream_id, generation, dictionary = stream_info
+                        # Point query on PRIMARY KEY(name, sequence) seeks directly to the right-most leaf.
+                        max_seq = int(
+                            db.execute(
+                                "SELECT coalesce(max(sequence), -1) FROM stream_events WHERE name=?",
+                                (stream_id,),
+                            ).fetchone()[0]
+                        )
+                        cache_key = (db_key, logical_name)
+                        cached = _STREAM_SUMMARY_CACHE.get(cache_key)
+                        if (
+                            cached is not None
+                            and cached[0] == "sqlite"
+                            and cached[1] == generation
+                            and cached[2] == max_seq
+                        ):
+                            results[item_key] = cached[3]
+                            continue
+                        if max_seq < 0:
+                            empty = StreamSummary(
+                                excerpt=None, last_activity_at=None, max_sequence=-1
+                            )
+                            if len(_STREAM_SUMMARY_CACHE) >= _STREAM_SUMMARY_CACHE_MAX:
+                                _STREAM_SUMMARY_CACHE.pop(next(iter(_STREAM_SUMMARY_CACHE)), None)
+                            _STREAM_SUMMARY_CACHE[cache_key] = (
+                                "sqlite",
+                                generation,
+                                max_seq,
+                                empty,
+                            )
+                            results[item_key] = empty
+                            continue
+                        tail_rows = db.execute(
+                            "SELECT body FROM stream_events WHERE name=? ORDER BY sequence DESC LIMIT 200",
+                            (stream_id,),
+                        ).fetchall()
+                        comp_rows = db.execute(
+                            "SELECT body FROM stream_events WHERE name=? AND kind='turn_completed' "
+                            "ORDER BY sequence DESC LIMIT 12",
+                            (stream_id,),
+                        ).fetchall()
+                        tool_rows = db.execute(
+                            "SELECT body FROM stream_events WHERE name=? AND kind='tool_call_started' "
+                            "ORDER BY sequence DESC LIMIT 120",
+                            (stream_id,),
+                        ).fetchall()
+                        tail_events = [unpack(r[0], dictionary) for r in reversed(tail_rows)]
+                        comp_events = [unpack(r[0], dictionary) for r in comp_rows]
+                        tool_events = [unpack(r[0], dictionary) for r in tool_rows]
+                        summary = _summarize_sqlite_events(
+                            tail_events,
+                            comp_events,
+                            tool_events,
+                            max_chars=max_chars,
+                            generation=generation,
+                            max_seq=max_seq,
+                        )
+                        if len(_STREAM_SUMMARY_CACHE) >= _STREAM_SUMMARY_CACHE_MAX:
+                            _STREAM_SUMMARY_CACHE.pop(next(iter(_STREAM_SUMMARY_CACHE)), None)
+                        _STREAM_SUMMARY_CACHE[cache_key] = ("sqlite", generation, max_seq, summary)
+                        results[item_key] = summary
+            except OSError:
+                fallback_entries = list(entries)
+        else:
+            fallback_entries = list(entries)
+
+        for item_key, path, logical_name in fallback_entries:
+            if item_key in results:
+                continue
+            cache_key = (db_key, logical_name)
+            try:
+                stat_result = path.stat()
+            except OSError:
+                _STREAM_SUMMARY_CACHE.pop(cache_key, None)
+                results[item_key] = None
+                continue
+            cached = _STREAM_SUMMARY_CACHE.get(cache_key)
+            if (
+                cached is not None
+                and cached[0] == "jsonl"
+                and cached[1] == stat_result.st_mtime_ns
+                and cached[2] == stat_result.st_size
+            ):
+                results[item_key] = cached[3]
+                continue
+            legacy_excerpt = read_reply_excerpt(path, max_chars, max_scan_bytes)
+            summary = StreamSummary(
+                excerpt=legacy_excerpt,
+                last_activity_at=(
+                    legacy_excerpt.written_at if legacy_excerpt is not None else None
+                ),
+                max_sequence=-1,
+            )
+            if len(_STREAM_SUMMARY_CACHE) >= _STREAM_SUMMARY_CACHE_MAX:
+                _STREAM_SUMMARY_CACHE.pop(next(iter(_STREAM_SUMMARY_CACHE)), None)
+            _STREAM_SUMMARY_CACHE[cache_key] = (
+                "jsonl",
+                stat_result.st_mtime_ns,
+                stat_result.st_size,
+                summary,
+            )
+            results[item_key] = summary if legacy_excerpt is not None else None
+
+    return results
 
 
 def compact_history_events(events: List[AgentStreamEvent]) -> List[AgentStreamEvent]:

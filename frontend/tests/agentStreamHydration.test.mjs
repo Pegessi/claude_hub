@@ -1049,3 +1049,66 @@ for (const teardown of ['stop', 'unmount', 'manual retry']) {
   })
 }
 
+test('cached capabilities populate immediately during history catch-up and refresh updates cached history snapshot', async t => {
+  const { agentStreamCapabilitiesCache } = await import(await moduleUrl('utils/agentStreamCapabilitiesCache'))
+  agentStreamCapabilitiesCache.clear()
+  agentStreamHistoryCache.clear()
+
+  let holdEvents = false
+  let releaseEvents
+  let currentModel = 'gpt-5.4'
+  t.mock.method(globalThis, 'fetch', async (url, options = {}) => {
+    if (url.includes('/capabilities')) {
+      return Response.json({
+        structured: true,
+        metadata_cacheable: true,
+        current_model: currentModel,
+      })
+    }
+    if (url.includes('/events?')) {
+      if (holdEvents) {
+        return new Promise(resolve => {
+          releaseEvents = () => resolve(Response.json({ events: [], next_sequence: 0, has_more: false }))
+        })
+      }
+      return Response.json({
+        events: [{ stream_sequence: 0, type: 'text_delta', payload: { text: 'hello' } }],
+        next_sequence: 0,
+        has_more: false,
+      })
+    }
+    return new Promise((_resolve, reject) => {
+      options.signal?.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')), { once: true })
+    })
+  })
+
+  const first = mountStream(() => 'cfg-1')
+  t.after(first.unmount)
+  await first.stream.start('instant-caps', 'terminal-tab')
+  assert.equal(first.stream.capabilities.value?.current_model, 'gpt-5.4')
+  currentModel = 'gpt-5.5'
+  await first.stream.refreshCapabilities()
+  assert.equal(first.stream.capabilities.value?.current_model, 'gpt-5.5')
+  assert.equal(
+    agentStreamHistoryCache.get('/api/workspaces/tabs/instant-caps/stream')?.capabilities?.current_model,
+    'gpt-5.5',
+  )
+  first.stream.stop()
+
+  // Simulate LRU eviction of history snapshot while capability hint remains warm
+  agentStreamHistoryCache.clear()
+  holdEvents = true
+  const second = mountStream(() => 'cfg-1')
+  t.after(second.unmount)
+  const starting = second.stream.start('instant-caps', 'terminal-tab')
+  assert.equal(
+    second.stream.capabilities.value?.current_model,
+    'gpt-5.5',
+    'warm capability hint should populate synchronously before events fetch settles',
+  )
+  releaseEvents()
+  await starting
+  second.stream.stop()
+})
+
+

@@ -141,6 +141,7 @@ class CodexConfiguredSession(ProcessSession):
         self._provider_goal_api_available: Optional[bool] = None
         self._model_discovery_attempted = False
         self._model_discovery_task: Optional[asyncio.Task[bool]] = None
+        self._foreground_discovery_waited = False
         self._provider_model_options: Optional[List[StreamModelOption]] = None
         self._provider_hidden_model_ids: set[str] = set()
         self._network_config_fingerprint: Optional[str] = None
@@ -172,6 +173,7 @@ class CodexConfiguredSession(ProcessSession):
         async with self._start_lock:
             discovery_task = self._model_discovery_task
             self._model_discovery_task = None
+            self._foreground_discovery_waited = False
             if discovery_task is not None and not discovery_task.done():
                 discovery_task.cancel()
                 try:
@@ -576,8 +578,17 @@ class CodexConfiguredSession(ProcessSession):
                 if task is None or task.done():
                     task = asyncio.create_task(self._discover_models())
                     self._model_discovery_task = task
-                done, _ = await asyncio.wait({task}, timeout=_FOREGROUND_MODEL_DISCOVERY_BUDGET_S)
-                if task in done:
+                if not self._foreground_discovery_waited:
+                    self._foreground_discovery_waited = True
+                    done, _ = await asyncio.wait(
+                        {task}, timeout=_FOREGROUND_MODEL_DISCOVERY_BUDGET_S
+                    )
+                    if task in done:
+                        try:
+                            await task
+                        except Exception:
+                            pass
+                elif task.done():
                     try:
                         await task
                     except Exception:

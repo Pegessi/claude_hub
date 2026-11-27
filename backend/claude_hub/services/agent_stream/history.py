@@ -250,6 +250,14 @@ class ConversationHistoryIndex:
         _, logical_name = storage_location(path)
         with connection(path) as db:
             db.execute("BEGIN")
+            if since >= 0:
+                has_newer = db.execute(
+                    "SELECT 1 FROM streams s WHERE s.name=? AND EXISTS ("
+                    "SELECT 1 FROM stream_events e WHERE e.name=s.id AND e.sequence>?)",
+                    (logical_name, since),
+                ).fetchone()
+                if has_newer is None:
+                    return AgentStreamEventPage(events=[], next_sequence=since, has_more=False)
             stream = db.execute(
                 "SELECT id,dictionary FROM streams WHERE name=?", (logical_name,)
             ).fetchone()
