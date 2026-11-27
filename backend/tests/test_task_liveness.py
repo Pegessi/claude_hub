@@ -878,10 +878,10 @@ async def test_recovery_cleanup_rechecks_identity_after_lock_wait(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("kind", [SessionKind.TERMINAL, SessionKind.CHAT])
 @pytest.mark.parametrize(
-    "bootstrap", ["idle", "active", "spawning", "pending", "processing", "uncertain"]
+    "provisioning_state", ["idle", "active", "spawning", "pending", "processing", "uncertain"]
 )
-async def test_real_provisioning_retires_current_unused_incarnation_after_bootstrap(
-    delivery_env, monkeypatch, kind, bootstrap
+async def test_real_provisioning_retires_current_unused_incarnation_without_bootstrap(
+    delivery_env, monkeypatch, kind, provisioning_state
 ):
     manager, clock, _ = delivery_env
     task, worker = as_worker(manager, kind=kind)
@@ -908,23 +908,19 @@ async def test_real_provisioning_retires_current_unused_incarnation_after_bootst
     async def create(_workspace, payload):
         assert payload.ephemeral and payload.caller_owned_ephemeral
         manager.sessions[replacement.id] = replacement
-        return replacement
-
-    async def provision(*args):
-        result = await real_provision(*args)
-        returned.append(result)
-        return result
-
-    async def bootstrap_send(*args, **kwargs):
+        # Creation can yield to runtime observations or a revived old worker.
+        # The provisioning return value is deliberately the earlier snapshot;
+        # cleanup must inspect the current incarnation and its actual activity.
+        await asyncio.sleep(0)
         update = {"status": ManagedSessionStatus.IDLE}
-        if bootstrap == "active":
+        if provisioning_state == "active":
             update.update(
                 status=ManagedSessionStatus.WORKING, runtime_status=AgentRuntimeStatus.WORKING
             )
-        elif bootstrap == "spawning":
+        elif provisioning_state == "spawning":
             update["status"] = ManagedSessionStatus.SPAWNING
-        elif bootstrap in {"pending", "processing", "uncertain"}:
-            update[f"{bootstrap}_call_ids"] = ["bootstrap-receipt"]
+        elif provisioning_state in {"pending", "processing", "uncertain"}:
+            update[f"{provisioning_state}_call_ids"] = ["concurrent-receipt"]
         manager.sessions[replacement.id] = replacement.model_copy(update=update)
         manager.sessions[worker.id] = worker.model_copy(
             update={
@@ -932,6 +928,12 @@ async def test_real_provisioning_retires_current_unused_incarnation_after_bootst
                 "runtime_status": AgentRuntimeStatus.WORKING,
             }
         )
+        return replacement
+
+    async def provision(*args):
+        result = await real_provision(*args)
+        returned.append(result)
+        return result
 
     def install_cleanup(owner):
         async def delete(session):
@@ -943,8 +945,10 @@ async def test_real_provisioning_retires_current_unused_incarnation_after_bootst
 
     monkeypatch.setattr(manager, "_create_managed_session", create)
     monkeypatch.setattr(manager, "_build_session_bootstrap_prompt", lambda *a: "bootstrap")
-    monkeypatch.setattr(manager, "_wait_for_agent_prompt", AsyncMock())
-    monkeypatch.setattr(manager, "send_session_message", bootstrap_send)
+    wait_for_prompt = AsyncMock()
+    send = AsyncMock()
+    monkeypatch.setattr(manager, "_wait_for_agent_prompt", wait_for_prompt)
+    monkeypatch.setattr(manager, "send_session_message", send)
     monkeypatch.setattr(manager, "ensure_workspace_agent", provision)
     monkeypatch.setattr(managed_chat, "runtime_status", lambda s: s.runtime_status)
     monkeypatch.setattr(
@@ -958,10 +962,12 @@ async def test_real_provisioning_retires_current_unused_incarnation_after_bootst
     await tick(manager)
     assert returned == [replacement]
     assert returned[0].status == ManagedSessionStatus.SPAWNING
+    wait_for_prompt.assert_not_awaited()
+    send.assert_not_awaited()
     dispatch.assert_not_awaited()
     assert manager.tasks[task.id].session_id == worker.id
     assert manager.tasks[task.id].liveness.attempts == 0
-    if bootstrap != "idle":
+    if provisioning_state != "idle":
         assert deleted == []
         assert manager.tasks[task.id].liveness.retiring_sessions == {
             replacement.id: replacement.created_at
@@ -1086,7 +1092,7 @@ async def test_unused_replacement_adopted_while_waiting_for_pump_is_preserved(
     "outcome",
     ["completed", "active", "uncertain", "missing", "adopted", "pump_active", "pump_uncertain"],
 )
-async def test_unused_chat_bootstrap_receipt_converges_through_real_mailbox(
+async def test_unused_chat_legacy_startup_receipt_converges_through_real_mailbox(
     delivery_env, monkeypatch, reload, outcome
 ):
     from claude_hub.models import AgentStreamEvent, AgentStreamEventType
@@ -1133,7 +1139,7 @@ async def test_unused_chat_bootstrap_receipt_converges_through_real_mailbox(
     async def native_accept():
         call_id = native.calls[-1][0][3]
         await append_event(AgentStreamEventType.TURN_STARTED, call_id)
-        # The old worker revives while replacement bootstrap is accepted.
+        # The old worker revives while a legacy startup receipt is accepted.
         manager.sessions[worker.id] = worker.model_copy(
             update={
                 "status": ManagedSessionStatus.WORKING,
@@ -1160,13 +1166,26 @@ async def test_unused_chat_bootstrap_receipt_converges_through_real_mailbox(
         monkeypatch.setattr(owner, "_retire_session_resources", retire_resources)
         monkeypatch.setattr(owner, "_dispatch_task_to_session", AsyncMock())
 
+    real_provision = manager.ensure_workspace_agent
+
+    async def provision_with_legacy_receipt(*args):
+        result = await real_provision(*args)
+        # Current provisioning creates no empty turn. Seed a legacy startup
+        # message explicitly through the real mailbox to preserve cleanup
+        # coverage for receipts left behind by pre-upgrade sessions.
+        assert native.calls == []
+        await manager.send_session_message(result.id, "Legacy startup instructions")
+        return result
+
     native.on_send = native_accept
+    monkeypatch.setattr(manager, "ensure_workspace_agent", provision_with_legacy_receipt)
     monkeypatch.setattr(manager, "_create_managed_session", create)
     monkeypatch.setattr(manager, "_build_session_bootstrap_prompt", lambda *a: "bootstrap")
     monkeypatch.setattr(manager, "_wait_for_agent_prompt", AsyncMock())
     monkeypatch.setattr(manager, "_assert_session_seat", lambda s: "")
     install(manager)
-    # Real provisioning, Workspace send/pump, managed bridge and receipt writes.
+    # Real provisioning without bootstrap, followed by an explicitly seeded
+    # legacy message through Workspace send/pump, managed bridge and receipt writes.
     await tick(manager)
     assert len(native.calls) == 1
     call_id = native.calls[0][0][3]

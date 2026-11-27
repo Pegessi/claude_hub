@@ -10,10 +10,7 @@
       tabindex="-1"
     >
       <h3>Edit Task</h3>
-      <form
-        @submit.prevent="handleUpdateTask"
-        @paste.prevent
-      >
+      <form @submit.prevent="handleUpdateTask">
         <div class="modal-field">
           <label>Title</label>
           <input
@@ -24,6 +21,32 @@
         <div class="modal-field">
           <label>Task description</label>
           <textarea v-model="editTaskForm.prompt" />
+        </div>
+        <div class="modal-field">
+          <label for="task-edit-goal">Goal (optional)</label>
+          <input
+            id="task-edit-goal"
+            v-model="editTaskForm.goal"
+            placeholder="The outcome this task should achieve"
+          >
+        </div>
+        <div class="modal-field">
+          <label for="task-edit-done_when">Done when (optional)</label>
+          <textarea
+            id="task-edit-done_when"
+            v-model="editTaskForm.done_when"
+            placeholder="One acceptance criterion per line"
+            rows="3"
+          />
+        </div>
+        <div class="modal-field">
+          <label for="task-edit-out_of_scope">Out of scope (optional)</label>
+          <textarea
+            id="task-edit-out_of_scope"
+            v-model="editTaskForm.out_of_scope"
+            placeholder="One exclusion per line"
+            rows="3"
+          />
         </div>
         <div class="modal-field">
           <label>Dispatch agent</label>

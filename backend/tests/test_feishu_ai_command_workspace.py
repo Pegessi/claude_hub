@@ -937,18 +937,18 @@ async def test_production_provisioning_creates_tab_with_workspace_id(
         assert request_seen["bootstrap"] is False
         assert request.cwd == str(tmp_path)
         assert request.session_kind == SessionKind.CHAT
-        assert request.role == WorkspaceSessionRole.WORKER
+        assert request.role == WorkspaceSessionRole.ORCHESTRATOR
 
         # The provisioning request disabled advisory reuse.
         assert session.workspace_id == workspace.id
-        assert session.role == WorkspaceSessionRole.WORKER
+        assert session.role == WorkspaceSessionRole.ORCHESTRATOR
         assert session.session_kind == SessionKind.CHAT
 
         # The runtime tab created through the real provisioning path carries the
         # workspace attribution that makes it render under the workspace.
         assert captured["workspace_id"] == workspace.id
         assert captured["workspace_name"] == workspace.name
-        assert captured["workspace_role"] == WorkspaceSessionRole.WORKER
+        assert captured["workspace_role"] == WorkspaceSessionRole.ORCHESTRATOR
         assert captured["managed_session_id"] == session.id
         assert captured["session_kind"] == SessionKind.CHAT
         assert captured["cwd"] == str(tmp_path)

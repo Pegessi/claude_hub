@@ -69,6 +69,9 @@ export function useWorkspaceTaskActions(inputs: WorkspaceTaskActionsInputs) {
   const editTaskForm = reactive({
     title: '',
     prompt: '',
+    goal: '',
+    done_when: '',
+    out_of_scope: '',
     session_id: '',
     related_task_id: '',
     clear_context: false,
@@ -122,6 +125,9 @@ export function useWorkspaceTaskActions(inputs: WorkspaceTaskActionsInputs) {
     editingTaskId.value = task.id
     editTaskForm.title = task.title
     editTaskForm.prompt = task.prompt
+    editTaskForm.goal = task.goal || ''
+    editTaskForm.done_when = (task.done_when || []).join('\n')
+    editTaskForm.out_of_scope = (task.out_of_scope || []).join('\n')
     editTaskForm.session_id = task.session_id || ''
     editTaskForm.related_task_id = task.related_task_id || ''
     editTaskForm.clear_context = Boolean(task.clear_context)
@@ -133,6 +139,9 @@ export function useWorkspaceTaskActions(inputs: WorkspaceTaskActionsInputs) {
     editingTaskId.value = null
     editTaskForm.title = ''
     editTaskForm.prompt = ''
+    editTaskForm.goal = ''
+    editTaskForm.done_when = ''
+    editTaskForm.out_of_scope = ''
     editTaskForm.session_id = ''
     editTaskForm.related_task_id = ''
     editTaskForm.clear_context = false
@@ -151,6 +160,9 @@ export function useWorkspaceTaskActions(inputs: WorkspaceTaskActionsInputs) {
       const payload: WorkspaceTaskUpdate = {
         title: editTaskForm.title.trim(),
         prompt: editTaskForm.prompt.trim(),
+        goal: editTaskForm.goal.trim() || null,
+        done_when: editTaskForm.done_when.split(/\r?\n/).map(line => line.trim()).filter(Boolean),
+        out_of_scope: editTaskForm.out_of_scope.split(/\r?\n/).map(line => line.trim()).filter(Boolean),
         session_id: editTaskForm.session_id || null,
         related_task_id: editTaskForm.related_task_id || null,
         clear_context: editTaskForm.clear_context ? true : null,

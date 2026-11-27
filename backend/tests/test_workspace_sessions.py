@@ -309,7 +309,7 @@ def test_agent_create_rolls_back_session_when_bootstrap_submit_fails(
             is_active=True,
             workspace_id=workspace["id"],
             workspace_name="Bootstrap Failure Repo",
-            workspace_role=WorkspaceSessionRole.DISPATCHER,
+            workspace_role=WorkspaceSessionRole.RESIDENT,
         )
 
     async def fail_bootstrap(_session_id: str, _message: str) -> None:
@@ -328,7 +328,7 @@ def test_agent_create_rolls_back_session_when_bootstrap_submit_fails(
             f"/api/workspaces/{workspace['id']}/agent",
             json={
                 "agent_type": "claude",
-                "role": "dispatcher",
+                "role": "resident",
                 "reuse_existing": False,
                 "ephemeral": True,
             },

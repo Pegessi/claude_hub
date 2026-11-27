@@ -1,5 +1,7 @@
 """Task admission and dispatch-target selection."""
 
+import os
+
 from claude_hub.models.schemas import validate_workspace_session_surface
 from claude_hub.services import work_pipeline, workspace_identity
 from claude_hub.services.task_dependencies import require_task_dependencies
@@ -26,7 +28,10 @@ class _TaskStartMixin(_WorkspaceManagerBase):
             selected = self.sessions.get(payload.target_session_id)
             if selected is None or selected.workspace_id != workspace.id:
                 raise KeyError(payload.target_session_id)
-            if selected.role != WorkspaceSessionRole.ORCHESTRATOR:
+            if selected.role not in {
+                WorkspaceSessionRole.ORCHESTRATOR,
+                WorkspaceSessionRole.WORKER,
+            }:
                 raise RuntimeError("Tasks can only be assigned to workspace agents")
             if selected.session_kind != task.session_kind:
                 raise ValueError("The selected agent does not match the Task execution surface")
@@ -99,6 +104,75 @@ class _TaskStartMixin(_WorkspaceManagerBase):
             created_ephemeral_session_id: str | None = None
             try:
                 if workspace.target == ExecutionTarget.LOCAL and task.auto_worktree:
+                    try:
+                        await work_pipeline._resolve_canonical_git_repo_root(workspace.path)
+                    except RuntimeError:
+                        # A failed Git probe is not evidence of a non-Git directory:
+                        # timeout, missing executable, permission and safe.directory
+                        # failures must not disable feature-worktree isolation.
+                        rc, _, error = await work_pipeline._run_bounded_subprocess(
+                            ["git", "rev-parse", "--git-common-dir"],
+                            cwd=workspace.path,
+                            env={**os.environ, "LC_ALL": "C"},
+                            timeout=10.0,
+                        )
+                        if rc != 128 or not error.startswith("fatal: not a git repository"):
+                            raise
+                        # Git also emits "not a git repository" when HEAD is
+                        # unreadable. Any existing metadata marker (including a
+                        # linked-worktree .git file) makes fallback unsafe. This
+                        # is a bounded ancestor check, not a directory scan.
+                        if any(
+                            os.environ.get(key)
+                            for key in ("GIT_DIR", "GIT_COMMON_DIR", "GIT_WORK_TREE")
+                        ):
+                            raise
+                        directory = Path(workspace.path).resolve(strict=True)
+                        for parent in (directory, *directory.parents):
+                            try:
+                                (parent / ".git").lstat()
+                            except FileNotFoundError:
+                                pass
+                            else:
+                                raise
+                            # Bare repositories have no .git entry.
+                            try:
+                                (parent / "HEAD").lstat()
+                                (parent / "objects").lstat()
+                            except FileNotFoundError:
+                                pass
+                            else:
+                                raise
+                        async with self.workspace_mutation_lock(workspace.id):
+                            # The Git probe yields; apply only this decision to the
+                            # current task so concurrent todo edits are preserved.
+                            task = self.tasks[task_id]
+                            if task.status in (
+                                WorkspaceTaskStatus.QUEUED,
+                                WorkspaceTaskStatus.WORKING,
+                            ):
+                                return task
+                            self._validate_start_admission_inputs(workspace, task, payload)
+                            logger.info(
+                                "Disabling auto_worktree for confirmed non-Git workspace task_id=%s path=%s",
+                                task.id,
+                                workspace.path,
+                            )
+                            task = task.model_copy(
+                                update={
+                                    "auto_worktree": False,
+                                    "updated_at": self._runtime_now(),
+                                }
+                            )
+                            self.tasks[task.id] = task
+                            self._save_workspace_state(workspace.id)
+                    task = self.tasks[task_id]
+                    if task.status in (WorkspaceTaskStatus.QUEUED, WorkspaceTaskStatus.WORKING):
+                        return task
+                    self._validate_start_admission_inputs(workspace, task, payload)
+                    if task.session_kind != selected_kind:
+                        continue
+                if workspace.target == ExecutionTarget.LOCAL and task.auto_worktree:
                     wt_path, wt_branch = await work_pipeline.provision_task_worktree(
                         workspace, task
                     )
@@ -128,7 +202,8 @@ class _TaskStartMixin(_WorkspaceManagerBase):
                             inherited_env = dict(candidate.env)
                             inherited_preset = candidate.env_preset
                             if (
-                                candidate.role == WorkspaceSessionRole.ORCHESTRATOR
+                                candidate.role
+                                in {WorkspaceSessionRole.ORCHESTRATOR, WorkspaceSessionRole.WORKER}
                                 and candidate.session_kind == task.session_kind
                                 and workspace_identity.resolve_path(
                                     candidate.workspace_path or workspace.path
@@ -141,7 +216,8 @@ class _TaskStartMixin(_WorkspaceManagerBase):
                         if (
                             candidate is not None
                             and candidate.workspace_id == workspace.id
-                            and candidate.role == WorkspaceSessionRole.ORCHESTRATOR
+                            and candidate.role
+                            in {WorkspaceSessionRole.ORCHESTRATOR, WorkspaceSessionRole.WORKER}
                             and candidate.session_kind == task.session_kind
                             and workspace_identity.resolve_path(
                                 candidate.workspace_path or workspace.path
@@ -333,7 +409,7 @@ class _TaskStartMixin(_WorkspaceManagerBase):
             target = self.sessions.get(payload.target_session_id)
             if not target or target.workspace_id != workspace.id:
                 raise KeyError(payload.target_session_id)
-            if target.role != WorkspaceSessionRole.ORCHESTRATOR:
+            if target.role not in {WorkspaceSessionRole.ORCHESTRATOR, WorkspaceSessionRole.WORKER}:
                 raise RuntimeError("Tasks can only be assigned to workspace agents")
             if target.session_kind != task.session_kind:
                 raise ValueError("The selected agent does not match the Task execution surface")
@@ -440,7 +516,7 @@ class _TaskStartMixin(_WorkspaceManagerBase):
     def _can_assign_or_queue_to(self, session: ManagedSession) -> bool:
         if (
             session.archived
-            or session.role != WorkspaceSessionRole.ORCHESTRATOR
+            or session.role not in {WorkspaceSessionRole.ORCHESTRATOR, WorkspaceSessionRole.WORKER}
             or session.chat_paused
         ):
             return False

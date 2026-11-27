@@ -68,6 +68,12 @@ class _DispatchQueueMixin(_WorkspaceManagerBase):
                     session.current_task_id,
                 )
                 continue
+            current_id = session.task_id or session.current_task_id
+            current = self.tasks.get(current_id) if current_id else None
+            if current and self._task_execution_finished(current):
+                self._release_task_session(current)
+                self._save_workspace_state(workspace_id)
+                session = self.sessions[session.id]
             rebalanced_task = self._next_reassignable_queued_task(session.id, workspace_id)
             if rebalanced_task:
                 logger.info(
@@ -93,7 +99,7 @@ class _DispatchQueueMixin(_WorkspaceManagerBase):
     def _can_dispatch_to(self, session: ManagedSession) -> bool:
         if (
             session.archived
-            or session.role != WorkspaceSessionRole.ORCHESTRATOR
+            or session.role not in {WorkspaceSessionRole.ORCHESTRATOR, WorkspaceSessionRole.WORKER}
             or session.chat_paused
         ):
             return False
@@ -104,13 +110,23 @@ class _DispatchQueueMixin(_WorkspaceManagerBase):
         if session.task_id or session.current_task_id:
             current_id = session.task_id or session.current_task_id
             current = self.tasks.get(current_id) if current_id else None
-            # Hold the implementation agent for as long as its task lives on
-            # the board. Only a DONE task (human-accepted) frees the agent,
-            # so a REVIEW-state task — even after review_passed — keeps its
-            # context locked for follow-up revisions or human rejection.
+            # Human acceptance owns the result, not an idle worker seat. Keep
+            # the seat only while implementation/review can still be running.
             if current and current.status != WorkspaceTaskStatus.DONE:
-                return False
+                if not self._task_execution_finished(current):
+                    return False
         return True
+
+    def _task_execution_finished(self, task: WorkspaceTask) -> bool:
+        return (
+            task.status == WorkspaceTaskStatus.REVIEW
+            and (
+                task.human_acceptance_requested_at is not None or task.review_skipped_at is not None
+            )
+            and not state_policy.review_in_flight(
+                task.review_requested_at, task.review_completed_at
+            )
+        )
 
     def _is_review_passed(self, task: WorkspaceTask) -> bool:
         if task.review_completed_at is None:
@@ -124,7 +140,7 @@ class _DispatchQueueMixin(_WorkspaceManagerBase):
         current = self.tasks.get(current_id)
         if not current or current.status != WorkspaceTaskStatus.REVIEW:
             return False
-        return True
+        return not self._task_execution_finished(current)
 
     def _next_queued_task(self, session_id: str) -> Optional[WorkspaceTask]:
         tasks = [

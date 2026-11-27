@@ -150,7 +150,7 @@ def test_recipe_schema_defaults_and_legacy_normalization(
     assert std_task.task_mode == WorkspaceTaskMode.REVIEWED
     assert std_task.session_kind == SessionKind.TERMINAL
 
-    # 2. SPEC_IMPLEMENT_REVIEW defaults auto_worktree=True, auto_push_remote=True
+    # 2. SPEC_IMPLEMENT_REVIEW isolates work but requires opt-in for remote push
     spec_task = manager.create_task(
         ws.id,
         WorkspaceTaskCreate(
@@ -162,7 +162,7 @@ def test_recipe_schema_defaults_and_legacy_normalization(
     )
     assert spec_task.recipe == WorkspaceTaskRecipe.SPEC_IMPLEMENT_REVIEW
     assert spec_task.auto_worktree is True
-    assert spec_task.auto_push_remote is True
+    assert spec_task.auto_push_remote is False
     assert spec_task.session_kind == SessionKind.CHAT
 
     # 3. TRIAGE_DIAGNOSE defaults task_mode=SUBAGENT and session_kind=CHAT
@@ -253,6 +253,7 @@ async def test_spec_implement_review_worktree_cross_review_and_remote_push(
         WorkspaceTaskCreate(
             title="Add pipeline helper",
             prompt="Create helper.py and commit on feature branch",
+            auto_push_remote=True,
             agent_type=AgentType.MASO,
             session_kind=SessionKind.CHAT,
             recipe=WorkspaceTaskRecipe.SPEC_IMPLEMENT_REVIEW,
@@ -283,7 +284,7 @@ async def test_spec_implement_review_worktree_cross_review_and_remote_push(
     # Verify assignment prompt has streamlined spec_implement_review instructions
     prompt_text = manager._build_task_assignment_prompt(ws, started, worker)
     assert "Pipeline recipe: spec_implement_review" in prompt_text
-    assert "Do NOT stop and wait for a separate Goal Packet approval round" in prompt_text
+    assert "no separate plan approval round" in prompt_text
     assert "Goal Packet; awaiting approval." not in prompt_text
 
     # Worker posts a working report with a Goal Packet: must NOT stop-and-wait in REVIEW!
@@ -820,7 +821,7 @@ async def test_fail_closed_auto_worktree_concurrent_start_and_rollback_compensat
 
     manager, deleted_tabs = _setup_fake_chat_runtime(monkeypatch, tmp_path)
 
-    # 1. Non-git workspace directory with auto_worktree=True MUST fail closed (never fall back to workspace.path)
+    # 1. Non-Git workspaces run in place without attempting Git worktree provisioning
     non_git_dir = tmp_path / "not_a_git_repo"
     non_git_dir.mkdir()
     ws_non_git = manager.create_workspace(
@@ -829,18 +830,21 @@ async def test_fail_closed_auto_worktree_concurrent_start_and_rollback_compensat
     task_non_git = manager.create_task(
         ws_non_git.id,
         WorkspaceTaskCreate(
-            title="Must fail closed",
-            prompt="Should not run in non-git primary path",
+            title="Non-Git work",
+            prompt="Run in the non-Git workspace",
             agent_type=AgentType.CLAUDE,
             session_kind=SessionKind.CHAT,
             recipe=WorkspaceTaskRecipe.SPEC_IMPLEMENT_REVIEW,
         ),
     )
-    with pytest.raises(RuntimeError, match="not a valid Git repository"):
-        await manager.start_task(task_non_git.id)
-    assert manager.tasks[task_non_git.id].status == WorkspaceTaskStatus.TODO
-    assert manager.tasks[task_non_git.id].session_id is None
-    assert len(manager.sessions) == 0
+    started_non_git = await manager.start_task(task_non_git.id)
+    assert started_non_git.status == WorkspaceTaskStatus.WORKING
+    assert started_non_git.auto_worktree is False
+    assert started_non_git.worktree_path is None
+    assert started_non_git.session_id is not None
+    await manager.update_task(task_non_git.id, WorkspaceTaskUpdate(status=WorkspaceTaskStatus.DONE))
+    await manager.delete_session(started_non_git.session_id)
+    deleted_tabs.clear()
 
     # 2. Failed start_task (bad related_task_id) must reject before leaking any ephemeral session
     repo, _ = _init_git_repo_with_bare_origin(tmp_path)

@@ -336,16 +336,13 @@ def completion_evidence_gaps(
     has_goal_packet: bool,
     has_acceptance_check: bool,
 ) -> list[str]:
-    """Return audit-evidence fields required before completion-style review routing."""
+    """Missing optional planning/evidence fields must not restart completed work.
 
-    if state not in COMPLETION_EVIDENCE_STATES:
-        return []
-    gaps: list[str] = []
-    if not has_goal_packet:
-        gaps.append("stored Goal Packet")
-    if not has_acceptance_check:
-        gaps.append("acceptance_check evidence")
-    return gaps
+    Independent review and human acceptance still assess the evidence provided.
+    An explicitly pending plan is handled by the Goal Packet review gate, not a
+    request to invent a new packet after the work is already finished.
+    """
+    return []
 
 
 def is_review_gate_state(state: AgentReportState) -> bool:

@@ -90,7 +90,9 @@ class _BootstrapPromptsMixin(_WorkspaceManagerBase):
         task_field = task_id if task_id is not None else "TASK_ID"
         call_id = self._report_prompt_call_id(task_field, purpose, attempt=attempt)
         return (
-            "Report endpoint (include a stable call_id; reuse the SAME call_id "
+            f"CLI: claude-hub session report {session.id} --task-id {task_field} "
+            f'--state {state} --message "Progress update" --call-id "{call_id}"\n'
+            "Fallback report endpoint (include a stable call_id; reuse the SAME call_id "
             "when resubmitting the same report after a failure or context "
             "reload so the Hub deduplicates it). Use a per-cycle call_id so "
             "repeated reports in the same state (e.g. multiple working updates "
@@ -100,8 +102,7 @@ class _BootstrapPromptsMixin(_WorkspaceManagerBase):
             "-H 'Content-Type: application/json' "
             f'-d \'{{"task_id":"{task_field}","state":"{state}",'
             f'"call_id":"{call_id}",'
-            '"message":"Progress update",'
-            '"message_en":"Progress update","message_zh":"进度更新"}\''
+            '"message":"Progress update"}\''
         )
 
     def _remote_target_label(self, session: ManagedSession) -> str:
@@ -153,8 +154,7 @@ class _BootstrapPromptsMixin(_WorkspaceManagerBase):
             "task, and check for uncommitted changes before editing. If another agent modified files "
             "you need, avoid overwriting; ask for review. When reviewer feedback comes back, continue "
             "from the feedback and re-report when done.\n\n"
-            "Reports include message_en (English) and message_zh (中文); `message` is a short English "
-            "fallback. Final reports include changed_files, validation, risks, acceptance_check, "
+            "Reports include a clear message. Final reports include changed_files, validation, risks, acceptance_check, "
             "review_decision (request/skip/auto with review_reason when applicable), and risk_level; "
             "every completed task waits for human acceptance before it is done.\n\n"
             "Every report MUST include a non-empty `call_id`. Use a stable, per-logical-report "
@@ -169,8 +169,7 @@ class _BootstrapPromptsMixin(_WorkspaceManagerBase):
             "-H 'Content-Type: application/json' "
             '-d \'{"task_id":"TASK_ID","state":"working",'
             '"call_id":"TASK_ID-working-progress-cycle-REVIEW_CYCLE-attempt-DURABLE_ATTEMPT",'
-            '"message":"Progress update",'
-            '"message_en":"Progress update","message_zh":"进度更新"}\''
+            '"message":"Progress update"}\''
         )
 
     def _build_dispatcher_bootstrap_prompt(
@@ -219,7 +218,7 @@ class _BootstrapPromptsMixin(_WorkspaceManagerBase):
             "review_failed, or review_needs_input.\n"
             "- Keep message SHORT (<=12 lines; Verdicts/Summary/Acceptance rollup/Required fixes/Notes); "
             "put evidence in structured fields (validation/risks/acceptance_check/profile_results/artifact_refs).\n"
-            "- Every report carries message_en (English) and message_zh (中文); legacy message is a short fallback.\n"
+            "- Every report carries a clear message.\n"
             "- Every report MUST include a non-empty `call_id` (e.g. `{task_id}-{state}-{n}` "
             "where n increments per review round). Reuse the SAME call_id when resubmitting "
             "the same report after a failure or context reload so the Hub deduplicates it.\n"
@@ -230,5 +229,5 @@ class _BootstrapPromptsMixin(_WorkspaceManagerBase):
             "-H 'Content-Type: application/json' "
             '-d \'{"task_id":"TASK_ID","state":"review_started",'
             '"call_id":"TASK_ID-review-started-cycle-REVIEW_CYCLE-attempt-DURABLE_ATTEMPT",'
-            '"message":"Started review","message_en":"Started review","message_zh":"开始评审"}\''
+            '"message":"Started review"}\''
         )

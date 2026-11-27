@@ -304,7 +304,6 @@ provideWorkspaceAgentManagerContext({
   openSwitchEnvModal: agents.openSwitchEnvModal,
   showAgentOptionsModal: agents.showAgentOptionsModal,
   closeAgentOptionsModal: agents.closeAgentOptionsModal,
-  agentManagerView: agents.agentManagerView,
   agentManagerSessions: agents.agentManagerSessions,
   agentManagerEmptyText: agents.agentManagerEmptyText,
   handleCreateAdvancedAgent: agents.handleCreateAdvancedAgent,

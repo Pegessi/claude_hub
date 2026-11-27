@@ -1,5 +1,6 @@
 """Task domain implementation split from the compatibility mixin."""
 
+from ....models import GoalPacket
 from ....models.task_mailbox import TaskEvent
 from ...task_dependencies import validate_task_dependencies
 from ...task_graph import (
@@ -44,7 +45,7 @@ class _TaskCoreMixin(_WorkspaceManagerBase):
             session = self.sessions.get(payload.session_id)
             if not session or session.workspace_id != workspace_id:
                 raise KeyError(payload.session_id)
-            if session.role != WorkspaceSessionRole.ORCHESTRATOR:
+            if session.role not in {WorkspaceSessionRole.ORCHESTRATOR, WorkspaceSessionRole.WORKER}:
                 raise ValueError("Tasks can only be assigned to workspace agents")
             if "session_kind" not in payload.model_fields_set:
                 session_kind = session.session_kind
@@ -76,9 +77,7 @@ class _TaskCoreMixin(_WorkspaceManagerBase):
         recipe = payload.recipe
         if recipe == WorkspaceTaskRecipe.SPEC_IMPLEMENT_REVIEW:
             auto_worktree = True if payload.auto_worktree is None else bool(payload.auto_worktree)
-            auto_push_remote = (
-                True if payload.auto_push_remote is None else bool(payload.auto_push_remote)
-            )
+            auto_push_remote = payload.auto_push_remote is True
         else:
             auto_worktree = (
                 bool(payload.auto_worktree) if payload.auto_worktree is not None else False
@@ -91,6 +90,19 @@ class _TaskCoreMixin(_WorkspaceManagerBase):
             if isinstance(payload.infowall_demand_id, str) and payload.infowall_demand_id.strip()
             else None
         )
+        goal = (payload.goal or "").strip() or None
+        done_when = [item.strip() for item in payload.done_when if item.strip()]
+        out_of_scope = [item.strip() for item in payload.out_of_scope if item.strip()]
+        goal_packet = payload.goal_packet
+        if "goal_packet" not in payload.model_fields_set and (goal or done_when):
+            goal_packet = GoalPacket(
+                status=GoalPacketStatus.APPROVED,
+                objective=goal or title,
+                acceptance_criteria=done_when,
+                out_of_scope=out_of_scope,
+                created_at=now,
+                updated_at=now,
+            )
         task = WorkspaceTask(
             execution_control=payload.execution_control,
             source=payload.source,
@@ -104,7 +116,10 @@ class _TaskCoreMixin(_WorkspaceManagerBase):
             title=title,
             prompt=prompt,
             attachments=attachments,
-            goal_packet=payload.goal_packet,
+            goal=goal,
+            done_when=done_when,
+            out_of_scope=out_of_scope,
+            goal_packet=goal_packet,
             review_profiles=payload.review_profiles,
             agent_type=payload.agent_type,
             session_kind=session_kind,

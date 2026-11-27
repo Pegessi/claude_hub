@@ -218,14 +218,6 @@ class _ReportEventsMixin(_InternalReportHandlingMixin):
             }:
                 self._mark_task_review_skipped(task, report)
             return
-        evidence_gaps = self._completion_evidence_gaps(task, report)
-        if (
-            task.recipe != WorkspaceTaskRecipe.SPEC_IMPLEMENT_REVIEW
-            and report.review_decision == ReviewDecision.SKIP
-            and evidence_gaps
-        ):
-            await self._request_goal_packet_supplement(task, session, report, evidence_gaps)
-            return
         if task.task_mode == WorkspaceTaskMode.AUTONOMOUS:
             await self._request_task_review(task, report)
             return

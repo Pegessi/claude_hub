@@ -167,6 +167,35 @@
               </div>
             </div>
           </div>
+          <div class="modal-field">
+            <label for="task-create-goal">Goal (optional)</label>
+            <input
+              id="task-create-goal"
+              v-model="form.goal"
+              placeholder="The outcome this task should achieve"
+              :disabled="!targetAvailable"
+            >
+          </div>
+          <div class="modal-field">
+            <label for="task-create-done_when">Done when (optional)</label>
+            <textarea
+              id="task-create-done_when"
+              v-model="form.done_when"
+              placeholder="One acceptance criterion per line"
+              :disabled="!targetAvailable"
+              rows="3"
+            />
+          </div>
+          <div class="modal-field">
+            <label for="task-create-out_of_scope">Out of scope (optional)</label>
+            <textarea
+              id="task-create-out_of_scope"
+              v-model="form.out_of_scope"
+              placeholder="One exclusion per line"
+              :disabled="!targetAvailable"
+              rows="3"
+            />
+          </div>
           <p
             v-if="form.execution_control === 'initiator'"
             class="modal-hint"

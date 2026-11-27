@@ -74,6 +74,9 @@ def _make_task(
 def test_complexity_matches_cost_and_ownership_contract(complexity):
     task = _make_task(mode=WorkspaceTaskMode.AUTONOMOUS, complexity=complexity)
     block = workspace_manager._execution_complexity_assignment_block(task)
+    if complexity != WorkspaceTaskExecutionComplexity.COMPLEX:
+        assert block == ""
+        return
     assert "no minimum agent count" in block
     assert "one writer per owned scope" in block
     assert "isolated worktrees/resources" in block
@@ -575,8 +578,9 @@ def test_generated_task_lifecycle_preserves_strategy_and_independent_gate(
     assert "reuse its call_id only for the same report" in resumed
     assert "do not turn ready_for_review into completed" in cold_recovery
     if complexity == WorkspaceTaskExecutionComplexity.SIMPLE:
-        assert "implement and run mechanical checks directly" in assignment
-        assert "sub-agent is optional" in assignment
+        assert "Start implementation directly" in assignment
+        assert "subtask-envelope" not in assignment
+        assert "subagent-ledger" not in assignment
 
 
 def test_subagent_completion_example_preserves_lightweight_evidence_handoff(tmp_path):

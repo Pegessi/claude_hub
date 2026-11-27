@@ -75,9 +75,9 @@ def test_workspace_assignment_keeps_managed_report_channel(
     assert "already assigned workspace-controlled Task" in context
     assert "managed report endpoint" in context
     assert "do not switch to initiator progress" in context
-    assert "Complete small bounded work directly" in block
-    assert "no minimum agent count" in block
-    assert block.count(EXECUTION_POLICY) == 1
+    # Long orchestration policy belongs only to complex autonomous work;
+    # ordinary reviewed assignments retain the managed report channel above.
+    assert block == ""
 
 
 def test_optional_tracker_preserves_owner_and_reporting_authority() -> None:

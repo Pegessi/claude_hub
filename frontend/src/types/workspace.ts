@@ -244,6 +244,9 @@ export interface AutonomousRun {
 }
 
 export interface WorkspaceTask {
+  goal?: string | null
+  done_when?: string[]
+  out_of_scope?: string[]
   id: string
   workspace_id: string
   title: string
@@ -303,6 +306,9 @@ export interface WorkspaceTask {
 }
 
 export interface WorkspaceTaskCreate {
+  goal?: string | null
+  done_when?: string[]
+  out_of_scope?: string[]
   execution_control?: WorkspaceTaskExecutionControl
   session_kind?: SessionKind
   reporter_key?: string
@@ -326,6 +332,9 @@ export interface WorkspaceTaskCreate {
 }
 
 export interface WorkspaceTaskUpdate {
+  goal?: string | null
+  done_when?: string[]
+  out_of_scope?: string[]
   title?: string
   session_kind?: SessionKind
   prompt?: string

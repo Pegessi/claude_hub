@@ -173,20 +173,12 @@ async def workflow(monkeypatch, tmp_path):
     assert tabs.processes[worker.tab_id].is_managed_chat
     assert tabs.processes[worker.tab_id].process is None
     await manager._refresh_session_statuses(workspace.id)
-    if worker.id in native.active:
-        bootstrap_id = native.last_call(worker.id)
-        await manager.create_report(
-            worker.id,
-            AgentReportCreate(
-                state=AgentReportState.WORKING,
-                message="Bootstrap instructions received.",
-                call_id="bootstrap-ack",
-                acked_call_ids=[bootstrap_id],
-            ),
-        )
-        native.finish(worker.id)
-        await manager._refresh_session_statuses(workspace.id)
-        native.calls.clear()  # Task assertions below start after the completed bootstrap.
+    # A normal worker's first provider turn is the actual assignment, never
+    # an empty bootstrap/ACK cycle. Leave these assertions in the shared
+    # workflow fixture so every lifecycle test guards that cold-start boundary.
+    assert native.calls == []
+    assert native.active == {}
+    assert manager.sessions[worker.id].runtime_status == AgentRuntimeStatus.IDLE
     yield Workflow(manager, native, workspace.id, worker.id, forbidden)
     forbidden.assert_not_awaited()
 
@@ -479,17 +471,9 @@ async def test_chat_review_reuses_independently_configured_chat_provider(workflo
         ),
     )
     await manager._refresh_session_statuses(workflow.workspace_id)
-    if existing.id in native.active:
-        await _report(
-            workflow,
-            existing.id,
-            None,
-            AgentReportState.WORKING,
-            "reviewer-bootstrap-ack",
-            ack=[native.last_call(existing.id)],
-        )
-        native.finish(existing.id)
-        await manager._refresh_session_statuses(workflow.workspace_id)
+    assert native.calls == []
+    assert existing.id not in native.active
+    assert manager.sessions[existing.id].runtime_status == AgentRuntimeStatus.IDLE
     independent_env = dict(manager.sessions[existing.id].env)
     task_id = await _start_task(workflow)
     dispatch_id = native.last_call(workflow.worker_id)
@@ -510,7 +494,10 @@ async def test_chat_review_reuses_independently_configured_chat_provider(workflo
     assert reviewer.env == independent_env
     assert reviewer.env["CODEX_MODEL"] == "independent-review-model"
     assert manager.sessions[workflow.worker_id].agent_type == AgentType.CLAUDE
-    assert native.last_call(existing.id)
+    reviewer_calls = [call for call in native.calls if call[0] == existing.id]
+    assert len(reviewer_calls) == 1
+    assert "Review workspace task" in reviewer_calls[0][1]
+    assert native.last_call(existing.id) == reviewer_calls[0][2]
 
 
 async def test_terminal_review_does_not_reuse_only_chat_reviewer(workflow, monkeypatch):
