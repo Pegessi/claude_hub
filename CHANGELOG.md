@@ -7,6 +7,11 @@
 
 ## Released
 
+### fix(ops): bound ZeroTier guard probes and refresh owned route IFA
+
+- Check the current DHCP address against owned split-route IFA, keep VPN/remote-entry safety gates, and bound network probes with descendant cleanup.
+- Prevent observe-mode DNS writes and ignore registered adapters absent from the current interface inventory; add isolated full-script regressions.
+
 ### fix(cursor): retain recovery progress and refresh failed runtimes
 
 - Surface real ACP reconnect progress and original terminal error diagnostics,

@@ -1,0 +1,740 @@
+#!/bin/bash
+
+set -u
+
+PATH=/usr/bin:/bin:/usr/sbin:/sbin
+export PATH
+
+# macOS has no system timeout(1). A private process group is killed with
+# SIGKILL at the deadline, including descendants holding a capture pipe open.
+bounded() {
+  local rc limit=4
+  [ "$1" = /usr/bin/curl ] && limit=10
+  /usr/bin/perl -MPOSIX=setsid -e '
+    my $limit = shift; my $pid = fork(); defined($pid) or exit 125;
+    if (!$pid) { setsid() >= 0 or exit 125; exec @ARGV; exit 125; }
+    sub stop_child { kill 9, -$pid; kill 9, $pid; waitpid($pid, 0); }
+    $SIG{ALRM} = sub { stop_child(); exit 124; };
+    $SIG{TERM} = $SIG{INT} = $SIG{HUP} = sub { stop_child(); exit 125; };
+    alarm $limit; waitpid($pid, 0); my $status = $?; alarm 0;
+    # Also reap descendants after the direct child exits.
+    kill 9, -$pid;
+    exit(($status & 127) ? 128 + ($status & 127) : $status >> 8);
+  ' "$limit" "$@"
+  rc=$?
+  if [ "$rc" -ge 124 ]; then
+    : >"$LOCK_DIR/probe_failed"
+  fi
+  return "$rc"
+}
+
+probe() {
+  bounded "$@"
+  local rc=$?
+  [ "$rc" -eq 0 ] || : >"$LOCK_DIR/probe_failed"
+  return "$rc"
+}
+
+check_probes() {
+  [ ! -e "$LOCK_DIR/probe_failed" ] || finish probe_failed
+}
+
+CONFIG_FILE=/etc/zerotier-route-guard.conf
+STATE_DIR=/var/db/zerotier-route-guard
+STATE_FILE="$STATE_DIR/state"
+LOCK_DIR=/var/run/zerotier-route-guard.lock
+TAG=com.bytedance.zerotier-route-guard
+
+MODE=observe
+TARGET_SERVICE_ID=a581878f7dfdb5ca
+TARGET_INTERFACE=feth1924
+TARGET_ROUTE_PROBE=10.170.51.1
+LOW_SENTINEL=1.1.1.1
+HIGH_SENTINEL=223.5.5.5
+COOLDOWN_SECONDS=30
+ALLOW_ADOPT_PHYSICAL_SPLIT_ROUTES=1
+IPV6_REPAIR_INTERFACE=
+IPV6_REPAIR_GATEWAY=
+IPV6_REPAIR_IPV4_GATEWAY=
+
+if [ -r "$CONFIG_FILE" ]; then
+  # The config is installed root:wheel and is not writable by normal users.
+  # shellcheck disable=SC1091
+  . "$CONFIG_FILE"
+fi
+
+if [ "${ZT_GUARD_MODE_OVERRIDE:-}" = "observe" ] || [ "${ZT_GUARD_MODE_OVERRIDE:-}" = "repair" ]; then
+  MODE=$ZT_GUARD_MODE_OVERRIDE
+fi
+
+log_notice() {
+  bounded /usr/bin/logger -p daemon.notice -t "$TAG" -- "$*"
+}
+
+log_error() {
+  bounded /usr/bin/logger -p daemon.err -t "$TAG" -- "$*"
+}
+
+acquire_lock() {
+  if /bin/mkdir "$LOCK_DIR" 2>/dev/null; then
+    echo "$$" >"$LOCK_DIR/pid"
+    return 0
+  fi
+
+  old_pid=$(/bin/cat "$LOCK_DIR/pid" 2>/dev/null || true)
+  case "$old_pid" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  if /bin/kill -0 "$old_pid" 2>/dev/null; then
+    return 1
+  fi
+
+  /bin/rm -f "$LOCK_DIR/pid" "$LOCK_DIR/probe_failed"
+  /bin/rmdir "$LOCK_DIR" 2>/dev/null || return 1
+  /bin/mkdir "$LOCK_DIR" 2>/dev/null || return 1
+  echo "$$" >"$LOCK_DIR/pid"
+}
+
+release_lock() {
+  /bin/rm -f "$LOCK_DIR/pid" "$LOCK_DIR/probe_failed"
+  /bin/rmdir "$LOCK_DIR" 2>/dev/null || true
+}
+
+acquire_lock || exit 0
+trap release_lock EXIT
+trap 'exit 1' HUP INT TERM
+
+/bin/mkdir -p "$STATE_DIR"
+/usr/sbin/chown root:wheel "$STATE_DIR"
+/bin/chmod 0755 "$STATE_DIR"
+
+state_get() {
+  key=$1
+  if [ -r "$STATE_FILE" ]; then
+    /usr/bin/awk -F= -v wanted="$key" '$1 == wanted {sub(/^[^=]*=/, ""); print; exit}' "$STATE_FILE"
+  fi
+}
+
+as_uint() {
+  case "$1" in
+    ''|*[!0-9]*) echo 0 ;;
+    *) echo "$1" ;;
+  esac
+}
+
+PREV_SIGNATURE=$(state_get signature)
+PREV_ZT_BAD=$(state_get zt_bad)
+BAD_STATE_COUNT=$(as_uint "$(state_get bad_state_count)")
+REPAIR_COUNT=$(as_uint "$(state_get repair_count)")
+LAST_ACTION_EPOCH=$(as_uint "$(state_get last_action_epoch)")
+OWNED_ROUTES=$(as_uint "$(state_get owned_routes)")
+OWNED_INTERFACE=$(state_get owned_interface)
+OWNED_GATEWAY=$(state_get owned_gateway)
+LAST_REPAIR_AT=$(state_get last_repair_at)
+LAST_REPAIR_TARGET=$(state_get last_repair_target)
+LAST_CONNECTIVITY=$(state_get last_connectivity)
+LAST_IPV6_CONNECTIVITY=$(state_get last_ipv6_connectivity)
+[ -n "$LAST_REPAIR_AT" ] || LAST_REPAIR_AT=never
+[ -n "$LAST_REPAIR_TARGET" ] || LAST_REPAIR_TARGET=none
+[ -n "$LAST_CONNECTIVITY" ] || LAST_CONNECTIVITY=not_recorded
+[ -n "$LAST_IPV6_CONNECTIVITY" ] || LAST_IPV6_CONNECTIVITY=not_recorded
+LAST_DNS_REPAIR_AT=$(state_get last_dns_repair_at)
+[ -n "$LAST_DNS_REPAIR_AT" ] || LAST_DNS_REPAIR_AT=never
+DNS_REPAIR_COUNT=$(as_uint "$(state_get dns_repair_count)")
+IPV6_REPAIR_COUNT=$(as_uint "$(state_get ipv6_repair_count)")
+LAST_IPV6_REPAIR_AT=$(state_get last_ipv6_repair_at)
+[ -n "$LAST_IPV6_REPAIR_AT" ] || LAST_IPV6_REPAIR_AT=never
+LAST_ACCEPT_DIRECT=$(state_get last_accept_direct)
+LAST_ACCEPT_PROXY=$(state_get last_accept_proxy)
+[ -n "$LAST_ACCEPT_DIRECT" ] || LAST_ACCEPT_DIRECT=not_recorded
+[ -n "$LAST_ACCEPT_PROXY" ] || LAST_ACCEPT_PROXY=not_recorded
+
+NOW_EPOCH=$(/bin/date +%s)
+NOW_ISO=$(/bin/date -u +%Y-%m-%dT%H:%M:%SZ)
+DECISION=starting
+ZT_BAD=0
+ZT_STATE_INTERFACE=unknown
+ZT_STATE_ROUTER=unknown
+ZT_STATE_SERVER=unknown
+ZT_ROUTE_INTERFACE=unknown
+PHYSICAL_INTERFACE=unknown
+PHYSICAL_GATEWAY=unknown
+PHYSICAL_ADDRESS=unknown
+PHYSICAL_REASON=not_checked
+LOW_GATEWAY=unknown
+LOW_INTERFACE=unknown
+HIGH_GATEWAY=unknown
+HIGH_INTERFACE=unknown
+IPV6_DEFAULT_INTERFACE=none
+VPN_CONFLICT=none
+CONNECTIVITY=not_checked
+IPV6_CONNECTIVITY=not_checked
+REPAIRED=none
+DNS_STATUS=not_checked
+IPV6_REPAIR_STATUS=disabled
+
+# Optional fallback for this LAN's missing RA default. Never replace an
+# existing IPv6 default (including VPN routes), restart a service, or reset
+# an interface. Require the configured physical LAN and a known NDP router.
+ensure_physical_ipv6_default() {
+  local output interface neighbor address
+  [ -n "$IPV6_REPAIR_INTERFACE" ] && [ -n "$IPV6_REPAIR_GATEWAY" ] && [ -n "$IPV6_REPAIR_IPV4_GATEWAY" ] || return 0
+  case "$IPV6_REPAIR_INTERFACE" in en[0-9]*) ;; *) IPV6_REPAIR_STATUS=invalid_interface; return 0 ;; esac
+  case "$IPV6_REPAIR_GATEWAY" in fe80::[0-9a-fA-F:]*) ;; *) IPV6_REPAIR_STATUS=invalid_gateway; return 0 ;; esac
+  output=$(bounded /sbin/route -n get -inet6 default 2>/dev/null || true)
+  interface=$(printf '%s\n' "$output" | /usr/bin/awk '/interface:/ {print $2; exit}')
+  if [ -n "$interface" ]; then
+    IPV6_DEFAULT_INTERFACE=$interface
+    IPV6_REPAIR_STATUS=default_present
+    return 0
+  fi
+  if [ "$(probe /usr/sbin/ipconfig getoption "$IPV6_REPAIR_INTERFACE" router 2>/dev/null)" != "$IPV6_REPAIR_IPV4_GATEWAY" ]; then
+    IPV6_REPAIR_STATUS=other_lan
+    return 0
+  fi
+  output=$(probe /sbin/ifconfig "$IPV6_REPAIR_INTERFACE" 2>/dev/null)
+  address=$(printf '%s\n' "$output" | /usr/bin/awk '$1 == "inet6" && $2 ~ /^[23]/ && $0 !~ /(tentative|duplicated|deprecated)/ {print $2; exit}')
+  if [ -z "$address" ] || ! printf '%s\n' "$output" | /usr/bin/grep -q 'status: active'; then
+    IPV6_REPAIR_STATUS=no_active_global_address
+    return 0
+  fi
+  neighbor="$IPV6_REPAIR_GATEWAY%$IPV6_REPAIR_INTERFACE"
+  if ! probe /usr/sbin/ndp -an 2>/dev/null | /usr/bin/awk -v gateway="$neighbor" -v iface="$IPV6_REPAIR_INTERFACE" '$1 == gateway && $2 ~ /:/ && $3 == iface && $NF ~ /R/ {found=1} END {exit !found}'; then
+    IPV6_REPAIR_STATUS=no_known_router
+    return 0
+  fi
+  if [ "$MODE" != repair ]; then
+    IPV6_REPAIR_STATUS=would_restore
+    return 0
+  fi
+  # add is intentional: a concurrently installed default must not be changed.
+  check_probes
+  if ! bounded /sbin/route -n add -inet6 default "$neighbor" >/dev/null 2>&1; then
+    IPV6_REPAIR_STATUS=add_failed
+    return 0
+  fi
+  output=$(bounded /sbin/route -n get -inet6 default 2>/dev/null || true)
+  interface=$(printf '%s\n' "$output" | /usr/bin/awk '/interface:/ {print $2; exit}')
+  if [ "$interface" != "$IPV6_REPAIR_INTERFACE" ]; then
+    IPV6_REPAIR_STATUS=validation_failed
+    log_error "IPv6 default validation failed interface=$interface"
+    return 0
+  fi
+  IPV6_DEFAULT_INTERFACE=$interface
+  IPV6_REPAIR_STATUS=restored
+  IPV6_REPAIR_COUNT=$((IPV6_REPAIR_COUNT + 1))
+  LAST_IPV6_REPAIR_AT=$NOW_ISO
+  log_notice "restored missing IPv6 default via $neighbor"
+}
+
+route_details() {
+  destination=$1
+  output=$(probe /sbin/route -n get "$destination" 2>/dev/null || true)
+  gateway=$(printf '%s\n' "$output" | /usr/bin/awk '/gateway:/ {print $2; exit}')
+  interface=$(printf '%s\n' "$output" | /usr/bin/awk '/interface:/ {print $2; exit}')
+  printf '%s|%s\n' "$gateway" "$interface"
+}
+
+split_details() {
+  destination=$1
+  probe /usr/sbin/netstat -rn -f inet | /usr/bin/awk -v wanted="$destination" '$1 == wanted {value=$2 "|" $NF; n++} END {if (n > 1) exit 1; if (n) print value}' || { : >"$LOCK_DIR/probe_failed"; return 1; }
+}
+
+# Exact /1 lookup avoids cloned sentinel host routes. Missing/unknown IFA is
+# not permission to replace a route; its existing ownership must also match.
+split_ifa() {
+  local output
+  output=$(probe /sbin/route -n -v get -net "$1" 2>/dev/null) || return 1
+  printf '%s\n' "$output" | /usr/bin/awk '
+    /^sockaddrs:.*IFA>/ { getline; print $NF; found=1 }
+    END { if (!found) exit 1 }
+  ' || { : >"$LOCK_DIR/probe_failed"; return 1; }
+}
+
+owns_split() {
+  [ "$OWNED_ROUTES" = 1 ] && [ "$1" = "$OWNED_GATEWAY|$OWNED_INTERFACE" ]
+}
+
+check_split_sources() {
+  local low_exact high_exact
+  low_exact=$(split_details 0/1)
+  high_exact=$(split_details 128.0/1)
+  LOW_IFA=missing
+  HIGH_IFA=missing
+  low_stale=0
+  high_stale=0
+  [ -z "$low_exact" ] || LOW_IFA=$(split_ifa 0.0.0.0/1)
+  [ -z "$high_exact" ] || HIGH_IFA=$(split_ifa 128.0.0.0/1)
+  check_probes
+  if [ "$low_good" = 1 ] && [ "$low_exact" = "$PHYSICAL_GATEWAY|$PHYSICAL_INTERFACE" ] && [ "$LOW_IFA" != "$PHYSICAL_ADDRESS" ]; then
+    owns_split "$low_exact" || finish observe_unowned_stale_ifa
+    low_good=0; low_bad=1; low_stale=1
+  fi
+  if [ "$high_good" = 1 ] && [ "$high_exact" = "$PHYSICAL_GATEWAY|$PHYSICAL_INTERFACE" ] && [ "$HIGH_IFA" != "$PHYSICAL_ADDRESS" ]; then
+    owns_split "$high_exact" || finish observe_unowned_stale_ifa
+    high_good=0; high_bad=1; high_stale=1
+  fi
+}
+
+parse_details() {
+  parsed=$1
+  PARSED_GATEWAY=${parsed%%|*}
+  PARSED_INTERFACE=${parsed#*|}
+  [ "$PARSED_GATEWAY" = "$parsed" ] && PARSED_INTERFACE=
+}
+
+is_bad_route() {
+  gateway=$1
+  interface=$2
+  case "$gateway" in
+    ''|127.*) return 0 ;;
+  esac
+  [ -z "$interface" ] && return 0
+  [ "$interface" = "lo0" ] && return 0
+  [ "$interface" = "$TARGET_INTERFACE" ] && return 0
+  return 1
+}
+
+is_physical_route() {
+  gateway=$1
+  interface=$2
+  [ "$gateway" = "$PHYSICAL_GATEWAY" ] && [ "$interface" = "$PHYSICAL_INTERFACE" ]
+}
+
+# True when the primary (unscoped) resolver publishes a nameserver.
+# Ignores the "for scoped queries" section: a lone scoped resolver leaves
+# browsers with no usable default DNS (ZeroTier 127.0.0.1 bad-state).
+dns_primary_has_nameserver() {
+  probe /usr/sbin/scutil --dns 2>/dev/null | /usr/bin/awk '
+    /^DNS configuration \(for scoped queries\)/ { exit }
+    /nameserver\[/ { found = 1 }
+    END { exit !found }
+  '
+}
+
+zt_bad_keys_present() {
+  state=$(printf 'show State:/Network/Service/%s/IPv4\n' "$TARGET_SERVICE_ID" | probe /usr/sbin/scutil 2>/dev/null)
+  printf '%s\n' "$state" | /usr/bin/awk '/Router : 127\.0\.0\.1/ { ok = 1 } END { exit !ok }'
+}
+
+# Surgically remove the loopback Router/ServerAddress keys that the ZeroTier
+# tap agent republishes. Zero link impact: no ifconfig/DHCP/mDNSResponder ops,
+# ZeroTier is not stopped, and the feth address + 10.170.51.0/24 route remain.
+dns_strip_bad_keys() {
+  probe /usr/sbin/scutil >/dev/null 2>&1 <<EOF
+get State:/Network/Service/$TARGET_SERVICE_ID/IPv4
+d.remove Router
+d.remove ServerAddress
+set State:/Network/Service/$TARGET_SERVICE_ID/IPv4
+quit
+EOF
+}
+
+# Only called after route protection is satisfied; never blocks route repair.
+# The tap agent answers a strip with one immediate republish, so allow one
+# bounded re-strip. Returns 0 when the primary resolver has a nameserver.
+ensure_dns() {
+  if dns_primary_has_nameserver; then
+    DNS_STATUS=ok
+    return 0
+  fi
+  if ! zt_bad_keys_present; then
+    DNS_STATUS=broken_no_bad_keys
+    return 1
+  fi
+
+  check_probes
+  if [ "$MODE" != repair ]; then
+    DNS_STATUS=would_strip
+    return 1
+  fi
+  dns_strip_bad_keys
+  check_probes
+  sleep 3
+  if ! dns_primary_has_nameserver && zt_bad_keys_present; then
+    check_probes
+    dns_strip_bad_keys
+    check_probes
+    sleep 2
+  fi
+
+  if dns_primary_has_nameserver; then
+    DNS_STATUS=repaired_stripped
+    DNS_REPAIR_COUNT=$((DNS_REPAIR_COUNT + 1))
+    LAST_DNS_REPAIR_AT=$NOW_ISO
+    return 0
+  fi
+  DNS_STATUS=strip_failed
+  return 1
+}
+
+# Real acceptance: system resolution, true direct traffic, and the SSH-session
+# proxy separately, so a working proxy never masks a system DNS failure.
+record_dns_acceptance() {
+  if probe /usr/bin/dscacheutil -q host -a name www.baidu.com 2>/dev/null | /usr/bin/grep -q '^ip_address:'; then
+    CONNECTIVITY="system_dns_ok_${DNS_STATUS}"
+  else
+    CONNECTIVITY="system_dns_fail_${DNS_STATUS}"
+  fi
+  code=$(bounded /usr/bin/curl --noproxy '*' -4 -sS -o /dev/null -w '%{http_code}' --connect-timeout 3 --max-time 8 https://www.baidu.com 2>/dev/null || true)
+  check_probes
+  LAST_ACCEPT_DIRECT=$code
+  pcode=$(bounded /usr/bin/curl -x http://127.0.0.1:7890 -sS -o /dev/null -w '%{http_code}' --connect-timeout 2 --max-time 6 https://www.gstatic.com/generate_204 2>/dev/null || true)
+  check_probes
+  LAST_ACCEPT_PROXY=$pcode
+  CONNECTIVITY="${CONNECTIVITY}|direct=${code}|mihomo7890=${pcode}"
+  LAST_CONNECTIVITY=$CONNECTIVITY
+}
+
+discover_physical_route() {
+  candidates=0
+  candidate_interface=
+  candidate_gateway=
+  candidate_address=
+  seen=' '
+
+  # Network service order retains unplugged adapters. Query only interfaces
+  # in the current inventory; inventory/query failure still closes the gate.
+  available=" $(probe /sbin/ifconfig -l 2>/dev/null) "
+  check_probes
+  devices=$(probe /usr/sbin/networksetup -listnetworkserviceorder 2>/dev/null | /usr/bin/sed -n 's/.*Device: \(en[0-9][0-9]*\)).*/\1/p')
+  for device in $devices; do
+    case "$available" in *" $device "*) ;; *) continue ;; esac
+    case "$seen" in
+      *" $device "*) continue ;;
+    esac
+    seen="$seen$device "
+
+    status=$(probe /sbin/ifconfig "$device" 2>/dev/null | /usr/bin/sed -n 's/^[[:space:]]*status: //p' | /usr/bin/head -1)
+    [ "$status" = "active" ] || continue
+    address=$(probe /usr/sbin/ipconfig getifaddr "$device" 2>/dev/null || true)
+    gateway=$(probe /usr/sbin/ipconfig getoption "$device" router 2>/dev/null || true)
+    case "$address" in
+      [0-9]*.[0-9]*.[0-9]*.[0-9]*) ;;
+      *) continue ;;
+    esac
+    case "$gateway" in
+      ''|0.*|127.*) continue ;;
+    esac
+
+    scoped=$(probe /sbin/route -n get -ifscope "$device" default 2>/dev/null || true)
+    scoped_gateway=$(printf '%s\n' "$scoped" | /usr/bin/awk '/gateway:/ {print $2; exit}')
+    scoped_interface=$(printf '%s\n' "$scoped" | /usr/bin/awk '/interface:/ {print $2; exit}')
+    [ "$scoped_gateway" = "$gateway" ] || continue
+    [ "$scoped_interface" = "$device" ] || continue
+
+    candidates=$((candidates + 1))
+    candidate_interface=$device
+    candidate_gateway=$gateway
+    candidate_address=$address
+  done
+
+  if [ "$candidates" -ne 1 ]; then
+    PHYSICAL_REASON="candidate_count_$candidates"
+    return 1
+  fi
+
+  PHYSICAL_INTERFACE=$candidate_interface
+  PHYSICAL_GATEWAY=$candidate_gateway
+  PHYSICAL_ADDRESS=$candidate_address
+  PHYSICAL_REASON=validated_scoped_default
+  return 0
+}
+
+find_vpn_conflict() {
+  conflict=$(probe /usr/sbin/netstat -rn -f inet | /usr/bin/awk \
+    -v physical="$PHYSICAL_INTERFACE" -v zt="$TARGET_INTERFACE" '
+      $1 == "default" || $1 == "0/1" || $1 == "128.0/1" {
+        iface=$NF
+        if (iface ~ /^(utun|tun|ppp|ipsec)/) {
+          print $1 ":" $2 ":" iface
+          exit
+        }
+        if (($1 == "0/1" || $1 == "128.0/1") && iface != physical && iface != zt && iface != "lo0") {
+          print $1 ":" $2 ":" iface
+          exit
+        }
+      }')
+  if [ -n "$conflict" ]; then
+    VPN_CONFLICT=$conflict
+    return 0
+  fi
+  VPN_CONFLICT=none
+  return 1
+}
+
+write_state() {
+  signature="$DECISION|$ZT_BAD|$PHYSICAL_INTERFACE|$PHYSICAL_GATEWAY|$LOW_GATEWAY|$LOW_INTERFACE|$HIGH_GATEWAY|$HIGH_INTERFACE|$VPN_CONFLICT"
+  tmp="$STATE_FILE.tmp.$$"
+  umask 022
+  {
+    echo "version=1"
+    echo "checked_at=$NOW_ISO"
+    echo "mode=$MODE"
+    echo "decision=$DECISION"
+    echo "signature=$signature"
+    echo "zt_bad=$ZT_BAD"
+    echo "zt_state_interface=$ZT_STATE_INTERFACE"
+    echo "zt_state_router=$ZT_STATE_ROUTER"
+    echo "zt_state_server=$ZT_STATE_SERVER"
+    echo "zt_route_interface=$ZT_ROUTE_INTERFACE"
+    echo "physical_interface=$PHYSICAL_INTERFACE"
+    echo "physical_gateway=$PHYSICAL_GATEWAY"
+    echo "physical_address=$PHYSICAL_ADDRESS"
+    echo "physical_reason=$PHYSICAL_REASON"
+    echo "low_gateway=$LOW_GATEWAY"
+    echo "low_interface=$LOW_INTERFACE"
+    echo "low_ifa=${LOW_IFA:-not_checked}"
+    echo "high_ifa=${HIGH_IFA:-not_checked}"
+    echo "high_gateway=$HIGH_GATEWAY"
+    echo "high_interface=$HIGH_INTERFACE"
+    echo "ipv6_default_interface=$IPV6_DEFAULT_INTERFACE"
+    echo "ipv6_repair_status=$IPV6_REPAIR_STATUS"
+    echo "ipv6_repair_count=$IPV6_REPAIR_COUNT"
+    echo "last_ipv6_repair_at=$LAST_IPV6_REPAIR_AT"
+    echo "vpn_conflict=$VPN_CONFLICT"
+    echo "connectivity=$CONNECTIVITY"
+    echo "ipv6_connectivity=$IPV6_CONNECTIVITY"
+    echo "repaired=$REPAIRED"
+    echo "bad_state_count=$BAD_STATE_COUNT"
+    echo "repair_count=$REPAIR_COUNT"
+    echo "last_action_epoch=$LAST_ACTION_EPOCH"
+    echo "last_repair_at=$LAST_REPAIR_AT"
+    echo "last_repair_target=$LAST_REPAIR_TARGET"
+    echo "last_connectivity=$LAST_CONNECTIVITY"
+    echo "last_ipv6_connectivity=$LAST_IPV6_CONNECTIVITY"
+    echo "owned_routes=$OWNED_ROUTES"
+    echo "owned_interface=$OWNED_INTERFACE"
+    echo "owned_gateway=$OWNED_GATEWAY"
+    echo "dns_status=$DNS_STATUS"
+    echo "dns_repair_count=$DNS_REPAIR_COUNT"
+    echo "last_dns_repair_at=$LAST_DNS_REPAIR_AT"
+    echo "last_accept_direct=$LAST_ACCEPT_DIRECT"
+    echo "last_accept_proxy=$LAST_ACCEPT_PROXY"
+  } >"$tmp"
+  /usr/sbin/chown root:wheel "$tmp"
+  /bin/chmod 0644 "$tmp"
+  /bin/mv -f "$tmp" "$STATE_FILE"
+
+  if [ "$signature" != "$PREV_SIGNATURE" ]; then
+    log_notice "decision=$DECISION mode=$MODE zt_bad=$ZT_BAD physical=$PHYSICAL_INTERFACE/$PHYSICAL_GATEWAY low=$LOW_INTERFACE/$LOW_GATEWAY high=$HIGH_INTERFACE/$HIGH_GATEWAY vpn_conflict=$VPN_CONFLICT"
+  fi
+}
+
+finish() {
+  DECISION=$1
+  [ ! -e "$LOCK_DIR/probe_failed" ] || DECISION=probe_failed
+  write_state
+  exit 0
+}
+
+config_path="/Library/Application Support/ZeroTier/One/networks.d/$TARGET_SERVICE_ID.local.conf"
+if ! /usr/bin/grep -qx 'allowDefault=0' "$config_path" 2>/dev/null; then
+  finish precondition_allow_default_not_false
+fi
+
+ensure_physical_ipv6_default
+check_probes
+
+zt_state=$(printf 'show State:/Network/Service/%s/IPv4\n' "$TARGET_SERVICE_ID" | probe /usr/sbin/scutil 2>/dev/null)
+ZT_STATE_INTERFACE=$(printf '%s\n' "$zt_state" | /usr/bin/awk '/InterfaceName :/ {print $3; exit}')
+ZT_STATE_ROUTER=$(printf '%s\n' "$zt_state" | /usr/bin/awk '/Router :/ {print $3; exit}')
+ZT_STATE_SERVER=$(printf '%s\n' "$zt_state" | /usr/bin/awk '/ServerAddress :/ {print $3; exit}')
+[ -n "$ZT_STATE_INTERFACE" ] || ZT_STATE_INTERFACE=missing
+[ -n "$ZT_STATE_ROUTER" ] || ZT_STATE_ROUTER=missing
+[ -n "$ZT_STATE_SERVER" ] || ZT_STATE_SERVER=missing
+
+if [ "$ZT_STATE_INTERFACE" = "$TARGET_INTERFACE" ] && [ "$ZT_STATE_ROUTER" = "127.0.0.1" ]; then
+  ZT_BAD=1
+  if [ "$PREV_ZT_BAD" != "1" ]; then
+    BAD_STATE_COUNT=$((BAD_STATE_COUNT + 1))
+  fi
+fi
+check_probes
+
+parse_details "$(route_details "$TARGET_ROUTE_PROBE")"
+ZT_ROUTE_INTERFACE=$PARSED_INTERFACE
+if [ "$ZT_ROUTE_INTERFACE" != "$TARGET_INTERFACE" ]; then
+  finish zt_route_not_target_interface
+fi
+
+check_probes
+if ! discover_physical_route; then
+  finish observe_physical_route_ambiguous
+fi
+
+check_probes
+if find_vpn_conflict; then
+  finish observe_vpn_or_split_route_conflict
+fi
+
+parse_details "$(route_details "$LOW_SENTINEL")"
+LOW_GATEWAY=$PARSED_GATEWAY
+LOW_INTERFACE=$PARSED_INTERFACE
+parse_details "$(route_details "$HIGH_SENTINEL")"
+HIGH_GATEWAY=$PARSED_GATEWAY
+HIGH_INTERFACE=$PARSED_INTERFACE
+
+ipv6_output=$(bounded /sbin/route -n get -inet6 default 2>/dev/null || true)
+ipv6_interface=$(printf '%s\n' "$ipv6_output" | /usr/bin/awk '/interface:/ {print $2; exit}')
+[ -n "$ipv6_interface" ] && IPV6_DEFAULT_INTERFACE=$ipv6_interface
+
+low_good=0
+high_good=0
+low_bad=0
+high_bad=0
+is_physical_route "$LOW_GATEWAY" "$LOW_INTERFACE" && low_good=1
+is_physical_route "$HIGH_GATEWAY" "$HIGH_INTERFACE" && high_good=1
+is_bad_route "$LOW_GATEWAY" "$LOW_INTERFACE" && low_bad=1
+is_bad_route "$HIGH_GATEWAY" "$HIGH_INTERFACE" && high_bad=1
+check_split_sources
+check_probes
+
+if [ "$low_good" -eq 1 ] && [ "$high_good" -eq 1 ]; then
+  if [ "$ALLOW_ADOPT_PHYSICAL_SPLIT_ROUTES" = "1" ]; then
+    low_exact=$(split_details 0/1)
+    high_exact=$(split_details 128.0/1)
+    if [ "$low_good" = 1 ] && [ "$low_exact" = "$PHYSICAL_GATEWAY|$PHYSICAL_INTERFACE" ] && [ "$high_exact" = "$PHYSICAL_GATEWAY|$PHYSICAL_INTERFACE" ]; then
+      OWNED_ROUTES=1
+      OWNED_INTERFACE=$PHYSICAL_INTERFACE
+      OWNED_GATEWAY=$PHYSICAL_GATEWAY
+    fi
+  fi
+  check_probes
+  ensure_dns || true
+  check_probes
+  if [ "$DNS_STATUS" = "repaired_stripped" ]; then
+    record_dns_acceptance
+    check_probes
+    REPAIRED="dns_${DNS_STATUS}"
+    log_notice "DNS heal via key strip $CONNECTIVITY"
+    finish repaired_dns_stripped
+  fi
+  finish protected_by_physical_split_routes
+fi
+
+if { [ "$low_good" -eq 0 ] && [ "$low_bad" -eq 0 ]; } || { [ "$high_good" -eq 0 ] && [ "$high_bad" -eq 0 ]; }; then
+  finish observe_nonphysical_route_active
+fi
+
+# A clean/missing Dynamic Store does not authorize generic route recovery.
+# It only permits refreshing already-owned stale IFA on existing physical /1s.
+if [ "$ZT_BAD" != 1 ] && { { [ "$low_bad" = 1 ] && [ "$low_stale" != 1 ]; } || { [ "$high_bad" = 1 ] && [ "$high_stale" != 1 ]; }; }; then
+  finish zt_state_not_bad
+fi
+
+repair_target=both
+[ "$low_bad" -eq 1 ] && [ "$high_good" -eq 1 ] && repair_target=low
+[ "$low_good" -eq 1 ] && [ "$high_bad" -eq 1 ] && repair_target=high
+
+if [ "$MODE" != "repair" ]; then
+  REPAIRED=$repair_target
+  finish "observe_would_repair_$repair_target"
+fi
+
+elapsed=$((NOW_EPOCH - LAST_ACTION_EPOCH))
+if [ "$LAST_ACTION_EPOCH" -gt 0 ] && [ "$elapsed" -lt "$COOLDOWN_SECONDS" ]; then
+  REPAIRED=$repair_target
+  finish repair_cooldown
+fi
+
+ensure_split_route() {
+  table_destination=$1
+  route_destination=$2
+  exact=$(split_details "$table_destination")
+  check_probes
+  if [ -z "$exact" ]; then
+    bounded /sbin/route -n add -net "$route_destination" "$PHYSICAL_GATEWAY" -ifa "$PHYSICAL_ADDRESS" >/dev/null 2>&1
+    return $?
+  fi
+
+  parse_details "$exact"
+  if [ "$PARSED_GATEWAY" = "$PHYSICAL_GATEWAY" ] && [ "$PARSED_INTERFACE" = "$PHYSICAL_INTERFACE" ]; then
+    if [ "$(split_ifa "$route_destination")" = "$PHYSICAL_ADDRESS" ]; then
+      check_probes
+      return 0
+    fi
+    check_probes
+    owns_split "$exact" || return 2
+    bounded /sbin/route -n change -net "$route_destination" "$PHYSICAL_GATEWAY" -ifa "$PHYSICAL_ADDRESS" >/dev/null 2>&1
+    return $?
+  fi
+
+  if [ "$OWNED_ROUTES" = "1" ] && [ "$PARSED_INTERFACE" = "$OWNED_INTERFACE" ] && [ "$PARSED_GATEWAY" = "$OWNED_GATEWAY" ]; then
+    bounded /sbin/route -n change -net "$route_destination" "$PHYSICAL_GATEWAY" -ifa "$PHYSICAL_ADDRESS" >/dev/null 2>&1
+    return $?
+  fi
+
+  return 2
+}
+
+check_probes
+repair_failed=0
+repair_conflict=0
+if [ "$low_bad" -eq 1 ]; then
+  ensure_split_route 0/1 0.0.0.0/1
+  rc=$?
+  [ "$rc" -eq 0 ] || repair_failed=1
+  check_probes
+  [ "$rc" -eq 2 ] && repair_conflict=1
+fi
+if [ "$high_bad" -eq 1 ]; then
+  ensure_split_route 128.0/1 128.0.0.0/1
+  rc=$?
+  [ "$rc" -eq 0 ] || repair_failed=1
+  check_probes
+  [ "$rc" -eq 2 ] && repair_conflict=1
+fi
+
+LAST_ACTION_EPOCH=$NOW_EPOCH
+REPAIRED=$repair_target
+if [ "$repair_conflict" -eq 1 ]; then
+  log_error "refused to replace an unowned split route target=$repair_target"
+  finish repair_refused_unowned_route
+fi
+if [ "$repair_failed" -eq 1 ]; then
+  log_error "route mutation failed target=$repair_target physical=$PHYSICAL_INTERFACE/$PHYSICAL_GATEWAY"
+  finish repair_route_command_failed
+fi
+
+parse_details "$(route_details "$LOW_SENTINEL")"
+LOW_GATEWAY=$PARSED_GATEWAY
+LOW_INTERFACE=$PARSED_INTERFACE
+parse_details "$(route_details "$HIGH_SENTINEL")"
+HIGH_GATEWAY=$PARSED_GATEWAY
+HIGH_INTERFACE=$PARSED_INTERFACE
+parse_details "$(route_details "$TARGET_ROUTE_PROBE")"
+ZT_ROUTE_INTERFACE=$PARSED_INTERFACE
+
+LOW_IFA=$(split_ifa 0.0.0.0/1)
+HIGH_IFA=$(split_ifa 128.0.0.0/1)
+check_probes
+if [ "$LOW_IFA" != "$PHYSICAL_ADDRESS" ] || [ "$HIGH_IFA" != "$PHYSICAL_ADDRESS" ] || ! is_physical_route "$LOW_GATEWAY" "$LOW_INTERFACE" || ! is_physical_route "$HIGH_GATEWAY" "$HIGH_INTERFACE" || [ "$ZT_ROUTE_INTERFACE" != "$TARGET_INTERFACE" ]; then
+  log_error "post-repair route validation failed target=$repair_target low=$LOW_INTERFACE/$LOW_GATEWAY high=$HIGH_INTERFACE/$HIGH_GATEWAY zt=$ZT_ROUTE_INTERFACE"
+  finish repair_validation_failed
+fi
+
+OWNED_ROUTES=1
+OWNED_INTERFACE=$PHYSICAL_INTERFACE
+OWNED_GATEWAY=$PHYSICAL_GATEWAY
+REPAIR_COUNT=$((REPAIR_COUNT + 1))
+
+http_code=$(bounded /usr/bin/curl --noproxy '*' -4 -sS -o /dev/null -w '%{http_code}' --connect-timeout 3 --max-time 6 https://www.baidu.com 2>/dev/null || true)
+if [ "$http_code" = "200" ]; then
+  CONNECTIVITY=direct_ipv4_200
+else
+  http_code=$(bounded /usr/bin/curl --noproxy '*' -4 -sS -o /dev/null -w '%{http_code}' --connect-timeout 3 --max-time 6 https://www.baidu.com 2>/dev/null || true)
+  CONNECTIVITY="direct_ipv4_retry_$http_code"
+fi
+
+if [ "$IPV6_DEFAULT_INTERFACE" != "none" ]; then
+  ipv6_code=$(bounded /usr/bin/curl --noproxy '*' -6 -sS -o /dev/null -w '%{http_code}' --connect-timeout 3 --max-time 5 https://www.gstatic.com/generate_204 2>/dev/null || true)
+  IPV6_CONNECTIVITY="observed_$ipv6_code"
+fi
+
+LAST_REPAIR_AT=$NOW_ISO
+LAST_REPAIR_TARGET=$repair_target
+LAST_CONNECTIVITY=$CONNECTIVITY
+LAST_IPV6_CONNECTIVITY=$IPV6_CONNECTIVITY
+
+finish "repaired_$repair_target"
