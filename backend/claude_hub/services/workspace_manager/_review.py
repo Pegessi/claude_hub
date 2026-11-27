@@ -15,21 +15,31 @@ class _ReviewMixin(_WorkspaceManagerBase):
         )
 
     def _implementation_review_failure_count(self, task_id: str) -> int:
-        """Count failed implementation rounds once, excluding the plan gate."""
+        """Count failed implementation rounds once, excluding explicit plan-gate cycles."""
         task = self.tasks[task_id]
         reports = [r for r in self.reports_for_workspace(task.workspace_id) if r.task_id == task_id]
-        # The plan gate is triggered by a worker WORKING report before any
-        # implementation completion report. AgentReport does not store packets.
-        plan_cycles: set[int] = set()
-        if task.task_mode == WorkspaceTaskMode.REVIEWED and task.goal_packet is not None:
-            for r in sorted(reports, key=lambda item: item.created_at):
-                if r.session_id == task.session_id and r.state in {
-                    AgentReportState.COMPLETED,
-                    AgentReportState.READY_FOR_REVIEW,
-                }:
-                    break
-                if r.session_id == task.session_id and r.state == AgentReportState.WORKING:
-                    plan_cycles.add(r.review_cycle)
+        # An implementation review cycle always has a worker COMPLETED or
+        # READY_FOR_REVIEW gate report in that cycle. A pre-implementation Goal
+        # Packet plan gate is the only case where a cycle enters review from a
+        # worker WORKING report with zero completion-family reports in that cycle.
+        completion_cycles = {
+            r.review_cycle
+            for r in reports
+            if r.session_id == task.session_id
+            and r.state in {AgentReportState.COMPLETED, AgentReportState.READY_FOR_REVIEW}
+        }
+        working_only_cycles = {
+            r.review_cycle
+            for r in reports
+            if r.session_id == task.session_id
+            and r.state == AgentReportState.WORKING
+            and r.review_cycle not in completion_cycles
+        }
+        plan_cycles = (
+            working_only_cycles
+            if (task.task_mode == WorkspaceTaskMode.REVIEWED and task.goal_packet is not None)
+            else set()
+        )
 
         return len(
             {

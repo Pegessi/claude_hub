@@ -139,7 +139,7 @@ class _SubagentTaskReviewMixin:
         validation = risks = None
         try:
 
-            async def git(*args: str) -> str:
+            async def git_rc(*args: str) -> tuple[int, str]:
                 proc = await asyncio.create_subprocess_exec(
                     "git",
                     "-C",
@@ -153,12 +153,57 @@ class _SubagentTaskReviewMixin:
                 except asyncio.TimeoutError:
                     proc.kill()
                     await proc.wait()
-                    return "Git command timed out"
-                return out.decode(errors="replace")[:30000]
+                    return 124, "Git command timed out"
+                return proc.returncode or 0, out.decode(errors="replace")[:30000]
 
-            status = await git("status", "--short")
-            diff_stat = await git("diff", "HEAD", "--stat")
-            diff_patch = await git("diff", "HEAD")
+            _, branch = await git_rc("rev-parse", "--abbrev-ref", "HEAD")
+            _, head_sha = await git_rc("rev-parse", "HEAD")
+            branch = branch.strip()
+            head_sha = head_sha.strip()
+            _, status = await git_rc("status", "--short")
+            _, wt_diff_stat = await git_rc("diff", "HEAD", "--stat")
+            _, wt_diff_patch = await git_rc("diff", "HEAD")
+
+            committed_diff_stat = ""
+            committed_diff_patch = ""
+            base_commit = ""
+            if head_sha:
+                if branch and branch not in {"main", "master", "develop", "HEAD"}:
+                    for base_ref in ("main", "master", "origin/main", "origin/master"):
+                        rc_mb, mb_out = await git_rc("merge-base", "HEAD", base_ref)
+                        candidate_mb = mb_out.strip()
+                        if rc_mb == 0 and candidate_mb and candidate_mb != head_sha:
+                            base_commit = candidate_mb
+                            break
+                if not base_commit and task.started_at is not None:
+                    rc_log, log_out = await git_rc(
+                        "log",
+                        f"--since={task.started_at.isoformat()}",
+                        "--format=%H",
+                    )
+                    commits = [line.strip() for line in log_out.splitlines() if line.strip()]
+                    if rc_log == 0 and commits:
+                        oldest = commits[-1]
+                        rc_parent, parent_out = await git_rc("rev-parse", f"{oldest}^")
+                        if rc_parent == 0 and parent_out.strip():
+                            base_commit = parent_out.strip()
+                if base_commit:
+                    _, committed_diff_stat = await git_rc("diff", "--stat", f"{base_commit}..HEAD")
+                    _, committed_diff_patch = await git_rc("diff", f"{base_commit}..HEAD")
+                elif not wt_diff_patch.strip():
+                    # Fallback on single-commit or direct-branch repos so a clean
+                    # committed worktree still exposes the latest commit diff.
+                    _, committed_diff_stat = await git_rc(
+                        "show", "--stat", "--format=oneline", "HEAD"
+                    )
+                    _, committed_diff_patch = await git_rc("show", "--format=medium", "HEAD")
+
+            diff_stat_parts = [p for p in (committed_diff_stat.strip(), wt_diff_stat.strip()) if p]
+            diff_patch_parts = [
+                p for p in (committed_diff_patch.strip(), wt_diff_patch.strip()) if p
+            ]
+            diff_stat = "\n".join(diff_stat_parts)
+            diff_patch = "\n\n".join(diff_patch_parts)
             guidance = self._review_guidance_block(workspace, trigger_report)
             failures = [
                 r

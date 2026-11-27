@@ -191,7 +191,7 @@ def test_recipe_schema_defaults_and_legacy_normalization(
     )
     assert edited.update["recipe"] == WorkspaceTaskRecipe.SPEC_IMPLEMENT_REVIEW
     assert edited.update["auto_worktree"] is True
-    assert edited.update["auto_push_remote"] is True
+    assert edited.update["auto_push_remote"] is False
     assert edited.update["infowall_demand_id"] == "dem-99"
 
     # 5. Legacy persisted task dict missing new fields normalizes cleanly

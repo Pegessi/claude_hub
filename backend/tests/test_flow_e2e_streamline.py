@@ -297,3 +297,199 @@ async def test_subagent_two_round_rework_cap_parks_needs_user_and_blocks_livenes
     # Liveness facts must NOT mark resume_verdict=True once cap is reached
     facts = await manager._liveness_facts(parked)
     assert facts.resume_verdict is False
+
+
+@pytest.mark.asyncio
+async def test_update_task_persists_contract_fields_and_syncs_goal_packet(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from claude_hub.models import WorkspaceTaskRecipe, WorkspaceTaskUpdate
+
+    manager, _ = _setup_fake_chat_runtime(monkeypatch, tmp_path)
+    repo = tmp_path / "repo_edit"
+    _init_git_repo(repo)
+    ws = manager.create_workspace(WorkspaceCreate(name="EditRepo", path=str(repo)))
+
+    task = manager.create_task(
+        ws.id,
+        WorkspaceTaskCreate(
+            title="Initial title",
+            prompt="Initial prompt",
+            goal="Old goal",
+            done_when=["old check"],
+        ),
+    )
+    updated = await manager.update_task(
+        task.id,
+        WorkspaceTaskUpdate(
+            goal="  Updated goal  ",
+            done_when=["  new check 1  ", "", "new check 2"],
+            out_of_scope=["  no deploy  "],
+            recipe=WorkspaceTaskRecipe.SPEC_IMPLEMENT_REVIEW,
+        ),
+    )
+    assert updated.goal == "Updated goal"
+    assert updated.done_when == ["new check 1", "new check 2"]
+    assert updated.out_of_scope == ["no deploy"]
+    assert updated.auto_worktree is True
+    assert updated.auto_push_remote is False
+    assert updated.goal_packet is not None
+    assert updated.goal_packet.status.value == "approved"
+    assert updated.goal_packet.objective == "Updated goal"
+    assert updated.goal_packet.acceptance_criteria == ["new check 1", "new check 2"]
+    assert updated.goal_packet.out_of_scope == ["no deploy"]
+
+
+@pytest.mark.asyncio
+async def test_rework_cap_counts_first_failure_even_when_worker_sent_working_report(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    manager, _ = _setup_fake_chat_runtime(monkeypatch, tmp_path)
+    p0_failure = (
+        '<task-review>{"verdict":"review_failed","summary":"Still broken","validation":"failed","risks":"high",'
+        '"findings":[{"severity":"P0","file":"app.py:1","summary":"Bug","fix":"Fix it"}]}</task-review>'
+    )
+    fake_subagents = _ScriptedSubagentService([p0_failure, p0_failure, p0_failure])
+    monkeypatch.setattr(subagents_mod, "get_subagent_service", lambda: fake_subagents)
+    monkeypatch.setattr(
+        subagent_review,
+        "select_cross_reviewer_candidates",
+        lambda *_args, **_kwargs: [CrossReviewCandidate(provider="codex", effort="high")],
+    )
+    monkeypatch.setattr(
+        subagent_review,
+        "read_cached_quota_map",
+        lambda: asyncio.sleep(0, result={}),
+    )
+    monkeypatch.setattr(
+        subagent_review,
+        "read_cross_review_settings",
+        lambda: SimpleNamespace(preferred_candidates=None),
+    )
+
+    repo = tmp_path / "repo_working_first"
+    _init_git_repo(repo)
+    ws = manager.create_workspace(WorkspaceCreate(name="WorkingFirstRepo", path=str(repo)))
+    task = manager.create_task(
+        ws.id,
+        WorkspaceTaskCreate(
+            title="With progress report",
+            prompt="Implement feature",
+            goal="Feature works",
+            done_when=["unit test passes"],
+            agent_type=AgentType.CLAUDE,
+            session_kind=SessionKind.CHAT,
+        ),
+    )
+    started = await manager.start_task(task.id)
+    worker_id = started.session_id
+    assert worker_id is not None
+
+    # Worker emits a normal WORKING milestone in cycle 0 before COMPLETED
+    await manager.create_report(
+        worker_id,
+        AgentReportCreate(
+            task_id=task.id,
+            state=AgentReportState.WORKING,
+            message="Derived plan and started editing app.py",
+            call_id="progress-0",
+        ),
+    )
+    for attempt in (1, 2):
+        await manager.create_report(
+            worker_id,
+            AgentReportCreate(
+                task_id=task.id,
+                state=AgentReportState.COMPLETED,
+                message=f"Done attempt {attempt}",
+                call_id=f"done-{attempt}",
+            ),
+        )
+        await _drain_review_tasks(manager)
+        assert manager.tasks[task.id].status == WorkspaceTaskStatus.WORKING
+
+    # 3rd implementation failure MUST hit cap (count == 3), NOT be miscounted as 2
+    await manager.create_report(
+        worker_id,
+        AgentReportCreate(
+            task_id=task.id,
+            state=AgentReportState.COMPLETED,
+            message="Done attempt 3",
+            call_id="done-3",
+        ),
+    )
+    await _drain_review_tasks(manager)
+    assert manager._implementation_review_failure_count(task.id) == 3
+    parked = manager.tasks[task.id]
+    assert parked.status == WorkspaceTaskStatus.REVIEW
+    assert parked.human_acceptance_requested_at is None
+    assert manager.task_lifecycles([parked])[task.id].reason == "review_failed_not_resumed"
+
+
+@pytest.mark.asyncio
+async def test_subagent_blind_review_sees_committed_branch_diff_when_worktree_is_clean(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    manager, _ = _setup_fake_chat_runtime(monkeypatch, tmp_path)
+    fake_subagents = _ScriptedSubagentService(
+        [
+            '<task-review>{"verdict":"review_passed","summary":"Verified committed diff","validation":"ok","risks":"none","findings":[]}</task-review>'
+        ]
+    )
+    monkeypatch.setattr(subagents_mod, "get_subagent_service", lambda: fake_subagents)
+    monkeypatch.setattr(
+        subagent_review,
+        "select_cross_reviewer_candidates",
+        lambda *_args, **_kwargs: [CrossReviewCandidate(provider="codex", effort="high")],
+    )
+    monkeypatch.setattr(
+        subagent_review,
+        "read_cached_quota_map",
+        lambda: asyncio.sleep(0, result={}),
+    )
+    monkeypatch.setattr(
+        subagent_review,
+        "read_cross_review_settings",
+        lambda: SimpleNamespace(preferred_candidates=None),
+    )
+
+    repo = tmp_path / "repo_committed"
+    _init_git_repo(repo)
+    ws = manager.create_workspace(WorkspaceCreate(name="CommittedRepo", path=str(repo)))
+    task = manager.create_task(
+        ws.id,
+        WorkspaceTaskCreate(
+            title="Committed implementation",
+            prompt="Add multiply()",
+            goal="Add multiply(a, b)",
+            done_when=["multiply(3, 4) == 12"],
+            agent_type=AgentType.CLAUDE,
+            session_kind=SessionKind.CHAT,
+            auto_worktree=True,
+        ),
+    )
+    started = await manager.start_task(task.id)
+    assert started.worktree_path is not None
+    wt = Path(started.worktree_path)
+    (wt / "app.py").write_text(
+        "def add(a: int, b: int) -> int:\n    return a + b\n\n"
+        "def multiply(a: int, b: int) -> int:\n    return a * b\n"
+    )
+    subprocess.run(["git", "add", "app.py"], cwd=wt, check=True)
+    subprocess.run(["git", "commit", "-m", "feat: add multiply"], cwd=wt, check=True)
+
+    assert started.session_id is not None
+    await manager.create_report(
+        started.session_id,
+        AgentReportCreate(
+            task_id=task.id,
+            state=AgentReportState.COMPLETED,
+            message="Committed multiply() on feature worktree.",
+            changed_files=["app.py"],
+            validation="pytest -q",
+            call_id="committed-1",
+        ),
+    )
+    await _drain_review_tasks(manager)
+    assert len(fake_subagents.calls) == 1
+    assert "def multiply" in fake_subagents.calls[0].prompt

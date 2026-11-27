@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 from typing import Literal
 
+from claude_hub.models import GoalPacket
 from claude_hub.services.task_transitions import apply_task_update
 
 from ..local_storage import read_document
@@ -126,7 +127,10 @@ class _TaskUpdatesMixin(_WorkspaceManagerBase):
                 session = self.sessions.get(payload.session_id)
                 if not session or session.workspace_id != task.workspace_id:
                     raise KeyError(payload.session_id)
-                if session.role != WorkspaceSessionRole.ORCHESTRATOR:
+                if session.role not in {
+                    WorkspaceSessionRole.ORCHESTRATOR,
+                    WorkspaceSessionRole.WORKER,
+                }:
                     raise ValueError("Tasks can only be assigned to workspace agents")
                 update["session_id"] = payload.session_id
             else:
@@ -159,7 +163,7 @@ class _TaskUpdatesMixin(_WorkspaceManagerBase):
                 if payload.auto_worktree is None:
                     update["auto_worktree"] = True
                 if payload.auto_push_remote is None:
-                    update["auto_push_remote"] = True
+                    update["auto_push_remote"] = bool(task.auto_push_remote)
             elif payload.recipe == WorkspaceTaskRecipe.TRIAGE_DIAGNOSE:
                 if payload.task_mode is None:
                     update["task_mode"] = WorkspaceTaskMode.SUBAGENT
@@ -182,6 +186,62 @@ class _TaskUpdatesMixin(_WorkspaceManagerBase):
             update["auto_worktree"] = payload.auto_worktree
         if payload.auto_push_remote is not None:
             update["auto_push_remote"] = payload.auto_push_remote
+        contract_fields_touched = bool(
+            {"goal", "done_when", "out_of_scope"} & payload.model_fields_set
+        )
+        if contract_fields_touched:
+            next_goal = (
+                ((payload.goal or "").strip() or None)
+                if "goal" in payload.model_fields_set
+                else task.goal
+            )
+            next_done_when = (
+                [item.strip() for item in (payload.done_when or []) if item.strip()]
+                if "done_when" in payload.model_fields_set
+                else list(task.done_when)
+            )
+            next_out_of_scope = (
+                [item.strip() for item in (payload.out_of_scope or []) if item.strip()]
+                if "out_of_scope" in payload.model_fields_set
+                else list(task.out_of_scope)
+            )
+            update["goal"] = next_goal
+            update["done_when"] = next_done_when
+            update["out_of_scope"] = next_out_of_scope
+            if "goal_packet" not in payload.model_fields_set:
+                existing_gp = task.goal_packet
+                if next_goal or next_done_when:
+                    if existing_gp is not None:
+                        gp_status = (
+                            existing_gp.status
+                            if existing_gp.status == GoalPacketStatus.PENDING_REVIEW
+                            else GoalPacketStatus.APPROVED
+                        )
+                        update["goal_packet"] = existing_gp.model_copy(
+                            update={
+                                "status": gp_status,
+                                "objective": next_goal or effective_title,
+                                "acceptance_criteria": next_done_when,
+                                "out_of_scope": next_out_of_scope,
+                                "updated_at": now,
+                            }
+                        )
+                    else:
+                        update["goal_packet"] = GoalPacket(
+                            status=GoalPacketStatus.APPROVED,
+                            objective=next_goal or effective_title,
+                            acceptance_criteria=next_done_when,
+                            out_of_scope=next_out_of_scope,
+                            created_at=now,
+                            updated_at=now,
+                        )
+                elif existing_gp is not None and not (
+                    existing_gp.validation_plan
+                    or existing_gp.assumptions
+                    or existing_gp.handoff_requirements
+                    or existing_gp.status == GoalPacketStatus.PENDING_REVIEW
+                ):
+                    update["goal_packet"] = None
         if payload.goal_packet is not None:
             update["goal_packet"] = payload.goal_packet
         if payload.review_profiles is not None:
