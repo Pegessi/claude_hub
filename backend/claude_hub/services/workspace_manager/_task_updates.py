@@ -190,26 +190,41 @@ class _TaskUpdatesMixin(_WorkspaceManagerBase):
             {"goal", "done_when", "out_of_scope"} & payload.model_fields_set
         )
         if contract_fields_touched:
+            existing_gp = task.goal_packet
+            fallback_goal = (
+                task.goal
+                if task.goal is not None
+                else ((existing_gp.objective or "").strip() or None if existing_gp else None)
+            )
+            fallback_done_when = (
+                list(task.done_when)
+                if task.done_when
+                else (list(existing_gp.acceptance_criteria) if existing_gp else [])
+            )
+            fallback_out_of_scope = (
+                list(task.out_of_scope)
+                if task.out_of_scope
+                else (list(existing_gp.out_of_scope) if existing_gp else [])
+            )
             next_goal = (
                 ((payload.goal or "").strip() or None)
                 if "goal" in payload.model_fields_set
-                else task.goal
+                else fallback_goal
             )
             next_done_when = (
                 [item.strip() for item in (payload.done_when or []) if item.strip()]
                 if "done_when" in payload.model_fields_set
-                else list(task.done_when)
+                else fallback_done_when
             )
             next_out_of_scope = (
                 [item.strip() for item in (payload.out_of_scope or []) if item.strip()]
                 if "out_of_scope" in payload.model_fields_set
-                else list(task.out_of_scope)
+                else fallback_out_of_scope
             )
             update["goal"] = next_goal
             update["done_when"] = next_done_when
             update["out_of_scope"] = next_out_of_scope
             if "goal_packet" not in payload.model_fields_set:
-                existing_gp = task.goal_packet
                 if next_goal or next_done_when or next_out_of_scope:
                     if existing_gp is not None:
                         gp_status = (

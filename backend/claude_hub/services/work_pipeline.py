@@ -231,6 +231,46 @@ async def _is_valid_git_worktree(path: Path) -> bool:
     return rc == 0 and out.strip().lower() == "true"
 
 
+async def is_confirmed_non_git_directory(workspace_path: str) -> bool:
+    """Return True only when ``workspace_path`` is provably a plain non-Git directory.
+
+    Timeouts, permission errors, safe.directory errors, Git env overrides, and
+    broken/corrupted ``.git`` or bare-repo markers return False so callers keep
+    isolation fail-closed instead of writing into a primary checkout.
+    """
+    if any(os.environ.get(key) for key in ("GIT_DIR", "GIT_COMMON_DIR", "GIT_WORK_TREE")):
+        return False
+    try:
+        directory = Path(workspace_path).expanduser().resolve(strict=True)
+    except OSError:
+        return False
+    if not directory.is_dir():
+        return False
+    rc, _, error = await _run_bounded_subprocess(
+        ["git", "rev-parse", "--git-common-dir"],
+        cwd=str(directory),
+        env={**os.environ, "LC_ALL": "C"},
+        timeout=10.0,
+    )
+    if rc != 128 or not error.startswith("fatal: not a git repository"):
+        return False
+    for parent in (directory, *directory.parents):
+        try:
+            (parent / ".git").lstat()
+        except FileNotFoundError:
+            pass
+        else:
+            return False
+        try:
+            (parent / "HEAD").lstat()
+            (parent / "objects").lstat()
+        except FileNotFoundError:
+            pass
+        else:
+            return False
+    return True
+
+
 async def provision_task_worktree(
     workspace: Workspace,
     task: WorkspaceTask,

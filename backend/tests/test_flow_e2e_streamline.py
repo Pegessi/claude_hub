@@ -356,6 +356,70 @@ async def test_update_task_persists_contract_fields_and_syncs_goal_packet(
     assert cleared.out_of_scope == []
     assert cleared.goal_packet is None
 
+    # Legacy task with only goal_packet preserves untouched packet fields on partial PATCH
+    from claude_hub.models import GoalPacket, GoalPacketStatus
+
+    legacy_task = manager.create_task(
+        ws.id,
+        WorkspaceTaskCreate(
+            title="Legacy title",
+            prompt="Legacy prompt",
+            goal_packet=GoalPacket(
+                status=GoalPacketStatus.APPROVED,
+                objective="Legacy objective",
+                acceptance_criteria=["old check"],
+                out_of_scope=["keep exclusion"],
+            ),
+        ),
+    )
+    partial = await manager.update_task(
+        legacy_task.id,
+        WorkspaceTaskUpdate(title="New title", done_when=["updated check"]),
+    )
+    assert partial.goal == "Legacy objective"
+    assert partial.out_of_scope == ["keep exclusion"]
+    assert partial.goal_packet is not None
+    assert partial.goal_packet.objective == "Legacy objective"
+    assert partial.goal_packet.acceptance_criteria == ["updated check"]
+    assert partial.goal_packet.out_of_scope == ["keep exclusion"]
+
+
+@pytest.mark.asyncio
+async def test_dot_delegate_fails_closed_when_git_probe_fails_on_broken_repo(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from unittest.mock import AsyncMock
+
+    from claude_hub.services import work_pipeline
+
+    manager, _ = _setup_fake_chat_runtime(monkeypatch, tmp_path)
+    monkeypatch.setattr("claude_hub.services.workspace_manager", manager)
+    repo = tmp_path / "dubious_repo"
+    _init_git_repo(repo)
+    ws = manager.create_workspace(WorkspaceCreate(name="DubiousRepo", path=str(repo)))
+
+    monkeypatch.setattr(
+        work_pipeline,
+        "_run_bounded_subprocess",
+        AsyncMock(return_value=(128, "", "fatal: detected dubious ownership in repository")),
+    )
+    store = DotStore(tmp_path / "dot_failclosed")
+    store.ensure()
+    dot = DotService(store)
+
+    with pytest.raises(RuntimeError, match="not a valid Git repository"):
+        await dot.delegate(
+            workspace_id=ws.id,
+            title="Write code",
+            goal="Modify files safely",
+            done_when=["unit test passes"],
+            context="app.py",
+            output="updated app.py",
+            agent_type="claude",
+            confirm=True,
+            actor_key="actor-fc",
+        )
+
 
 @pytest.mark.asyncio
 async def test_rework_cap_counts_first_failure_even_when_worker_sent_working_report(

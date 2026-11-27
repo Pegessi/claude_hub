@@ -257,11 +257,14 @@ class DotWorkService(DotSessionService, ABC):
         ):
             try:
                 await _resolve_canonical_git_repo_root(ws_obj.path)
-            except Exception:
+            except RuntimeError:
+                from claude_hub.services.work_pipeline import is_confirmed_non_git_directory
+
+                if not await is_confirmed_non_git_directory(ws_obj.path):
+                    raise
                 logger.debug(
-                    "dot: workspace %s path is not a Git repo; skipping auto worktree",
+                    "dot: workspace %s path is confirmed non-Git; skipping auto worktree",
                     workspace_id,
-                    exc_info=True,
                 )
             else:
                 auto_worktree = True
