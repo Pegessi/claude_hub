@@ -47,7 +47,7 @@ from claude_hub.services.workspace_manager import (
 
 @pytest.fixture(autouse=True)
 def _outside_hub_agent(monkeypatch: pytest.MonkeyPatch) -> None:
-    """``agent create`` defaults depend on $CLAUDE_HUB_TAB_ID; keep runs inside Hub hermetic."""
+    """Defaults no longer depend on $CLAUDE_HUB_TAB_ID; keep runs inside Hub hermetic."""
     monkeypatch.delenv("CLAUDE_HUB_TAB_ID", raising=False)
 
 
@@ -82,6 +82,18 @@ LIFECYCLE_HELP_MARKERS = (
     "Never delete reused/shared agents",
 )
 
+AGENT_HELP_MARKERS = (
+    "workspace ensure",
+    "task cleanup",
+    "--cwd .",
+    "--env-preset NAME_OR_ID",
+    "built-in or saved custom env preset",
+    "ephemeral Chat session",
+    "--persistent",
+    "--reuse-existing",
+    "Never delete sessions you do not own",
+)
+
 
 def _normalize_help_text(text: str) -> str:
     return " ".join(text.split())
@@ -102,17 +114,29 @@ def _assert_lifecycle_help(output: str) -> None:
     [
         (["--help"], "Claude Hub command-line interface."),
         (["workspace", "--help"], "Manage agent workspaces."),
-        (["agent", "--help"], "Manage resident workspace agent sessions."),
         (["task", "--help"], "Manage workspace tasks."),
     ],
 )
 def test_cli_group_help_renders_lifecycle_recipe(args: list[str], summary: str) -> None:
-    """Root and workspace/agent/task group --help must render the lifecycle recipe."""
+    """Root and workspace/task group --help must render the shared lifecycle recipe."""
     runner = CliRunner()
     result = runner.invoke(cli, args)
     assert result.exit_code == 0, result.output
     assert summary in result.output
     _assert_lifecycle_help(result.output)
+
+
+def test_agent_group_help_renders_seatless_ephemeral_recipe() -> None:
+    """The agent group advertises isolated ephemeral Chat sessions, not a resident pool."""
+    runner = CliRunner()
+    result = runner.invoke(cli, ["agent", "--help"])
+    assert result.exit_code == 0, result.output
+    assert "Manage workspace agent sessions." in result.output
+    normalized = _normalize_help_text(result.output)
+    for marker in AGENT_HELP_MARKERS:
+        assert marker in normalized, marker
+    assert "resident workspace agent" not in normalized
+    assert "best-effort reuse" not in normalized
 
 
 @pytest.mark.parametrize("args", [["--help"], ["agent", "--help"]])
@@ -144,18 +168,29 @@ def test_agent_entry_docs_feature_worktree_cwd_and_generic_preset_guidance() -> 
         assert "Hub Workspace is shared" in text or "share the same" in text
 
 
-def test_agent_create_defaults_reuse_existing(monkeypatch: pytest.MonkeyPatch) -> None:
-    bodies: list[dict] = []
-
+def _local_workspaces_handler(bodies: list[dict]) -> Callable[[httpx.Request], httpx.Response]:
     def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path == "/api/workspaces":
+            return httpx.Response(200, json=[{"id": "ws1", "name": "hub", "target": "local"}])
         bodies.append(json.loads(request.content))
         return httpx.Response(200, json={"id": "s1"})
 
-    patch_get_client(monkeypatch, handler)
+    return handler
+
+
+def test_agent_create_defaults_to_isolated_ephemeral_chat(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bodies: list[dict] = []
+    patch_get_client(monkeypatch, _local_workspaces_handler(bodies))
     runner = CliRunner()
     result = runner.invoke(cli, ["agent", "create", "ws1", "--agent-type", "claude"])
     assert result.exit_code == 0, result.output
-    assert bodies[0]["reuse_existing"] is True
+    body = bodies[0]
+    assert body["ephemeral"] is True
+    assert body["caller_owned_ephemeral"] is True
+    assert body["reuse_existing"] is False
+    assert body["session_kind"] == "chat"
 
 
 def test_agent_create_ephemeral_conflicts_with_reuse(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -175,6 +210,8 @@ def test_agent_create_ephemeral_sets_caller_owned_provenance(
     bodies: list[dict] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path == "/api/workspaces":
+            return httpx.Response(200, json=[{"id": "ws1", "name": "hub", "target": "local"}])
         bodies.append(json.loads(request.content))
         return httpx.Response(
             200,
@@ -191,20 +228,63 @@ def test_agent_create_ephemeral_sets_caller_owned_provenance(
     assert payload["env"]["ANTHROPIC_AUTH_TOKEN"] == "[redacted]"
 
 
-def test_agent_create_non_ephemeral_leaves_caller_owned_false(
+def test_agent_create_persistent_leaves_caller_owned_false(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     bodies: list[dict] = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        bodies.append(json.loads(request.content))
-        return httpx.Response(200, json={"id": "s1"})
-
-    patch_get_client(monkeypatch, handler)
+    patch_get_client(monkeypatch, _local_workspaces_handler(bodies))
     runner = CliRunner()
-    result = runner.invoke(cli, ["agent", "create", "ws1", "--agent-type", "claude"])
+    result = runner.invoke(
+        cli,
+        ["agent", "create", "ws1", "--agent-type", "claude", "--persistent"],
+    )
     assert result.exit_code == 0, result.output
-    assert bodies[0].get("caller_owned_ephemeral") is False
+    assert bodies[0]["ephemeral"] is False
+    assert bodies[0]["caller_owned_ephemeral"] is False
+    # A fresh persistent session still must not steal someone else's seat.
+    assert bodies[0]["reuse_existing"] is False
+
+
+def test_agent_create_reuse_existing_implies_persistent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bodies: list[dict] = []
+    patch_get_client(monkeypatch, _local_workspaces_handler(bodies))
+    runner = CliRunner()
+    result = runner.invoke(cli, ["agent", "create", "ws1", "--reuse-existing"])
+    assert result.exit_code == 0, result.output
+    assert bodies[0]["reuse_existing"] is True
+    assert bodies[0]["ephemeral"] is False
+    assert bodies[0]["caller_owned_ephemeral"] is False
+
+
+def test_agent_create_persistent_reuse_existing_uses_persistent_reuse_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bodies: list[dict] = []
+    patch_get_client(monkeypatch, _local_workspaces_handler(bodies))
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        ["agent", "create", "ws1", "--persistent", "--reuse-existing"],
+    )
+    assert result.exit_code == 0, result.output
+    assert bodies[0]["reuse_existing"] is True
+    assert bodies[0]["ephemeral"] is False
+    assert bodies[0]["caller_owned_ephemeral"] is False
+
+
+def test_agent_create_no_reuse_existing_keeps_ephemeral_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bodies: list[dict] = []
+    patch_get_client(monkeypatch, _local_workspaces_handler(bodies))
+    runner = CliRunner()
+    result = runner.invoke(cli, ["agent", "create", "ws1", "--no-reuse-existing"])
+    assert result.exit_code == 0, result.output
+    assert bodies[0]["reuse_existing"] is False
+    assert bodies[0]["ephemeral"] is True
+    assert bodies[0]["caller_owned_ephemeral"] is True
 
 
 def _agent_create_session_kind(
@@ -259,14 +339,18 @@ def test_agent_create_resolves_workspace_by_name_for_chat_default(
     assert kind == "chat"
 
 
-def test_agent_create_outside_hub_agent_keeps_terminal(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_agent_create_outside_hub_agent_defaults_to_chat(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The Chat default no longer requires $CLAUDE_HUB_TAB_ID."""
     kind, requests = _agent_create_session_kind(
         monkeypatch, ["--agent-type", "claude"], tab_id=None
     )
-    assert kind == "terminal"
-    assert requests == ["POST /api/workspaces/ws1/agent"]
+    assert kind == "chat"
+    assert requests == ["GET /api/workspaces", "POST /api/workspaces/ws1/agent"]
 
 
+@pytest.mark.parametrize("tab_id", ["tab-parent", None])
 @pytest.mark.parametrize(
     "args",
     [
@@ -278,14 +362,15 @@ def test_agent_create_outside_hub_agent_keeps_terminal(monkeypatch: pytest.Monke
         ["--agent-type", "traex"],
     ],
 )
-def test_agent_create_inside_hub_agent_keeps_terminal_for_remote_or_terminal_only(
-    monkeypatch: pytest.MonkeyPatch, args: list[str]
+def test_agent_create_keeps_terminal_for_remote_or_terminal_only(
+    monkeypatch: pytest.MonkeyPatch, args: list[str], tab_id: str | None
 ) -> None:
-    kind, requests = _agent_create_session_kind(monkeypatch, args, tab_id="tab-parent")
+    kind, requests = _agent_create_session_kind(monkeypatch, args, tab_id=tab_id)
     assert kind == "terminal"
     assert requests == ["POST /api/workspaces/ws1/agent"]
 
 
+@pytest.mark.parametrize("tab_id", ["tab-parent", None])
 @pytest.mark.parametrize(
     "workspaces",
     [
@@ -296,10 +381,10 @@ def test_agent_create_inside_hub_agent_keeps_terminal_for_remote_or_terminal_onl
     ids=["remote-workspace", "unknown-workspace", "lookup-error"],
 )
 def test_agent_create_chat_default_falls_back_to_terminal_on_doubt(
-    monkeypatch: pytest.MonkeyPatch, workspaces: Any
+    monkeypatch: pytest.MonkeyPatch, workspaces: Any, tab_id: str | None
 ) -> None:
     kind, _ = _agent_create_session_kind(
-        monkeypatch, ["--agent-type", "claude"], tab_id="tab-parent", workspaces=workspaces
+        monkeypatch, ["--agent-type", "claude"], tab_id=tab_id, workspaces=workspaces
     )
     assert kind == "terminal"
 
@@ -318,7 +403,7 @@ def test_agent_create_explicit_session_kind_wins(
     assert requests == ["POST /api/workspaces/ws1/agent"]
 
 
-def test_agent_create_payload_session_kind_wins_over_hub_default(
+def test_agent_create_payload_session_kind_wins_over_cli_default(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     kind, requests = _agent_create_session_kind(
@@ -452,6 +537,8 @@ def test_cli_agent_create_omits_cwd_when_unset(
     bodies: list[dict] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path == "/api/workspaces":
+            return httpx.Response(200, json=[{"id": "ws1", "name": "hub", "target": "local"}])
         bodies.append(json.loads(request.content))
         return httpx.Response(200, json={"id": "s1"})
 

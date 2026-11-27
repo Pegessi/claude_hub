@@ -12,28 +12,33 @@ canonical Git common-dir: main and linked worktrees share that Hub Workspace.
 execution cwd is separate; explicitly pass the feature worktree.
 
 1. `claude-hub workspace ensure --path …` reuses/creates the canonical Workspace.
-2. `claude-hub agent status WORKSPACE_ID` checks for an existing compatible agent.
-   Creation is best-effort reuse, not a concurrency/idempotency boundary;
-   overlapping requests can each create a session. `--no-reuse-existing` is
-   for deliberate parallel execution; `--ephemeral` is for a task-owned session.
+2. `claude-hub agent create WORKSPACE_ID` now provisions an isolated, task-scoped
+   ephemeral session by default: one seat per task, never shared or queued behind
+   another caller, and reclaimed by `task cleanup` once the task finishes. There is
+   no shared resident agent pool to pre-create or inspect first. Pass `--persistent`
+   for a durable session and add `--reuse-existing` only when you deliberately want a
+   compatible idle persistent session; `--no-reuse-existing` makes the isolation explicit.
 3. From the feature worktree:
    `claude-hub agent create WORKSPACE_ID --agent-type claude --cwd . --env-preset NAME_OR_ID`.
    Any built-in preset or saved custom preset is accepted by name or id.
    `default_env_preset` may supply it; explicit `--env KEY=VALUE` overrides keys.
    `day1` is only an example. Bare creation without `--cwd` targets the primary
    checkout and must not be used to start a feature writer.
-4. After the task reaches a terminal state, `claude-hub task cleanup TASK_ID`
-   cleans task-owned ephemeral sessions. Never delete shared or persistent agents.
+4. Prefer `claude-hub task create …` or `dot delegate …`: both register the task and
+   provision/retire its ephemeral session automatically. After a manually owned task
+   reaches a terminal state, `claude-hub task cleanup TASK_ID` cleans task-owned
+   ephemeral sessions. Never delete sessions you do not own.
 
 ## Managed Chat execution
 
 Workspace execution agents and reviewers may use a fixed Chat surface. Choose
 **Chat** when adding the agent, or pass `--session-kind chat` to `agent create`
-or `task run`. The server/UI default remains `terminal`; existing sessions are not
-migrated. Exception: `agent create` run from inside a Hub agent (`$CLAUDE_HUB_TAB_ID`
-set) defaults to `chat` when the target is local and the agent type supports Chat,
-saving a tmux/ttyd runtime per helper; an explicit `--session-kind` always wins.
-For example, from the intended feature worktree:
+or `task run`. Local, Chat-capable agent types (`claude`, `codex`, `cursor`,
+`maso`, `antigravity`) default to `chat` on `agent create` whether or not the
+call runs inside a Hub agent, saving a tmux/ttyd runtime per helper; the server
+surface default for unspecified/remote requests remains `terminal`, and existing
+sessions are not migrated. Remote SSH stays Terminal-only. An explicit
+`--session-kind` always wins. For example, from the intended feature worktree:
 
 ```bash
 claude-hub agent create WORKSPACE_ID --agent-type claude --session-kind chat --cwd .

@@ -20,6 +20,12 @@
 - Default `dot delegate` on local Chat-capable providers to `chat` + `ephemeral`
   with non-pushing `auto_worktree` on Git workspaces, emit a 4-line contract
   receipt, and retire mandatory post-task `dot review` bookkeeping prompts.
+- Make `agent create` seatless by default: a bare call now provisions an isolated
+  caller-owned ephemeral Chat session for local Chat-capable agents, with
+  `--persistent` and explicit `--reuse-existing` as the only ways to keep or reuse
+  a durable seat. CLI help and the agent workflow docs retire the shared resident
+  seat pool, busy-time auto-queuing, and manual seat/context-clearing guidance in
+  favor of per-task sessions managed by `task create` / `dot delegate`.
 - Skip cold-start `bootstrap_prompt` check-in turns on non-resident execution
   sessions, release reusable seats once tasks park on human acceptance, and
   collapse deprecated `worker`/`dispatcher`/`reviewer` role selectors into

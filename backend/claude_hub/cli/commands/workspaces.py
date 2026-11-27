@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 from collections import Counter
 from typing import Any, Dict, List, Optional
 
@@ -16,7 +15,6 @@ from claude_hub.cli.commands.common import (
     parse_json_object,
     parse_kv_pairs,
     redact_session_env_payload,
-    resolve_agent_reuse,
     resolve_cli_local_path,
 )
 from claude_hub.cli.output import emit, print_rows
@@ -37,6 +35,48 @@ SESSION_STATUS_COLUMNS = [
     "last_activity_at",
 ]
 DOCUMENT_COLUMNS = ["source", "label", "path", "task_id", "updated_at"]
+
+# Agent-group guidance: agent create is seatless by default — one isolated
+# ephemeral Chat session per task instead of a shared resident seat pool.
+AGENT_SESSION_LIFECYCLE_RECIPE = (
+    "Lifecycle: one Claude Hub Workspace per Git repo (git common-dir);\n"
+    "Git feature worktree != Hub Workspace — run workspace ensure from any checkout.\n"
+    "Hub Workspace is shared by repo; agent execution cwd is separate.\n"
+    "From a feature worktree pass --cwd . so the agent runs in that checkout.\n"
+    "agent create defaults to an isolated, task-scoped ephemeral Chat session for\n"
+    "local Chat-capable agents: one seat per task, never shared or queued, reclaimed\n"
+    "by task cleanup. Prefer `task create` / `dot delegate`, which provision and\n"
+    "retire that session automatically; no shared resident agent pool is needed.\n"
+    "Pass --persistent for a durable session, and --reuse-existing only when you\n"
+    "deliberately want a compatible idle persistent session (remote SSH stays terminal).\n"
+    "Any built-in or saved custom env preset works by name/id; day1 is only an example.\n"
+    "Local Claude (feature worktree): claude-hub agent create WORKSPACE "
+    "--agent-type claude --cwd . --env-preset NAME_OR_ID\n"
+    "An explicit --session-kind always wins; the server surface default stays terminal.\n"
+    "\n"
+    "Never delete sessions you do not own."
+)
+
+
+def _resolve_agent_session_flags(
+    ephemeral: Optional[bool], reuse_existing: Optional[bool]
+) -> tuple[bool, bool]:
+    """Resolve tri-state lifetime/reuse flags into ``(ephemeral, reuse_existing)``.
+
+    Bare ``agent create`` is isolated and task-scoped: ephemeral, never reusing
+    another session. Explicit ``--reuse-existing`` targets a compatible idle
+    persistent session and therefore implies ``--persistent`` unless an explicit
+    ``--ephemeral`` makes the combination invalid.
+    """
+    if ephemeral is True and reuse_existing is True:
+        raise click.ClickException("Cannot combine --ephemeral with --reuse-existing.")
+    if ephemeral is not None:
+        effective_ephemeral = ephemeral
+    elif reuse_existing is True:
+        effective_ephemeral = False
+    else:
+        effective_ephemeral = True
+    return effective_ephemeral, reuse_existing is True
 
 
 def _items(board: Any, key: str) -> List[dict]:
@@ -490,10 +530,11 @@ def workspace_attachment_get(
 
 
 @click.group(
-    help=lifecycle_group_help(
-        "Manage resident workspace agent sessions.\n\n"
+    help=(
+        "Manage workspace agent sessions.\n\n"
         "For one-call help from another provider (no Task, board or review), use\n"
-        "`agent run --provider X --prompt-file -`; it prints the final answer."
+        "`agent run --provider X --prompt-file -`; it prints the final answer.\n\n"
+        + AGENT_SESSION_LIFECYCLE_RECIPE
     )
 )
 def agent() -> None:
@@ -522,7 +563,7 @@ def agent_list(ctx: click.Context, workspace_id: str) -> None:
 @click.option("--role", default=None, help="Client-side filter on session role.")
 @click.pass_context
 def agent_status(ctx: click.Context, workspace_id: str, role: Optional[str]) -> None:
-    """Show resident agent/session runtime state for a workspace."""
+    """Show managed agent/session runtime state for a workspace."""
     try:
         with cli_main.get_client(ctx) as client:
             board = client.get_board(workspace_id)
@@ -577,13 +618,12 @@ def _workspace_is_remote(ctx: click.Context, workspace_id: str) -> Optional[bool
 def _default_agent_session_kind(
     ctx: click.Context, workspace_id: str, agent_type: str, *, remote: bool
 ) -> str:
-    """Agents inside Hub default to a headless Chat; everyone else keeps Terminal.
+    """Local Chat-capable agents default to a headless Chat; the rest keep Terminal.
 
     Chat avoids a tmux/ttyd runtime per helper agent. It needs a local target
-    and a Chat-capable provider, so any doubt falls back to the server default.
+    and a Chat-capable provider, so explicit remote options, remote workspaces
+    and unresolved lookups fall back to the server default (terminal).
     """
-    if not os.environ.get("CLAUDE_HUB_TAB_ID", "").strip():
-        return "terminal"
     if remote or not _chat_capable(agent_type):
         return "terminal"
     if _workspace_is_remote(ctx, workspace_id) is not False:
@@ -599,8 +639,9 @@ def _default_agent_session_kind(
     type=click.Choice(["terminal", "chat"]),
     default=None,
     help=(
-        "Managed session surface. Default: chat when called from inside a Hub agent "
-        "($CLAUDE_HUB_TAB_ID) for a local, Chat-capable agent; otherwise terminal."
+        "Managed session surface. Default: chat for a local, Chat-capable agent "
+        "whether or not the call runs inside a Hub agent; remote SSH and "
+        "terminal-only agent types stay on terminal."
     ),
 )
 @click.option("--title", default=None, help="Optional session title.")
@@ -611,19 +652,12 @@ def _default_agent_session_kind(
     help="Session role.",
 )
 @click.option(
-    "--reuse-existing",
-    is_flag=True,
-    default=False,
+    "--reuse-existing/--no-reuse-existing",
+    default=None,
     help=(
-        "Request best-effort reuse of a compatible idle session "
-        "(default when neither flag is set)."
+        "Reuse a compatible idle persistent session. Off by default: the default "
+        "ephemeral session is provisioned fresh per task and never shared."
     ),
-)
-@click.option(
-    "--no-reuse-existing",
-    is_flag=True,
-    default=False,
-    help="Always create a new session.",
 )
 @click.option("--cwd", default=None, help="Session working directory override.")
 @click.option(
@@ -651,7 +685,12 @@ def _default_agent_session_kind(
     help="Any built-in or saved custom env preset, selected by id or name.",
 )
 @click.option(
-    "--ephemeral", is_flag=True, default=False, help="Create a task-scoped ephemeral session."
+    "--ephemeral/--persistent",
+    default=None,
+    help=(
+        "Session lifetime. Default: --ephemeral, an isolated task-scoped session "
+        "reclaimed by task cleanup. Pass --persistent for a durable session."
+    ),
 )
 @click.option("--payload-json", default=None, help="Raw JSON object merged into the body.")
 @click.pass_context
@@ -662,8 +701,7 @@ def agent_create(
     session_kind: Optional[str],
     title: str,
     role: str,
-    reuse_existing: bool,
-    no_reuse_existing: bool,
+    reuse_existing: Optional[bool],
     cwd: str,
     solo_mode: bool,
     target: str,
@@ -672,11 +710,11 @@ def agent_create(
     remote_reconnect: bool,
     env_values: tuple,
     env_preset: str,
-    ephemeral: bool,
+    ephemeral: Optional[bool],
     payload_json: str,
 ) -> None:
-    """Ensure a resident workspace agent session."""
-    effective_reuse = resolve_agent_reuse(ephemeral, reuse_existing, no_reuse_existing)
+    """Create an isolated, task-scoped agent session (ephemeral Chat by default)."""
+    effective_ephemeral, effective_reuse = _resolve_agent_session_flags(ephemeral, reuse_existing)
     raw_payload = parse_json_object(payload_json)
     if session_kind is None and "session_kind" not in raw_payload:
         remote_fields = ("remote_profile_id", "remote_cwd", "remote_reconnect")
@@ -711,8 +749,8 @@ def agent_create(
         remote_profile_id=remote_profile_id,
         remote_cwd=remote_cwd,
         remote_reconnect=remote_reconnect,
-        ephemeral=ephemeral,
-        caller_owned_ephemeral=ephemeral if ephemeral else False,
+        ephemeral=effective_ephemeral,
+        caller_owned_ephemeral=effective_ephemeral,
         env_preset=resolved_preset,
     )
     if title is not None:
