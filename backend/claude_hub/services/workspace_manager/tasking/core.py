@@ -41,6 +41,20 @@ class _TaskCoreMixin(_WorkspaceManagerBase):
         if payload.related_task_id and payload.related_task_id not in self.tasks:
             raise KeyError(payload.related_task_id)
         session_kind = payload.session_kind
+        if (
+            "session_kind" not in payload.model_fields_set
+            and not payload.session_id
+            and self.workspaces[workspace_id].target == ExecutionTarget.LOCAL
+            and payload.agent_type
+            in {
+                AgentType.CLAUDE,
+                AgentType.CODEX,
+                AgentType.CURSOR,
+                AgentType.MASO,
+                AgentType.ANTIGRAVITY,
+            }
+        ):
+            session_kind = SessionKind.CHAT
         if payload.session_id:
             session = self.sessions.get(payload.session_id)
             if not session or session.workspace_id != workspace_id:

@@ -412,9 +412,14 @@ class _TaskUpdatesMixin(_WorkspaceManagerBase):
                             and w_sess.ephemeral
                             and w_sess.role
                             in {WorkspaceSessionRole.ORCHESTRATOR, WorkspaceSessionRole.WORKER}
-                            and (
-                                current.recipe != WorkspaceTaskRecipe.STANDARD
-                                or current.worktree_path is not None
+                            and self.workspaces[current.workspace_id].resident_agent_session_id
+                            != w_sess.id
+                            and not any(
+                                other.id != current.id
+                                and other.session_id == w_sess.id
+                                and other.status != WorkspaceTaskStatus.DONE
+                                and other.manual_aborted_at is None
+                                for other in self.tasks.values()
                             )
                         ):
                             worker_incarnation = (w_sess.id, w_sess.tab_id, w_sess.created_at)
@@ -557,6 +562,15 @@ class _TaskUpdatesMixin(_WorkspaceManagerBase):
                             (cur := self.sessions.get(w_id)) is not None
                             and cur.tab_id == w_tab
                             and cur.created_at == w_created
+                            and self.workspaces[current.workspace_id].resident_agent_session_id
+                            != w_id
+                            and not any(
+                                other.id != current.id
+                                and other.session_id == w_id
+                                and other.status != WorkspaceTaskStatus.DONE
+                                and other.manual_aborted_at is None
+                                for other in self.tasks.values()
+                            )
                             and cur.task_id in {None, current.id}
                             and cur.current_task_id in {None, current.id}
                         ),

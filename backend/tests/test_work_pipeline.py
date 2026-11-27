@@ -139,7 +139,7 @@ def test_recipe_schema_defaults_and_legacy_normalization(
     repo.mkdir()
     ws = manager.create_workspace(WorkspaceCreate(name="Schema Repo", path=str(repo)))
 
-    # 1. STANDARD preserves 100% existing defaults
+    # 1. STANDARD defaults to managed Chat for supported local providers
     std_task = manager.create_task(
         ws.id,
         WorkspaceTaskCreate(title="Standard task", prompt="Do standard work"),
@@ -148,7 +148,7 @@ def test_recipe_schema_defaults_and_legacy_normalization(
     assert std_task.auto_worktree is False
     assert std_task.auto_push_remote is False
     assert std_task.task_mode == WorkspaceTaskMode.REVIEWED
-    assert std_task.session_kind == SessionKind.TERMINAL
+    assert std_task.session_kind == SessionKind.CHAT
 
     # 2. SPEC_IMPLEMENT_REVIEW isolates work but requires opt-in for remote push
     spec_task = manager.create_task(
@@ -843,7 +843,7 @@ async def test_fail_closed_auto_worktree_concurrent_start_and_rollback_compensat
     assert started_non_git.worktree_path is None
     assert started_non_git.session_id is not None
     await manager.update_task(task_non_git.id, WorkspaceTaskUpdate(status=WorkspaceTaskStatus.DONE))
-    await manager.delete_session(started_non_git.session_id)
+    assert started_non_git.session_id not in manager.sessions
     deleted_tabs.clear()
 
     # 2. Failed start_task (bad related_task_id) must reject before leaking any ephemeral session

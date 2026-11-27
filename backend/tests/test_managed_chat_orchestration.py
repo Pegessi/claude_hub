@@ -916,16 +916,6 @@ async def test_chat_task_creates_matching_agent_when_only_terminal_exists(
     assert result.session_kind == SessionKind.CHAT
 
 
-def test_queue_rebalancing_cannot_move_chat_task_to_terminal(manager: WorkspaceManager) -> None:
-    chat = manager.sessions["chat-worker"]
-    manager.sessions[chat.id] = chat.model_copy(
-        update={"runtime_status": AgentRuntimeStatus.WORKING}
-    )
-    terminal = chat.model_copy(update={"id": "free-terminal", "session_kind": SessionKind.TERMINAL})
-    manager.sessions[terminal.id] = terminal
-    assert manager._next_reassignable_queued_task(terminal.id, chat.workspace_id) is None
-
-
 def test_task_surface_edits_preserve_provider_and_active_task_contracts(
     manager: WorkspaceManager,
 ) -> None:

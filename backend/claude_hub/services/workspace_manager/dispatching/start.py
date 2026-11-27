@@ -158,80 +158,78 @@ class _TaskStartMixin(_WorkspaceManagerBase):
                         return task
                     self._validate_start_admission_inputs(workspace, task, payload)
 
-                    wanted_wt = workspace_identity.resolve_path(wt_path)
-                    selected_in_wt = False
-                    inherited_env: dict[str, str] = {}
-                    inherited_preset: str | None = None
-                    if payload.target_session_id:
-                        candidate = self.sessions.get(payload.target_session_id)
-                        if candidate is not None and candidate.workspace_id == workspace.id:
-                            inherited_env = dict(candidate.env)
-                            inherited_preset = candidate.env_preset
-                            if (
-                                candidate.role
-                                in {WorkspaceSessionRole.ORCHESTRATOR, WorkspaceSessionRole.WORKER}
-                                and candidate.session_kind == task.session_kind
-                                and workspace_identity.resolve_path(
-                                    candidate.workspace_path or workspace.path
-                                )
-                                == wanted_wt
-                            ):
-                                selected_in_wt = True
-                    elif task.session_id:
-                        candidate = self.sessions.get(task.session_id)
-                        if (
-                            candidate is not None
-                            and candidate.workspace_id == workspace.id
-                            and candidate.role
-                            in {WorkspaceSessionRole.ORCHESTRATOR, WorkspaceSessionRole.WORKER}
-                            and candidate.session_kind == task.session_kind
-                            and workspace_identity.resolve_path(
+                # Only explicit affinity can reuse a session. Worktree tasks also
+                # require that the selected session runs in the task worktree.
+                wanted_wt = (
+                    workspace_identity.resolve_path(wt_path)
+                    if workspace.target == ExecutionTarget.LOCAL and task.auto_worktree
+                    else None
+                )
+                inherited_env: dict[str, str] = {}
+                inherited_preset: str | None = None
+                target = self.sessions.get(payload.target_session_id or "")
+                if target is not None:
+                    inherited_env = dict(target.env)
+                    inherited_preset = target.env_preset
+
+                def compatible(candidate: ManagedSession | None) -> bool:
+                    return bool(
+                        candidate
+                        and candidate.workspace_id == workspace.id
+                        and candidate.session_kind == selected_kind
+                        and self._can_assign_or_queue_to(candidate)
+                        and (
+                            wanted_wt is None
+                            or workspace_identity.resolve_path(
                                 candidate.workspace_path or workspace.path
                             )
                             == wanted_wt
-                        ):
-                            payload = payload.model_copy(update={"target_session_id": candidate.id})
-                            selected_in_wt = True
-
-                    if not selected_in_wt:
-                        worktree_agent = await self.ensure_workspace_agent(
-                            workspace.id,
-                            EnsureWorkspaceAgentRequest(
-                                agent_type=payload.agent_type or task.agent_type,
-                                session_kind=selected_kind,
-                                role=WorkspaceSessionRole.ORCHESTRATOR,
-                                reuse_existing=False,
-                                ephemeral=True,
-                                caller_owned_ephemeral=True,
-                                cwd=wt_path,
-                                env=inherited_env,
-                                env_preset=inherited_preset,
-                            ),
                         )
-                        created_ephemeral_session_id = worktree_agent.id
-                        payload = payload.model_copy(
-                            update={"target_session_id": worktree_agent.id}
-                        )
-
-                self._validate_start_admission_inputs(workspace, self.tasks[task_id], payload)
-
-                if not payload.target_session_id and not any(
-                    agent.session_kind == selected_kind
-                    for agent in self._workspace_agents(workspace.id, include_stopped=True)
-                ):
-                    logger.info(
-                        "No workspace agents found for workspace_id=%s; creating default agent for task id=%s",
-                        workspace.id,
-                        task.id,
                     )
-                    await self.ensure_workspace_agent(
+
+                if not payload.target_session_id:
+                    related = self.tasks.get(payload.related_task_id or task.related_task_id or "")
+                    related_target = (
+                        self.sessions.get(related.session_id or "") if related else None
+                    )
+                    if compatible(related_target):
+                        target = related_target
+                    else:
+                        target = self.sessions.get(task.session_id or "")
+                        if not compatible(target):
+                            target = None
+                        elif related_target is not None:
+                            # Do not let the later selection choose a related
+                            # session that failed the worktree or liveness check.
+                            assert target is not None
+                            payload = payload.model_copy(update={"target_session_id": target.id})
+                elif (
+                    target
+                    and wanted_wt
+                    and workspace_identity.resolve_path(target.workspace_path or workspace.path)
+                    != wanted_wt
+                ):
+                    target = None
+                if target is None:
+                    task_agent = await self.ensure_workspace_agent(
                         workspace.id,
                         EnsureWorkspaceAgentRequest(
                             agent_type=payload.agent_type or task.agent_type,
                             session_kind=selected_kind,
+                            role=WorkspaceSessionRole.ORCHESTRATOR,
+                            target=workspace.target,
                             reuse_existing=False,
+                            ephemeral=True,
+                            caller_owned_ephemeral=True,
+                            cwd=wt_path if wanted_wt else workspace.path,
+                            env=inherited_env,
+                            env_preset=inherited_preset,
                         ),
                     )
+                    created_ephemeral_session_id = task_agent.id
+                    payload = payload.model_copy(update={"target_session_id": task_agent.id})
+
+                self._validate_start_admission_inputs(workspace, self.tasks[task_id], payload)
 
                 # Session preparation awaits external work; a todo edit may have changed
                 # prerequisites or auto_worktree meanwhile. Never overwrite that newer contract.
@@ -356,11 +354,6 @@ class _TaskStartMixin(_WorkspaceManagerBase):
         task: WorkspaceTask,
         payload: StartTaskRequest,
     ) -> tuple[ManagedSession, bool, str]:
-        agents = [
-            agent
-            for agent in self._workspace_agents(workspace.id, include_stopped=True)
-            if agent.session_kind == task.session_kind
-        ]
         # The "Clear context" checkbox is stored on the task at creation
         # (task.clear_context) but a start call may also override it inline
         # (payload.clear_context). Resolve the explicit request once so every
@@ -402,6 +395,7 @@ class _TaskStartMixin(_WorkspaceManagerBase):
                 target = self.sessions.get(related.session_id)
                 if (
                     target
+                    and target.workspace_id == workspace.id
                     and target.session_kind == task.session_kind
                     and self._can_assign_or_queue_to(target)
                 ):
@@ -432,6 +426,7 @@ class _TaskStartMixin(_WorkspaceManagerBase):
             existing = self.sessions.get(task.session_id)
             if (
                 existing
+                and existing.workspace_id == workspace.id
                 and existing.session_kind == task.session_kind
                 and self._can_assign_or_queue_to(existing)
             ):
@@ -441,43 +436,7 @@ class _TaskStartMixin(_WorkspaceManagerBase):
                     "Continuing previous task assignment",
                 )
 
-        free_agents = [agent for agent in agents if self._can_dispatch_to(agent)]
-        if len(free_agents) == 1:
-            target = free_agents[0]
-            should_clear = self._has_prior_task_history(target.id)
-            return (
-                target,
-                requested_clear if requested_clear is not None else should_clear,
-                "Only one workspace agent is available",
-            )
-        if len(free_agents) > 1:
-            target = self._least_queued_agent(free_agents)
-            should_clear = self._has_prior_task_history(target.id)
-            return (
-                target,
-                requested_clear if requested_clear is not None else should_clear,
-                "Selected least queued available workspace agent",
-            )
-
-        queueable_agents = [
-            agent
-            for agent in agents
-            if agent.status != ManagedSessionStatus.STOPPED
-            and (
-                agent.runtime_status == AgentRuntimeStatus.WORKING
-                or self._is_holding_unresolved_review_task(agent)
-            )
-        ]
-        if queueable_agents:
-            target = self._least_queued_agent(queueable_agents)
-            should_clear = self._has_prior_task_history(target.id)
-            return (
-                target,
-                requested_clear if requested_clear is not None else should_clear,
-                "Queued behind existing workspace agent",
-            )
-
-        raise RuntimeError("No idle or working workspace agent is available")
+        raise RuntimeError("No explicitly associated workspace agent is available")
 
     def _can_assign_or_queue_to(self, session: ManagedSession) -> bool:
         if (
@@ -493,28 +452,3 @@ class _TaskStartMixin(_WorkspaceManagerBase):
         if self._is_holding_unresolved_review_task(session):
             return True
         return self._can_dispatch_to(session)
-
-    def _least_queued_agent(self, agents: list[ManagedSession]) -> ManagedSession:
-        def runtime_rank(agent: ManagedSession) -> int:
-            if agent.runtime_status == AgentRuntimeStatus.IDLE:
-                return 0
-            if agent.runtime_status == AgentRuntimeStatus.OFFLINE:
-                return 1
-            return 2
-
-        return sorted(
-            agents,
-            key=lambda agent: (
-                self._queued_count(agent.id),
-                runtime_rank(agent),
-                1 if agent.current_task_id or agent.task_id else 0,
-                agent.created_at,
-            ),
-        )[0]
-
-    def _has_prior_task_history(self, session_id: str) -> bool:
-        return any(
-            task.session_id == session_id
-            and task.status in {WorkspaceTaskStatus.REVIEW, WorkspaceTaskStatus.DONE}
-            for task in self.tasks.values()
-        )

@@ -330,6 +330,32 @@ class _TaskAbortMixin(_TaskFollowupMixin):
                     resolved_workspace_id,
                     live.id,
                 )
+            worker = self.sessions.get(live.session_id or "")
+            if (
+                worker
+                and worker.ephemeral
+                and worker.role in {WorkspaceSessionRole.ORCHESTRATOR, WorkspaceSessionRole.WORKER}
+            ):
+                worker_id, worker_tab, worker_created = worker.id, worker.tab_id, worker.created_at
+                await self._best_effort_delete_session(
+                    worker_id,
+                    before_delete=lambda: (
+                        (cur := self.sessions.get(worker_id)) is not None
+                        and cur.tab_id == worker_tab
+                        and cur.created_at == worker_created
+                        and self.workspaces[live.workspace_id].resident_agent_session_id
+                        != worker_id
+                        and cur.task_id is None
+                        and cur.current_task_id is None
+                        and not any(
+                            other.id != live.id
+                            and other.session_id == worker_id
+                            and other.status != WorkspaceTaskStatus.DONE
+                            and other.manual_aborted_at is None
+                            for other in self.tasks.values()
+                        )
+                    ),
+                )
             for tab_id in ephemeral_tab_ids:
                 try:
                     await ttyd_manager.delete_tab(tab_id)

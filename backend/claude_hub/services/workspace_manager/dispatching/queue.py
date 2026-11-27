@@ -5,8 +5,7 @@ from claude_hub.services.task_transitions import apply_task_update
 from claude_hub.services.workspace_manager._base import _WorkspaceManagerBase
 from claude_hub.services.workspace_manager._constants import *  # noqa: F401,F403
 
-# Only an explicit operator target is a hard affinity; all automatic
-# preferences may yield to another compatible free agent.
+# Compatibility export for the historical aggregate mixin.
 _NON_MIGRATABLE_DISPATCH_REASONS = frozenset({"User selected target agent"})
 
 
@@ -74,23 +73,6 @@ class _DispatchQueueMixin(_WorkspaceManagerBase):
                 self._release_task_session(current)
                 self._save_workspace_state(workspace_id)
                 session = self.sessions[session.id]
-            rebalanced_task = self._next_reassignable_queued_task(session.id, workspace_id)
-            if rebalanced_task:
-                logger.info(
-                    "Reassigning queued workspace task id=%s from session_id=%s to free "
-                    "session_id=%s",
-                    rebalanced_task.id,
-                    rebalanced_task.session_id,
-                    session.id,
-                )
-                self.tasks[rebalanced_task.id] = rebalanced_task.model_copy(
-                    update={
-                        "session_id": session.id,
-                        "clear_context": True,
-                        "dispatch_reason": "Reassigned to newly available workspace agent",
-                        "updated_at": self._runtime_now(),
-                    }
-                )
             next_task = self._next_queued_task(session.id)
             if not next_task:
                 continue
@@ -155,56 +137,6 @@ class _DispatchQueueMixin(_WorkspaceManagerBase):
         if not tasks:
             return None
         return sorted(tasks, key=_sort_time)[0]
-
-    def _next_reassignable_queued_task(
-        self,
-        free_session_id: str,
-        workspace_id: str,
-    ) -> Optional[WorkspaceTask]:
-        free_session = self.sessions.get(free_session_id)
-        if free_session is None:
-            return None
-        candidates: list[WorkspaceTask] = []
-        for task in self.tasks.values():
-            if task.session_kind != free_session.session_kind:
-                continue
-            if not self._workspace_owns_task(task):
-                continue
-            if task.workspace_id != workspace_id:
-                continue
-            if task.status != WorkspaceTaskStatus.QUEUED or task.dispatch_pending:
-                continue
-            if task_dependency_blockers(self.tasks, task):
-                continue
-            if task.session_id == free_session_id:
-                continue
-            # Hard, explicit user pins wait for exactly the agent the operator
-            # chose — never migrate them. Every other queued task (auto
-            # queued-behind, related-task continuity, previous-assignment
-            # continuity, or a prior reassignment) prefers its assigned agent
-            # but may migrate when that agent is stuck. Preference is preserved
-            # below: we only migrate when the assigned agent CANNOT dispatch, so
-            # an available pinned agent still picks the task up itself via
-            # _next_queued_task.
-            if task.dispatch_reason in _NON_MIGRATABLE_DISPATCH_REASONS:
-                continue
-            assigned = self.sessions.get(task.session_id or "")
-            # Migrate to the now-free agent whenever the currently-assigned
-            # agent cannot take the task: genuinely busy WORKING, idle but
-            # holding a non-DONE task parked in REVIEW (review_passed yet
-            # awaiting human acceptance keeps the agent locked indefinitely),
-            # or gone (STOPPED/OFFLINE). Without this, a continuity-pinned task
-            # starves forever behind an agent that is idle on paper but will
-            # never free up until a human resolves its review task, while other
-            # agents sit idle. The migration block sets clear_context=True, so
-            # the fresh agent starts clean rather than inheriting absent
-            # related-task context.
-            if not assigned or self._can_dispatch_to(assigned):
-                continue
-            candidates.append(task)
-        if not candidates:
-            return None
-        return sorted(candidates, key=_sort_time)[0]
 
     async def _recover_queued_task_ownership(self, workspace_id: str) -> None:
         """Re-send the assignment prompt for sessions that claimed a QUEUED
