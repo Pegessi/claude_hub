@@ -7,6 +7,24 @@
 
 ## Released
 
+### feat: streamline task delegation contracts, subagent blind reviews, and agent roles
+
+- Add first-class `goal`, `done_when`, and `out_of_scope` task contract fields
+  across API, CLI (`task create`, `dot delegate`), and task creation/edit UI,
+  automatically synthesizing an approved `GoalPacket` without pausing for a
+  pre-implementation plan approval round unless `pending_review` is explicit.
+- Route local Workspace task implementation reviews through clean, seatless
+  Chat subagents with quota-aware cross-model selection, blind-review evidence
+  rules (`P0`/`P1` blocking only; `P2` non-blocking), Worker false-positive
+  rebuttal guidance, and a two-round automated rework cap guarded in liveness.
+- Default `dot delegate` on local Chat-capable providers to `chat` + `ephemeral`
+  with non-pushing `auto_worktree` on Git workspaces, emit a 4-line contract
+  receipt, and retire mandatory post-task `dot review` bookkeeping prompts.
+- Skip cold-start `bootstrap_prompt` check-in turns on non-resident execution
+  sessions, release reusable seats once tasks park on human acceptance, and
+  collapse deprecated `worker`/`dispatcher`/`reviewer` role selectors into
+  unified workspace execution agents.
+
 ### fix(cursor): retain recovery progress and refresh failed runtimes
 
 - Surface real ACP reconnect progress and original terminal error diagnostics,

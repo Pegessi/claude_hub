@@ -79,7 +79,10 @@ operations and default surface selection are unchanged.
 Use the smallest workflow that can validate the result. Simple tasks run directly;
 complex tasks identify dependencies and use parallel work only where inputs and
 ownership are independent. A role is a responsibility, not a quota of agents.
-The Hub's independent evaluator remains the autonomous review gate.
+The Hub's independent evaluator remains the autonomous review gate: task creation
+and `dot delegate` accept `goal` and `done_when` directly without a separate
+pre-implementation approval round, and local task reviews run through clean
+seatless Chat subagents with a two-round automated rework cap.
 
 Every delegation supplies: task/owner, one concrete objective and acceptance
 criteria, input references and base/head SHA, dependencies, allowed paths and

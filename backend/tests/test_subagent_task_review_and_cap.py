@@ -63,7 +63,7 @@ def test_subagent_review_verdicts_and_launch(delivery_env, monkeypatch):
     monkeypatch.setattr(
         subagent_review,
         "select_cross_reviewer_candidates",
-        lambda *args: [CrossReviewCandidate(provider="codex")],
+        lambda *args, **kwargs: [CrossReviewCandidate(provider="codex")],
     )
     monkeypatch.setattr(manager, "_after_review_passed_effects", AsyncMock())
     trigger = AgentReport(
@@ -141,7 +141,7 @@ def test_subagent_request_rework_cap(delivery_env, monkeypatch):
     monkeypatch.setattr(
         subagent_review,
         "select_cross_reviewer_candidates",
-        lambda *args: [CrossReviewCandidate(provider="codex")],
+        lambda *args, **kwargs: [CrossReviewCandidate(provider="codex")],
     )
     turn = SimpleNamespace(
         status=SubagentTurnStatus.COMPLETED,
@@ -205,7 +205,7 @@ def test_running_subagent_review_keeps_liveness_and_discards_stale_result(
     monkeypatch.setattr(
         subagent_review,
         "select_cross_reviewer_candidates",
-        lambda *args: [CrossReviewCandidate(provider="codex")],
+        lambda *args, **kwargs: [CrossReviewCandidate(provider="codex")],
     )
     trigger = AgentReport(
         id="worker-report",

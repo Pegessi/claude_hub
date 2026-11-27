@@ -2,17 +2,37 @@
 
 import asyncio
 import json
+import os
 import re
 import uuid
 
 from claude_hub.models.subagent import SubagentCreate, SubagentTurnStatus
+from claude_hub.services import maso_discovery
 from claude_hub.services import subagents as subagents_mod
-from claude_hub.services.cross_reviewer import select_cross_reviewer_candidates
+from claude_hub.services.cross_review_settings import read_cross_review_settings
+from claude_hub.services.cross_reviewer import (
+    _ORIGINAL_DISCOVER_MASO_SERVICE,
+    CrossReviewCandidate,
+    read_cached_quota_map,
+    resolve_active_maso_tab_model,
+    select_cross_reviewer_candidates,
+)
+from claude_hub.services.maso_discovery import discover_maso_service
 from claude_hub.services.task_transitions import apply_task_update
 
 from ._constants import *  # noqa: F401,F403
 from ._task_execution import TaskExecutionConflict
 from .prompts.review import BLIND_REVIEW_RULES
+
+_CHAT_SUBAGENT_PROVIDERS = frozenset(
+    {
+        AgentType.CLAUDE,
+        AgentType.CODEX,
+        AgentType.CURSOR,
+        AgentType.MASO,
+        AgentType.ANTIGRAVITY,
+    }
+)
 
 
 class _SubagentTaskReviewMixin:
@@ -137,7 +157,8 @@ class _SubagentTaskReviewMixin:
                 return out.decode(errors="replace")[:30000]
 
             status = await git("status", "--short")
-            diff = await git("diff", "HEAD", "--stat")
+            diff_stat = await git("diff", "HEAD", "--stat")
+            diff_patch = await git("diff", "HEAD")
             guidance = self._review_guidance_block(workspace, trigger_report)
             failures = [
                 r
@@ -147,17 +168,83 @@ class _SubagentTaskReviewMixin:
                 and r.review_cycle < task.review_cycle
             ]
             previous = max(failures, key=lambda r: r.created_at).message if failures else ""
+            contract_goal = task.goal or (
+                task.goal_packet.objective if task.goal_packet else task.title
+            )
+            contract_done_when = task.done_when or (
+                task.goal_packet.acceptance_criteria if task.goal_packet else []
+            )
+            contract_out_of_scope = task.out_of_scope or (
+                task.goal_packet.out_of_scope if task.goal_packet else []
+            )
             prompt = (
                 f"Independently review the implementation in {cwd}. Inspect the actual diff and code.\n"
-                f"Task: {task.title}\n{task.prompt}\nGoal packet: {task.goal_packet}\n"
-                f"{guidance}\nWorkspace lessons: {lessons}\nGit status:\n{status}\nGit diff summary:\n{diff}\n"
+                f"Task: {task.title}\n"
+                f"Goal: {contract_goal}\n"
+                f"Done when: {contract_done_when}\n"
+                f"Out of scope: {contract_out_of_scope}\n"
+                f"Brief:\n{task.prompt}\n"
+                f"Goal packet: {task.goal_packet}\n"
+                f"{guidance}\nWorkspace lessons: {lessons}\n"
+                f"Git status:\n{status}\nGit diff summary:\n{diff_stat}\n"
+                f"Git diff excerpt (inspect files in {cwd} directly if truncated):\n{diff_patch[:20000]}\n"
                 f"Changed files: {trigger_report.changed_files}\nValidation: {trigger_report.validation}\n"
                 f"Previous blocking review: {previous[:8000]}\nWorker response: {trigger_report.message if previous else ''}\n"
                 f'{BLIND_REVIEW_RULES}\nEnd with <task-review>{{"verdict":"review_passed|review_failed|review_needs_input","summary":"...","validation":"...","risks":"...","findings":[{{"severity":"P0|P1|P2","file":"path:line","summary":"...","fix":"..."}}]}}</task-review>'
             )
-            candidates = select_cross_reviewer_candidates(
-                worker.agent_type if worker else task.agent_type, worker.env if worker else {}
+            worker_agent_type = worker.agent_type if worker else task.agent_type
+            worker_env = dict(worker.env or {}) if worker else {}
+            if (
+                worker
+                and worker_agent_type == AgentType.MASO
+                and not worker_env.get("MASO_MODEL")
+                and worker.tab_id
+            ):
+                active_model = resolve_active_maso_tab_model(worker.tab_id)
+                if active_model:
+                    worker_env["MASO_MODEL"] = active_model
+            maso_url: str | None = None
+            maso_model_ids: list[str] = []
+            default_maso_model: str | None = None
+            should_probe_maso = not (
+                os.environ.get("PYTEST_CURRENT_TEST")
+                and os.environ.get("CLAUDE_HUB_ENABLE_CROSS_REVIEW_PROBE_IN_TESTS") != "1"
+                and discover_maso_service is _ORIGINAL_DISCOVER_MASO_SERVICE
+                and maso_discovery.discover_maso_service is _ORIGINAL_DISCOVER_MASO_SERVICE
             )
+            if should_probe_maso:
+                probe = (
+                    discover_maso_service
+                    if discover_maso_service is not _ORIGINAL_DISCOVER_MASO_SERVICE
+                    else maso_discovery.discover_maso_service
+                )
+                try:
+                    discovered_url, discovered_models, discovered_default = await probe(worker_env)
+                    maso_url = discovered_url
+                    maso_model_ids = [m.id for m in discovered_models]
+                    default_maso_model = discovered_default
+                except Exception:
+                    maso_url = None
+            quota_map = await read_cached_quota_map()
+            settings = await asyncio.to_thread(read_cross_review_settings)
+            candidates = list(
+                select_cross_reviewer_candidates(
+                    worker_agent_type,
+                    worker_env,
+                    maso_base_url=maso_url,
+                    maso_models=maso_model_ids,
+                    default_maso_model=default_maso_model,
+                    quota_by_provider=quota_map,
+                    preferred_candidates=settings.preferred_candidates,
+                )
+            )
+            if not candidates and worker_agent_type in _CHAT_SUBAGENT_PROVIDERS:
+                candidates.append(
+                    CrossReviewCandidate(
+                        provider=worker_agent_type.value,
+                        env=dict(worker_env) if worker_env else None,
+                    )
+                )
             errors = []
             service = self._get_live_subagent_service()
             for index, candidate in enumerate(candidates):
@@ -295,7 +382,13 @@ class _SubagentTaskReviewMixin:
                         )
                     self.reports[report.id] = report
                     self.tasks[live.id] = apply_task_update(live, update, cause="review_verdict")
+                    wake_targets: set[tuple[str, str]] = set()
+                    bridge_wake = self._bridge_report_to_agent_event(report, reviewer)
+                    if bridge_wake is not None:
+                        wake_targets.add(bridge_wake)
                     self._save_workspace_state(workspace.id)
+                    if wake_targets:
+                        self._wake_report_intake_runs(wake_targets)
                 await self._handle_review_report(
                     self.tasks[live.id], reviewer, report, autonomous_next_phase_override=phase
                 )
