@@ -73,37 +73,43 @@ class _SessionLifecycleMixin(_WorkspaceManagerBase):
 
         from claude_hub.services.agent_stream import fence_session_stream
 
-        provider_fenced = await fence_session_stream(session.id)
-        # Archived owners cannot restart; their committed fence remains valid
-        # across backend restarts until restore clears it. Delivery validation
-        # below still rejects uncertain receipts even with a verified fence.
-        provider_fenced = provider_fenced or (session.archived and session.archive_provider_fenced)
-        if session.session_kind == SessionKind.CHAT:
-            managed_chat.validate_delivery_state_discard(
-                session.workspace_id,
-                session.id,
-                acknowledged_call_ids=set(session.delivered_call_ids),
-                provider_fenced=provider_fenced,
-            )
-
-        # Resource retirement is retryable while the durable session still
-        # exists. Evidence remains untouched until ownership removal commits.
-        await self._retire_session_resources(session)
-
-        snapshot = self._snapshot_report_intake_workspace(session.workspace_id)
-        self.sessions.pop(session.id, None)
-        self._clear_retired_session_pointers(session)
+        self._retiring_session_ids.add(session.id)
         try:
-            self._save_state()
-        except BaseException:
-            self._restore_report_intake_workspace(session.workspace_id, snapshot)
-            raise
+            provider_fenced = await fence_session_stream(session.id)
+            # Archived owners cannot restart; their committed fence remains valid
+            # across backend restarts until restore clears it. Delivery validation
+            # below still rejects uncertain receipts even with a verified fence.
+            provider_fenced = provider_fenced or (
+                session.archived and session.archive_provider_fenced
+            )
+            if session.session_kind == SessionKind.CHAT:
+                managed_chat.validate_delivery_state_discard(
+                    session.workspace_id,
+                    session.id,
+                    acknowledged_call_ids=set(session.delivered_call_ids),
+                    provider_fenced=provider_fenced,
+                )
 
-        cleanup = asyncio.create_task(
-            self._cleanup_deleted_session(session, provider_fenced=provider_fenced),
-            name=f"workspace-session-delete-{session.id}",
-        )
-        await self._await_lifecycle_cleanup(cleanup)
+            # Resource retirement is retryable while the durable session still
+            # exists. Evidence remains untouched until ownership removal commits.
+            await self._retire_session_resources(session)
+
+            snapshot = self._snapshot_report_intake_workspace(session.workspace_id)
+            self.sessions.pop(session.id, None)
+            self._clear_retired_session_pointers(session)
+            try:
+                self._save_state()
+            except BaseException:
+                self._restore_report_intake_workspace(session.workspace_id, snapshot)
+                raise
+
+            cleanup = asyncio.create_task(
+                self._cleanup_deleted_session(session, provider_fenced=provider_fenced),
+                name=f"workspace-session-delete-{session.id}",
+            )
+            await self._await_lifecycle_cleanup(cleanup)
+        finally:
+            self._retiring_session_ids.discard(session.id)
 
     async def _archive_session_locked(self, session: ManagedSession) -> None:
         """Release runtime under workspace/pump locks, retaining all evidence."""

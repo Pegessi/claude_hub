@@ -102,6 +102,7 @@ class _StateMixin(_WorkspaceManagerBase):
         # concurrent pump cycles cannot both send the same pending call_id
         # to tmux (which would duplicate the model turn).
         self._pump_locks: dict[str, asyncio.Lock] = {}
+        self._retiring_session_ids: set[str] = set()
         # Per-workspace mutation lock shared by report intake and TaskMailbox
         # writes. A report may snapshot then restore the whole workspace; a
         # concurrent mailbox persist in that window would be durable until

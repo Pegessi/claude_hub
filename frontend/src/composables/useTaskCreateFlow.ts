@@ -111,6 +111,14 @@ export function useTaskCreateFlow() {
     }
   }, { flush: 'sync' })
 
+  watch(() => taskForm.related_task_id, (relatedId) => {
+    if (!relatedId || isRemoteWorkspace.value) return
+    const related = tasks.value.find(item => item.id === relatedId)
+    if (related?.session_kind) {
+      taskForm.session_kind = related.session_kind
+    }
+  }, { flush: 'sync' })
+
   function setSessionKind(kind: SessionKind) {
     if (isRemoteWorkspace.value && kind === 'chat') return
     taskForm.session_kind = kind

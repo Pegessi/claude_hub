@@ -50,12 +50,63 @@ async def test_independent_sessions_and_explicit_affinity(workflow):
 def test_default_surfaces(workflow):
     manager = workflow.manager
     assert create(workflow).session_kind == SessionKind.CHAT
-    assert create(workflow, session_kind=SessionKind.TERMINAL).session_kind == SessionKind.TERMINAL
+    term_task = create(workflow, session_kind=SessionKind.TERMINAL)
+    assert term_task.session_kind == SessionKind.TERMINAL
+    # Omitted session_kind on a related task must inherit the related task's surface
+    # so Terminal context continuity is preserved.
+    related_term = create(workflow, related_task_id=term_task.id)
+    assert related_term.session_kind == SessionKind.TERMINAL
     workspace = manager.workspaces[workflow.workspace_id]
     manager.workspaces[workspace.id] = workspace.model_copy(
         update={"target": ExecutionTarget.REMOTE}
     )
     assert create(workflow).session_kind == SessionKind.TERMINAL
+
+
+@pytest.mark.asyncio
+async def test_retiring_session_race_provisions_fresh_ephemeral_session(workflow, monkeypatch):
+    import asyncio
+
+    manager = workflow.manager
+    first = await manager.start_task(create(workflow).id)
+    retiring_id = first.session_id
+    assert retiring_id is not None
+    retiring_tab_id = manager.sessions[retiring_id].tab_id
+    workflow.native.finish(retiring_id)
+    manager.tasks[first.id] = first.model_copy(
+        update={"status": WorkspaceTaskStatus.REVIEW, "review_skipped_at": manager._runtime_now()}
+    )
+
+    entered_retire = asyncio.Event()
+    release_retire = asyncio.Event()
+    original_retire = manager._retire_session_resources
+
+    async def slow_retire(session):
+        if session.id == retiring_id:
+            entered_retire.set()
+            await release_retire.wait()
+        await original_retire(session)
+
+    monkeypatch.setattr(manager, "_retire_session_resources", slow_retire)
+
+    done_coro = asyncio.create_task(
+        manager.update_task(first.id, WorkspaceTaskUpdate(status=WorkspaceTaskStatus.DONE))
+    )
+    await entered_retire.wait()
+    assert retiring_id in manager._retiring_session_ids
+
+    followup = create(workflow, related_task_id=first.id)
+    start_coro = asyncio.create_task(manager.start_task(followup.id))
+    await asyncio.sleep(0.02)
+    release_retire.set()
+    await done_coro
+    started_followup = await start_coro
+
+    assert started_followup.session_id is not None
+    assert started_followup.session_id in manager.sessions
+    assert manager.sessions[started_followup.session_id].tab_id != retiring_tab_id
+    assert started_followup.dispatch_reason == "Dedicated task session"
+    assert started_followup.status == WorkspaceTaskStatus.WORKING
 
 
 @pytest.mark.asyncio

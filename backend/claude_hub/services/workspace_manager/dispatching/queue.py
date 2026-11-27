@@ -79,6 +79,8 @@ class _DispatchQueueMixin(_WorkspaceManagerBase):
             await self._dispatch_task_to_session(next_task, session)
 
     def _can_dispatch_to(self, session: ManagedSession) -> bool:
+        if session.id in self._retiring_session_ids:
+            return False
         if (
             session.archived
             or session.role not in {WorkspaceSessionRole.ORCHESTRATOR, WorkspaceSessionRole.WORKER}

@@ -231,101 +231,117 @@ class _TaskStartMixin(_WorkspaceManagerBase):
 
                 self._validate_start_admission_inputs(workspace, self.tasks[task_id], payload)
 
-                # Session preparation awaits external work; a todo edit may have changed
-                # prerequisites or auto_worktree meanwhile. Never overwrite that newer contract.
-                task = self.tasks[task_id]
-                if task.status in (WorkspaceTaskStatus.QUEUED, WorkspaceTaskStatus.WORKING):
-                    return task
-                self._validate_start_admission_inputs(workspace, task, payload)
+                async with self.workspace_mutation_lock(workspace.id):
+                    # Session preparation awaits external work; a todo edit or concurrent
+                    # session retirement may have landed meanwhile. Commit under the
+                    # workspace mutation lock so delete_session cannot retire the chosen
+                    # session after reference checks pass.
+                    task = self.tasks[task_id]
+                    if task.status in (WorkspaceTaskStatus.QUEUED, WorkspaceTaskStatus.WORKING):
+                        return task
+                    self._validate_start_admission_inputs(workspace, task, payload)
 
-                base_update: dict[str, Any] = {
-                    "status": WorkspaceTaskStatus.QUEUED,
-                    "queued_at": task.queued_at or self._runtime_now(),
-                    "updated_at": self._runtime_now(),
-                    "dispatch_pending": False,
-                    "manual_aborted_at": None,
-                    "manual_abort_reason": None,
-                    "dispatch_attempt": task.dispatch_attempt + 1,
-                }
-                if task.task_mode == WorkspaceTaskMode.AUTONOMOUS:
-                    run = task.autonomous_run or self._default_autonomous_run(
-                        task.id,
-                        task.autonomy_policy.max_iterations if task.autonomy_policy else 3,
-                    )
-                    phase = AutonomousRunPhase.DISPATCHING
-                    base_update["autonomous_run"] = run.model_copy(
-                        update={
-                            "phase": phase,
-                            "status_summary": self._autonomous_phase_label(phase),
-                            "next_action": self._autonomous_next_action(phase),
-                        }
-                    )
-                if payload.agent_type:
-                    base_update["agent_type"] = payload.agent_type
-                if payload.related_task_id:
-                    if payload.related_task_id not in self.tasks:
-                        raise KeyError(payload.related_task_id)
-                    base_update["related_task_id"] = payload.related_task_id
-
-                staged_task = apply_task_update(task, base_update, cause="start")
-                decision = await self._choose_dispatch_target(workspace, staged_task, payload)
-                target, clear_context, reason = decision
-                if target.id == created_ephemeral_session_id:
-                    reason = "Dedicated task session"
-
-                # Re-read live task after _choose_dispatch_target await and enforce
-                # the auto_worktree isolation invariant before committing!
-                latest_task = self.tasks[task_id]
-                if latest_task.status in (
-                    WorkspaceTaskStatus.QUEUED,
-                    WorkspaceTaskStatus.WORKING,
-                ):
-                    return latest_task
-                self._validate_start_admission_inputs(workspace, latest_task, payload)
-                if workspace.target == ExecutionTarget.LOCAL and latest_task.auto_worktree:
-                    wt_path_str = latest_task.worktree_path
-                    wt_ok = (
-                        wt_path_str is not None
-                        and bool(wt_path_str)
-                        and workspace_identity.resolve_path(wt_path_str)
-                        != workspace_identity.resolve_path(workspace.path)
-                        and workspace_identity.resolve_path(target.workspace_path or "")
-                        == workspace_identity.resolve_path(wt_path_str)
-                    )
-                    if not wt_ok:
-                        continue
-
-                staged_task = apply_task_update(latest_task, base_update, cause="start")
-                autonomous_run = staged_task.autonomous_run
-                if (
-                    staged_task.task_mode == WorkspaceTaskMode.AUTONOMOUS
-                    and autonomous_run is not None
-                ):
-                    phase = AutonomousRunPhase.WORKING
-                    autonomous_run = autonomous_run.model_copy(
-                        update={
-                            "phase": phase,
-                            "status_summary": self._autonomous_phase_label(phase),
-                            "active_session_ids": list(
-                                dict.fromkeys([*autonomous_run.active_session_ids, target.id])
-                            ),
-                            "next_action": self._autonomous_next_action(phase),
-                        }
-                    )
-                committed_task = staged_task.model_copy(
-                    update={
-                        "session_id": target.id,
-                        "clear_context": clear_context,
-                        "dispatch_reason": reason,
-                        "dispatch_pending": False,
-                        "autonomous_run": autonomous_run,
+                    base_update: dict[str, Any] = {
+                        "status": WorkspaceTaskStatus.QUEUED,
+                        "queued_at": task.queued_at or self._runtime_now(),
                         "updated_at": self._runtime_now(),
+                        "dispatch_pending": False,
+                        "manual_aborted_at": None,
+                        "manual_abort_reason": None,
+                        "dispatch_attempt": task.dispatch_attempt + 1,
                     }
-                )
-                self.tasks[committed_task.id] = committed_task
-                self._save_state()
-                task = committed_task
-                break
+                    if task.task_mode == WorkspaceTaskMode.AUTONOMOUS:
+                        run = task.autonomous_run or self._default_autonomous_run(
+                            task.id,
+                            task.autonomy_policy.max_iterations if task.autonomy_policy else 3,
+                        )
+                        phase = AutonomousRunPhase.DISPATCHING
+                        base_update["autonomous_run"] = run.model_copy(
+                            update={
+                                "phase": phase,
+                                "status_summary": self._autonomous_phase_label(phase),
+                                "next_action": self._autonomous_next_action(phase),
+                            }
+                        )
+                    if payload.agent_type:
+                        base_update["agent_type"] = payload.agent_type
+                    if payload.related_task_id:
+                        if payload.related_task_id not in self.tasks:
+                            raise KeyError(payload.related_task_id)
+                        base_update["related_task_id"] = payload.related_task_id
+
+                    staged_task = apply_task_update(task, base_update, cause="start")
+                    try:
+                        decision = await self._choose_dispatch_target(
+                            workspace, staged_task, payload
+                        )
+                    except (KeyError, RuntimeError):
+                        if (
+                            initial_payload.target_session_id
+                            or created_ephemeral_session_id is not None
+                        ):
+                            raise
+                        # Implicitly associated session (related_task_id / prior
+                        # task.session_id) retired before commit; retry and
+                        # provision a fresh task-owned ephemeral session.
+                        continue
+                    target, clear_context, reason = decision
+                    if target.id == created_ephemeral_session_id:
+                        reason = "Dedicated task session"
+
+                    # Re-read live task after _choose_dispatch_target await and enforce
+                    # the auto_worktree isolation invariant before committing!
+                    latest_task = self.tasks[task_id]
+                    if latest_task.status in (
+                        WorkspaceTaskStatus.QUEUED,
+                        WorkspaceTaskStatus.WORKING,
+                    ):
+                        return latest_task
+                    self._validate_start_admission_inputs(workspace, latest_task, payload)
+                    if workspace.target == ExecutionTarget.LOCAL and latest_task.auto_worktree:
+                        wt_path_str = latest_task.worktree_path
+                        wt_ok = (
+                            wt_path_str is not None
+                            and bool(wt_path_str)
+                            and workspace_identity.resolve_path(wt_path_str)
+                            != workspace_identity.resolve_path(workspace.path)
+                            and workspace_identity.resolve_path(target.workspace_path or "")
+                            == workspace_identity.resolve_path(wt_path_str)
+                        )
+                        if not wt_ok:
+                            continue
+
+                    staged_task = apply_task_update(latest_task, base_update, cause="start")
+                    autonomous_run = staged_task.autonomous_run
+                    if (
+                        staged_task.task_mode == WorkspaceTaskMode.AUTONOMOUS
+                        and autonomous_run is not None
+                    ):
+                        phase = AutonomousRunPhase.WORKING
+                        autonomous_run = autonomous_run.model_copy(
+                            update={
+                                "phase": phase,
+                                "status_summary": self._autonomous_phase_label(phase),
+                                "active_session_ids": list(
+                                    dict.fromkeys([*autonomous_run.active_session_ids, target.id])
+                                ),
+                                "next_action": self._autonomous_next_action(phase),
+                            }
+                        )
+                    committed_task = staged_task.model_copy(
+                        update={
+                            "session_id": target.id,
+                            "clear_context": clear_context,
+                            "dispatch_reason": reason,
+                            "dispatch_pending": False,
+                            "autonomous_run": autonomous_run,
+                            "updated_at": self._runtime_now(),
+                        }
+                    )
+                    self.tasks[committed_task.id] = committed_task
+                    self._save_state()
+                    task = committed_task
+                    break
             finally:
                 if created_ephemeral_session_id is not None:
                     live_after = self.tasks.get(task_id)
@@ -441,6 +457,8 @@ class _TaskStartMixin(_WorkspaceManagerBase):
         raise RuntimeError("No explicitly associated workspace agent is available")
 
     def _can_assign_or_queue_to(self, session: ManagedSession) -> bool:
+        if session.id in self._retiring_session_ids:
+            return False
         if (
             session.archived
             or session.role not in {WorkspaceSessionRole.ORCHESTRATOR, WorkspaceSessionRole.WORKER}
