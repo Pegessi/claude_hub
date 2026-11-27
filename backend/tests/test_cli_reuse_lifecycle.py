@@ -77,22 +77,14 @@ LIFECYCLE_HELP_MARKERS = (
     "task cleanup",
     "--cwd .",
     "--env-preset NAME_OR_ID",
-    "avoid extra agents",
-    "built-in or saved custom env preset",
-    "Never delete reused/shared agents",
-)
-
-AGENT_HELP_MARKERS = (
-    "workspace ensure",
-    "task cleanup",
-    "--cwd .",
-    "--env-preset NAME_OR_ID",
     "built-in or saved custom env preset",
     "ephemeral Chat session",
     "--persistent",
     "--reuse-existing",
     "Never delete sessions you do not own",
 )
+
+AGENT_HELP_MARKERS = LIFECYCLE_HELP_MARKERS
 
 
 def _normalize_help_text(text: str) -> str:
@@ -162,7 +154,7 @@ def test_agent_entry_docs_feature_worktree_cwd_and_generic_preset_guidance() -> 
         assert "--cwd ." in text
         assert "--env-preset NAME_OR_ID" in text
         assert "any built-in preset or saved custom preset" in text
-        assert "not a concurrency/idempotency boundary" in text
+        assert "isolated, task-scoped ephemeral Chat sessions" in text
         assert "--agent-type claude" in text
         assert "feature worktree" in text.lower()
         assert "Hub Workspace is shared" in text or "share the same" in text

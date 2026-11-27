@@ -77,19 +77,21 @@ acceptance evidence. Read the narrowest relevant source; expand only when needed
 Keep source separate from execution responsibility, and transfer responsibility explicitly.
 
 Main and linked Git worktrees share the same Hub Workspace (canonical Git
-common-dir). Agent execution cwd is separate. Run `workspace ensure --path …`,
-then `agent status WORKSPACE_ID` before creating an agent. Best-effort reuse is
-not a concurrency/idempotency boundary. From a feature worktree use:
+common-dir). Agent execution cwd is separate. Workspace tasks and `agent create`
+default to isolated, task-scoped ephemeral Chat sessions for local Chat-capable
+agents (never shared across tasks or queued behind busy agents) and reclaim owned
+ephemeral sessions automatically when done. Prefer `claude-hub task create` /
+`task start` or `claude-hub dot delegate`; if creating an explicit session from a
+feature worktree:
 
 ```bash
 claude-hub agent create WORKSPACE_ID --agent-type claude --cwd . --env-preset NAME_OR_ID
 ```
 
 `--env-preset` accepts any built-in preset or saved custom preset by name or id.
-Use `--no-reuse-existing` only for deliberate parallelism and `--ephemeral` only
-for task-owned sessions. For a Workspace-managed task with an owned ephemeral
-session, `claude-hub task cleanup TASK_ID` performs cleanup. Never delete
-shared/persistent agents or apply managed cleanup to initiator-owned records.
+Pass `--persistent` (and `--reuse-existing` when intentional) only when a durable
+session is explicitly required. Never delete sessions you do not own or apply
+managed cleanup to initiator-owned records.
 
 Simple work runs directly. Complex work maps dependencies before delegation;
 there is no minimum number of subagents. Every delegate needs inputs, scope,

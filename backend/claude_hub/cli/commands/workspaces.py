@@ -36,27 +36,6 @@ SESSION_STATUS_COLUMNS = [
 ]
 DOCUMENT_COLUMNS = ["source", "label", "path", "task_id", "updated_at"]
 
-# Agent-group guidance: agent create is seatless by default — one isolated
-# ephemeral Chat session per task instead of a shared resident seat pool.
-AGENT_SESSION_LIFECYCLE_RECIPE = (
-    "Lifecycle: one Claude Hub Workspace per Git repo (git common-dir);\n"
-    "Git feature worktree != Hub Workspace — run workspace ensure from any checkout.\n"
-    "Hub Workspace is shared by repo; agent execution cwd is separate.\n"
-    "From a feature worktree pass --cwd . so the agent runs in that checkout.\n"
-    "agent create defaults to an isolated, task-scoped ephemeral Chat session for\n"
-    "local Chat-capable agents: one seat per task, never shared or queued, reclaimed\n"
-    "by task cleanup. Prefer `task create` / `dot delegate`, which provision and\n"
-    "retire that session automatically; no shared resident agent pool is needed.\n"
-    "Pass --persistent for a durable session, and --reuse-existing only when you\n"
-    "deliberately want a compatible idle persistent session (remote SSH stays terminal).\n"
-    "Any built-in or saved custom env preset works by name/id; day1 is only an example.\n"
-    "Local Claude (feature worktree): claude-hub agent create WORKSPACE "
-    "--agent-type claude --cwd . --env-preset NAME_OR_ID\n"
-    "An explicit --session-kind always wins; the server surface default stays terminal.\n"
-    "\n"
-    "Never delete sessions you do not own."
-)
-
 
 def _resolve_agent_session_flags(
     ephemeral: Optional[bool], reuse_existing: Optional[bool]
@@ -530,11 +509,10 @@ def workspace_attachment_get(
 
 
 @click.group(
-    help=(
+    help=lifecycle_group_help(
         "Manage workspace agent sessions.\n\n"
         "For one-call help from another provider (no Task, board or review), use\n"
-        "`agent run --provider X --prompt-file -`; it prints the final answer.\n\n"
-        + AGENT_SESSION_LIFECYCLE_RECIPE
+        "`agent run --provider X --prompt-file -`; it prints the final answer."
     )
 )
 def agent() -> None:

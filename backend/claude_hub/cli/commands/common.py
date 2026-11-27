@@ -15,17 +15,18 @@ LIFECYCLE_RECIPE = (
     "Git feature worktree != Hub Workspace — run workspace ensure from any checkout.\n"
     "Hub Workspace is shared by repo; agent execution cwd is separate.\n"
     "From a feature worktree pass --cwd . so the agent runs in that checkout.\n"
-    "Default agent create best-effort reuses a compatible idle orchestrator.\n"
-    "Check agent status first; avoid extra agents unless parallel work needs them.\n"
-    "Overlapping creates may each create one; use --no-reuse-existing deliberately.\n"
-    "Pass --ephemeral for task-scoped sessions you own, then task cleanup when done.\n"
+    "Workspace tasks and `agent create` default to an isolated, task-scoped ephemeral\n"
+    "Chat session for local Chat-capable agents: one session per task, never shared or\n"
+    "queued behind busy agents, reclaimed by task cleanup. Prefer `task create` or\n"
+    "`dot delegate`, which provision and retire that session automatically.\n"
+    "Pass --persistent for a durable session, and --reuse-existing only when you\n"
+    "deliberately want a compatible idle persistent session (remote SSH stays terminal).\n"
     "Any built-in or saved custom env preset works by name/id; day1 is only an example.\n"
     "Local Claude (feature worktree): claude-hub agent create WORKSPACE "
     "--agent-type claude --cwd . --env-preset NAME_OR_ID\n"
-    "Inside a Hub agent ($CLAUDE_HUB_TAB_ID) a local, Chat-capable agent create defaults to\n"
-    "--session-kind chat (no tmux/ttyd); pass --session-kind terminal to override.\n"
+    "An explicit --session-kind always wins.\n"
     "\n"
-    "Never delete reused/shared agents."
+    "Never delete sessions you do not own."
 )
 
 
@@ -42,19 +43,6 @@ def resolve_cli_local_path(path: str) -> str:
 def redact_session_env_payload(data: Any) -> Any:
     """Redact env values from an agent session dict before CLI output."""
     return redact_session_json_payload(data)
-
-
-def resolve_agent_reuse(ephemeral: bool, reuse_existing: bool, no_reuse_existing: bool) -> bool:
-    """Resolve tri-state agent reuse flags."""
-    if reuse_existing and no_reuse_existing:
-        raise click.ClickException("Cannot pass both --reuse-existing and --no-reuse-existing.")
-    if ephemeral and reuse_existing:
-        raise click.ClickException("Cannot combine --ephemeral with --reuse-existing.")
-    if no_reuse_existing:
-        return False
-    if ephemeral:
-        return False
-    return True
 
 
 def parse_json_object(value: Optional[str], option_name: str = "--payload-json") -> Dict[str, Any]:
