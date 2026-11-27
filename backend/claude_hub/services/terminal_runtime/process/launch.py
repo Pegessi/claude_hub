@@ -245,7 +245,7 @@ class ProcessLaunchMixin(ProcessHost):
 
             asyncio.create_task(self._log_stderr())
 
-            await asyncio.sleep(1)
+            await self._await_ttyd_ready()
 
             if self.process.returncode is not None:
                 stderr = await self.process.stderr.read() if self.process.stderr else b""
@@ -258,6 +258,38 @@ class ProcessLaunchMixin(ProcessHost):
             logger.error(f"Failed to start ttyd for tab {self.tab_id}: {e}")
             self.is_active = False
             raise
+
+    async def _await_ttyd_ready(self, timeout_s: float = 1.0) -> None:
+        """Return as soon as ttyd binds its loopback port or exits early."""
+        proc = self.process
+        if proc is None:
+            return
+        if not isinstance(proc, asyncio.subprocess.Process):
+            await asyncio.sleep(timeout_s)
+            return
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout_s
+        while True:
+            if proc.returncode is not None:
+                return
+            try:
+                _, writer = await asyncio.wait_for(
+                    asyncio.open_connection("127.0.0.1", self.port),
+                    timeout=0.05,
+                )
+            except (OSError, asyncio.TimeoutError):
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    return
+                await asyncio.sleep(min(0.02, remaining))
+            else:
+                writer.close()
+                try:
+                    await writer.wait_closed()
+                except OSError:
+                    pass
+                await asyncio.sleep(0)
+                return
 
     def _build_ttyd_command(self, session_exists: bool) -> list[str]:
         # tmux new-session -A: attach if exists, create if not.

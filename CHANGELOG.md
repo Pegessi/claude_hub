@@ -7,6 +7,12 @@
 
 ## Released
 
+### fix(chat): speed up Chat session switches and hot model updates
+
+- Keep live `/stream/live` and `/stream/wait` subscriptions open when updating hot model or reasoning-effort environment keys (`switch-env`), apply optimistic model selection updates with atomic rollback instead of blocking on a full `/api/tabs` reload, and suppress zero-delay `Updating conversation…` banner flashes during sub-250ms stream reconciliations while preserving immediate `Stop turn` availability.
+- Replace the hardcoded 1s `ttyd` startup sleep with fast localhost port readiness probing, coalesce concurrent in-flight `/stream/capabilities` preparations, eliminate duplicate capability preparation on pending `/stream/live` streams, cache Codex discovered model/mode catalogs across sessions with bounded cold-start waits when local cache is warm, and refresh native Cursor/Antigravity model catalogs in the background before TTL expiry.
+- Reuse initialized SQLite connection state without re-acquiring the global schema lock or repeating file `chmod`/schema PRAGMAs on every read, batch `list_tabs` unread turn checks into one grouped query, and pre-filter hidden shell events with batched turn detail counts in paginated conversation reads.
+
 ### fix(cursor): retain recovery progress and refresh failed runtimes
 
 - Surface real ACP reconnect progress and original terminal error diagnostics,

@@ -8,7 +8,12 @@ const source = await readFile(new URL('../src/utils/agentStreamCapabilitiesCache
 const { outputText } = ts.transpileModule(source, {
   compilerOptions: { module: ts.ModuleKind.ES2022, target: ts.ScriptTarget.ES2020 },
 })
-const { createAgentStreamCapabilitiesCache, streamCapabilityConfiguration, CAPABILITIES_CACHE_TTL_MS } = await import(
+const {
+  createAgentStreamCapabilitiesCache,
+  streamCapabilityConfiguration,
+  streamSourceIdentityConfiguration,
+  CAPABILITIES_CACHE_TTL_MS,
+} = await import(
   `data:text/javascript;base64,${Buffer.from(outputText).toString('base64')}`,
 )
 const caps = { structured: true, current_model: 'model-a' }
@@ -67,4 +72,31 @@ test('configuration signatures ignore presentation changes but include provider,
   ]) {
     assert.notEqual(signature, streamCapabilityConfiguration({ ...tab, ...changed }))
   }
+})
+
+test('source identity ignores hot model/effort env updates while capability signature tracks them', () => {
+  const baseTab = {
+    id: 'a', created_at: '2026-01-01T00:00:00Z', agent_type: 'codex',
+    env: { CODEX_HOME: '/custom/codex', CODEX_MODEL: 'gpt-5.4', CODEX_REASONING_EFFORT: 'medium' },
+    agent_session_id: 'native-a', remote_reconnect: true,
+  }
+  const baseIdentity = streamSourceIdentityConfiguration(baseTab)
+  const hotSwitched = {
+    ...baseTab,
+    env: {
+      CODEX_HOME: '/custom/codex',
+      CODEX_MODEL: 'gpt-5.5',
+      CODEX_REASONING_EFFORT: 'high',
+      CURSOR_MODEL: 'gpt-5.2',
+      MASO_MODEL: 'seed-high',
+      ANTHROPIC_MODEL: 'claude-opus-4-8',
+      ANTIGRAVITY_MODEL: 'gemini-3.8-flash-high',
+    },
+  }
+  assert.equal(streamSourceIdentityConfiguration(hotSwitched), baseIdentity)
+  assert.notEqual(streamCapabilityConfiguration(hotSwitched), streamCapabilityConfiguration(baseTab))
+  assert.notEqual(
+    streamSourceIdentityConfiguration({ ...baseTab, env: { ...baseTab.env, CODEX_HOME: '/other/codex' } }),
+    baseIdentity,
+  )
 })

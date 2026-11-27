@@ -140,7 +140,7 @@ import AttachmentPreviewDialog from '@/components/AttachmentPreviewDialog.vue'
 import { provideAttachmentPreview } from '@/composables/useAttachmentPreview'
 import { computed, nextTick, onActivated, onDeactivated, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useAgentStream } from '@/composables/useAgentStream'
-import { streamCapabilityConfiguration } from '@/utils/agentStreamCapabilitiesCache'
+import { streamCapabilityConfiguration, streamSourceIdentityConfiguration } from '@/utils/agentStreamCapabilitiesCache'
 import { useTerminalStore } from '@/stores/terminalStore'
 import { useAppStore } from '@/stores/appStore'
 import { useFeishuBotPoolStore } from '@/stores/feishuBotPoolStore'
@@ -184,6 +184,7 @@ const runtimeSample = computed(() =>
 )// TerminalPane owns the pane's single sub-agent poller and shows it in the pane
 // chrome; the Chat body only contributes inline per-turn links.
 const capabilityConfiguration = computed(() => streamCapabilityConfiguration(currentTab.value))
+const streamIdentityConfiguration = computed(() => streamSourceIdentityConfiguration(currentTab.value))
 const {
   events,
   historyDetails,
@@ -327,6 +328,7 @@ const timeline = useChatTimeline({
   get isEditingTurn() { return actions.isEditingTurn },
   get optimisticCancelledTurnId() { return delivery.optimisticCancelledTurnId },
   get pendingTurns() { return delivery.pendingTurns },
+  get stopArmed() { return delivery.stopArmed },
   get props() { return props },
 })
 const editAttachmentError = ref<string | null>(null)
@@ -479,9 +481,24 @@ settings.registerMenuWatchers()
 composer.registerWatchers()
 queue.registerReconciliationWatcher()
 delivery.registerGoalRecoveryWatcher()
-watch(capabilityConfiguration, () => {
-  if (isPaneActivated.value) startStream()
-})
+watch(
+  [streamIdentityConfiguration, capabilityConfiguration],
+  ([nextIdentity, nextCapability], [prevIdentity, prevCapability]) => {
+    if (!isPaneActivated.value) return
+    if (nextIdentity !== prevIdentity) {
+      startStream()
+      return
+    }
+    if (
+      nextCapability !== prevCapability
+      && connectionState.value === 'live'
+      && !settings.isUpdatingModel.value
+      && !settings.isUpdatingReasoningEffort.value
+    ) {
+      void refreshCapabilities().catch(() => {})
+    }
+  },
+)
 queue.registerAutoFlushWatcher()
 delivery.registerTerminalWatcher()
 timeline.registerWatchers()

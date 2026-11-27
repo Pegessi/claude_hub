@@ -437,6 +437,121 @@ def read_stream_summary_sync(
     return summary if legacy_excerpt is not None else None
 
 
+_TURN_COMPLETED_CACHE: Dict[Tuple[str, str], Tuple[int, int, Optional[str]]] = {}
+_TURN_COMPLETED_CACHE_MAX = 512
+
+
+def read_latest_turn_completed_batch_sync(
+    paths_by_key: Dict[str, Path],
+) -> Tuple[Dict[str, Optional[str]], List[str]]:
+    """Batch-read newest ``turn_completed`` timestamps in one SQLite snapshot per DB.
+
+    Returns ``(resolved_by_key, legacy_unimported_keys)``. Unimported legacy JSONL
+    files are returned in ``legacy_unimported_keys`` so the async caller can run
+    the standard one-time import path for those rare entries.
+    """
+    resolved: Dict[str, Optional[str]] = {}
+    legacy_unimported: List[str] = []
+    if not paths_by_key:
+        return resolved, legacy_unimported
+
+    grouped: Dict[Path, List[Tuple[str, Path, str]]] = {}
+    parent_locations: Dict[Path, Tuple[Path, str]] = {}
+    for item_key, path in paths_by_key.items():
+        parent = path.parent
+        cached_parent = parent_locations.get(parent)
+        if cached_parent is None:
+            db_file, logical_name = storage_location(path)
+            suffix = f"/{path.name}"
+            if logical_name.endswith(suffix):
+                parent_locations[parent] = (db_file, logical_name[: -len(suffix)])
+        else:
+            db_file = cached_parent[0]
+            logical_name = f"{cached_parent[1]}/{path.name}"
+        grouped.setdefault(db_file, []).append((item_key, path, logical_name))
+
+    for db_file, entries in grouped.items():
+        if not db_file.exists():
+            for item_key, path, _ in entries:
+                if path.exists():
+                    legacy_unimported.append(item_key)
+                else:
+                    resolved[item_key] = None
+            continue
+        try:
+            with connection(entries[0][1]) as db:
+                db.execute("BEGIN")
+                by_logical: Dict[str, Tuple[int, int, bytes]] = {}
+                logical_names = [logical_name for _, _, logical_name in entries]
+                for offset in range(0, len(logical_names), 500):
+                    chunk = logical_names[offset : offset + 500]
+                    placeholders = ",".join("?" for _ in chunk)
+                    for name_str, sid, gen, zdict in db.execute(
+                        f"SELECT name, id, generation, dictionary FROM streams WHERE name IN ({placeholders})",
+                        chunk,
+                    ):
+                        by_logical[str(name_str)] = (int(sid), int(gen), bytes(zdict))
+
+                present_entries: List[Tuple[str, str, int, int, bytes]] = []
+                for item_key, path, logical_name in entries:
+                    stream_info = by_logical.get(logical_name)
+                    if stream_info is None:
+                        if path.exists():
+                            legacy_unimported.append(item_key)
+                        else:
+                            resolved[item_key] = None
+                    else:
+                        present_entries.append(
+                            (item_key, logical_name, stream_info[0], stream_info[1], stream_info[2])
+                        )
+
+                if not present_entries:
+                    continue
+
+                max_comp_by_sid: Dict[int, int] = {}
+                sids = [item[2] for item in present_entries]
+                for offset in range(0, len(sids), 500):
+                    chunk_sids = sids[offset : offset + 500]
+                    placeholders = ",".join("?" for _ in chunk_sids)
+                    for sid, max_seq in db.execute(
+                        f"SELECT name, max(sequence) FROM stream_events WHERE name IN ({placeholders}) AND kind='turn_completed' GROUP BY name",
+                        chunk_sids,
+                    ):
+                        if max_seq is not None:
+                            max_comp_by_sid[int(sid)] = int(max_seq)
+
+                db_key = str(db_file)
+                for item_key, logical_name, sid, generation, dictionary in present_entries:
+                    comp_seq = max_comp_by_sid.get(sid)
+                    if comp_seq is None:
+                        resolved[item_key] = None
+                        continue
+                    cache_key = (db_key, logical_name)
+                    cached = _TURN_COMPLETED_CACHE.get(cache_key)
+                    if cached is not None and cached[0] == generation and cached[1] == comp_seq:
+                        resolved[item_key] = cached[2]
+                        continue
+                    body_row = db.execute(
+                        "SELECT body FROM stream_events WHERE name=? AND sequence=?",
+                        (sid, comp_seq),
+                    ).fetchone()
+                    completed_at = (
+                        str(unpack(body_row[0], dictionary)["created_at"])
+                        if body_row is not None
+                        else None
+                    )
+                    if len(_TURN_COMPLETED_CACHE) >= _TURN_COMPLETED_CACHE_MAX:
+                        _TURN_COMPLETED_CACHE.pop(next(iter(_TURN_COMPLETED_CACHE)), None)
+                    _TURN_COMPLETED_CACHE[cache_key] = (generation, comp_seq, completed_at)
+                    resolved[item_key] = completed_at
+        except OSError:
+            for item_key, _, _ in entries:
+                if item_key not in resolved:
+                    legacy_unimported.append(item_key)
+
+    return resolved, legacy_unimported
+
+
 def compact_history_events(events: List[AgentStreamEvent]) -> List[AgentStreamEvent]:
     """Collapse adjacent historical text deltas without changing semantics.
 
@@ -588,11 +703,15 @@ class AgentStreamStore:
                 "SELECT id,dictionary FROM streams WHERE name=?", (logical_name,)
             ).fetchone()
             if row is None:
-                db.rollback()
-                with db:
-                    db.execute("BEGIN IMMEDIATE")
-                    name = self._import(db)
-                db.execute("BEGIN")
+                if self._path.exists():
+                    db.rollback()
+                    with db:
+                        db.execute("BEGIN IMMEDIATE")
+                        name = self._import(db)
+                    db.execute("BEGIN")
+                else:
+                    name = -1
+                    self._dictionary = b""
             else:
                 name = int(row[0])
                 self._dictionary = row[1]
@@ -715,15 +834,22 @@ class AgentStreamStore:
             has_more=len(rows) > len(events),
         )
 
+    def _read_conversation_page(self, since_sequence: int, limit: int) -> AgentStreamEventPage:
+        page = self._history.conversation_page(self._path, since_sequence, limit)
+        if not page.events and page.next_sequence == since_sequence and self._path.exists():
+            # Ensure a one-time legacy JSONL import has run if the stream row was absent.
+            with self._read_database() as (_, name):
+                imported = name >= 0
+            if imported:
+                page = self._history.conversation_page(self._path, since_sequence, limit)
+        return page
+
     async def read_conversation(
         self, since_sequence: int = -1, limit: int = 500, *, compact: bool = False
     ) -> AgentStreamEventPage:
-        # Import before handing the durable SQLite index to the history projection.
-        await _complete_io(self._read_rows, -1, 0)
         async with self._read_lock:
             page = await _complete_io(
-                self._history.conversation_page,
-                self._path,
+                self._read_conversation_page,
                 since_sequence,
                 max(1, limit),
             )

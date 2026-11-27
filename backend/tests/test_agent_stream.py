@@ -773,6 +773,123 @@ async def test_maso_capability_preparation_is_not_cached() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("agent_type", [AgentType.CODEX, AgentType.MASO])
+async def test_concurrent_capability_requests_coalesce_inflight_without_freezing_uncacheable(
+    agent_type: AgentType,
+) -> None:
+    from claude_hub.api.routes.agent_stream import runtime as stream_runtime
+
+    session = _native_session(agent_type).model_copy(update={"session_kind": SessionKind.CHAT})
+    transport = _CapabilityTransport()
+    transport.metadata_cacheable = False
+    transport.entered = asyncio.Event()
+    transport.release = asyncio.Event()
+    manager = _capability_manager(session, transport)
+
+    first_task = asyncio.create_task(
+        stream_runtime.capabilities_for(
+            lambda: manager,
+            lambda _session: True,
+            lambda _session: None,
+            session,
+            manager,
+            cache_preparation=True,
+        )
+    )
+    await asyncio.wait_for(transport.entered.wait(), 1)
+    second_task = asyncio.create_task(
+        stream_runtime.capabilities_for(
+            lambda: manager,
+            lambda _session: True,
+            lambda _session: None,
+            session,
+            manager,
+            cache_preparation=True,
+        )
+    )
+    await asyncio.sleep(0.01)
+    transport.release.set()
+    first, second = await asyncio.gather(first_task, second_task)
+    assert first.structured is True and second.structured is True
+    assert transport.prepare_count == 1
+
+    transport.entered = None
+    transport.release = None
+    await stream_runtime.capabilities_for(
+        lambda: manager,
+        lambda _session: True,
+        lambda _session: None,
+        session,
+        manager,
+        cache_preparation=True,
+    )
+    assert transport.prepare_count == 2
+
+
+@pytest.mark.asyncio
+async def test_batch_latest_turn_completed_matches_per_store_queries() -> None:
+    from claude_hub.services.agent_stream.store import (
+        AgentStreamStore,
+        read_latest_turn_completed_batch_sync,
+    )
+
+    store_done = AgentStreamStore("terminal-tabs", "batch-unread-done")
+    store_running = AgentStreamStore("terminal-tabs", "batch-unread-running")
+    store_empty = AgentStreamStore("terminal-tabs", "batch-unread-empty")
+
+    now = datetime.now(timezone.utc)
+    await store_done.append(
+        AgentStreamEvent(
+            session_id="batch-unread-done",
+            tab_id="tab-done",
+            agent_type=AgentType.CLAUDE,
+            type=AgentStreamEventType.TURN_STARTED,
+            stream_sequence=-1,
+            created_at=now,
+            turn_id="t1",
+            payload={"summary": "hi"},
+        )
+    )
+    completed = await store_done.append(
+        AgentStreamEvent(
+            session_id="batch-unread-done",
+            tab_id="tab-done",
+            agent_type=AgentType.CLAUDE,
+            type=AgentStreamEventType.TURN_COMPLETED,
+            stream_sequence=-1,
+            created_at=now,
+            turn_id="t1",
+            payload={"status": "completed"},
+        )
+    )
+    await store_running.append(
+        AgentStreamEvent(
+            session_id="batch-unread-running",
+            tab_id="tab-running",
+            agent_type=AgentType.CLAUDE,
+            type=AgentStreamEventType.TURN_STARTED,
+            stream_sequence=-1,
+            created_at=now,
+            turn_id="t2",
+            payload={"summary": "still running"},
+        )
+    )
+
+    paths = {
+        "done": store_done.path,
+        "running": store_running.path,
+        "empty": store_empty.path,
+    }
+    resolved, unimported = read_latest_turn_completed_batch_sync(paths)
+    assert unimported == []
+    assert resolved["done"] == await store_done.latest_turn_completed_at()
+    assert resolved["running"] == await store_running.latest_turn_completed_at()
+    assert resolved["empty"] == await store_empty.latest_turn_completed_at()
+    resolved_cached, _ = read_latest_turn_completed_batch_sync(paths)
+    assert resolved_cached == resolved
+
+
+@pytest.mark.asyncio
 async def test_cancelled_capability_refresh_invalidates_cached_success() -> None:
     from claude_hub.api.routes.agent_stream import runtime as stream_runtime
 

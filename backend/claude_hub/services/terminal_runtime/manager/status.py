@@ -363,6 +363,19 @@ class ManagerStatusMixin(ManagerHost):
                 return "recent_active", None, None
         return None, None, None
 
+    def _is_completed_at_unread(
+        self, process: TTYDProcess, completed_at_str: Optional[str]
+    ) -> bool:
+        if completed_at_str is None:
+            return False
+        try:
+            completed_at = self._runtime.datetime.fromisoformat(completed_at_str)
+        except ValueError:
+            return False
+        if process.last_viewed_at is None:
+            return True
+        return completed_at > process.last_viewed_at
+
     async def compute_tab_unread(self, process: TTYDProcess) -> bool:
         """Return True when the tab's latest completed turn is unread.
 
@@ -377,15 +390,43 @@ class ManagerStatusMixin(ManagerHost):
             *tab_stream_identity(process.tab_id, process.workspace_id, process.managed_session_id)
         )
         completed_at_str = await store.latest_turn_completed_at()
-        if completed_at_str is None:
-            return False
-        try:
-            completed_at = self._runtime.datetime.fromisoformat(completed_at_str)
-        except ValueError:
-            return False
-        if process.last_viewed_at is None:
-            return True
-        return completed_at > process.last_viewed_at
+        return self._is_completed_at_unread(process, completed_at_str)
+
+    async def compute_tabs_unread(self, processes: Iterable[TTYDProcess]) -> Dict[str, bool]:
+        """Batch-compute unread flags for ``list_tabs`` in one SQLite read pass."""
+        proc_list = list(processes)
+        if not proc_list:
+            return {}
+        if (
+            "compute_tab_unread" in self.__dict__
+            or type(self).compute_tab_unread is not ManagerStatusMixin.compute_tab_unread
+        ):
+            return {proc.tab_id: await self.compute_tab_unread(proc) for proc in proc_list}
+
+        from ...agent_stream.store import (
+            AgentStreamStore,
+            _complete_io,
+            read_latest_turn_completed_batch_sync,
+        )
+
+        paths_by_tab: Dict[str, Path] = {}
+        proc_by_tab: Dict[str, TTYDProcess] = {}
+        for proc in proc_list:
+            proc_by_tab[proc.tab_id] = proc
+            paths_by_tab[proc.tab_id] = AgentStreamStore(
+                *tab_stream_identity(proc.tab_id, proc.workspace_id, proc.managed_session_id)
+            ).path
+
+        resolved, legacy_unimported = await _complete_io(
+            read_latest_turn_completed_batch_sync, paths_by_tab
+        )
+        result: Dict[str, bool] = {
+            tab_id: self._is_completed_at_unread(proc_by_tab[tab_id], completed_at_str)
+            for tab_id, completed_at_str in resolved.items()
+        }
+        for tab_id in legacy_unimported:
+            result[tab_id] = await self.compute_tab_unread(proc_by_tab[tab_id])
+        return result
 
     async def get_tab_agent_status(
         self,

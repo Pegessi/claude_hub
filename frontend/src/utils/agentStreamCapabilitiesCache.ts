@@ -46,6 +46,19 @@ export function createAgentStreamCapabilitiesCache(
   }
 }
 
+const HOT_MODEL_ENV_KEYS = new Set([
+  'ANTHROPIC_MODEL',
+  'ANTHROPIC_DEFAULT_OPUS_MODEL',
+  'ANTHROPIC_DEFAULT_SONNET_MODEL',
+  'ANTHROPIC_DEFAULT_HAIKU_MODEL',
+  'CODEX_MODEL',
+  'CODEX_REASONING_EFFORT',
+  'TRAEX_REASONING_EFFORT',
+  'CURSOR_MODEL',
+  'MASO_MODEL',
+  'ANTIGRAVITY_MODEL',
+])
+
 // Compare configuration exactly, without persisting it or including presentation-only
 // changes such as unread timestamps. The signature is never logged or sent elsewhere.
 export function streamCapabilityConfiguration(tab: TerminalTab | null): string {
@@ -54,6 +67,20 @@ export function streamCapabilityConfiguration(tab: TerminalTab | null): string {
     tab.id, tab.created_at, tab.agent_type, tab.session_kind, tab.managed_session_id, tab.agent_session_id,
     tab.cwd, tab.solo_mode, tab.target, tab.remote_profile_id, tab.remote_cwd, tab.remote_reconnect,
     tab.cursor_transport, Object.entries(tab.env ?? {}).sort(([a], [b]) => a.localeCompare(b)),
+  ])
+}
+
+// Stream source identity excludes hot-swappable model/effort env keys so changing
+// a Chat model updates capabilities in place without tearing down /live or /wait.
+export function streamSourceIdentityConfiguration(tab: TerminalTab | null): string {
+  if (!tab) return ''
+  const coldEnv = Object.entries(tab.env ?? {})
+    .filter(([key]) => !HOT_MODEL_ENV_KEYS.has(key))
+    .sort(([a], [b]) => a.localeCompare(b))
+  return JSON.stringify([
+    tab.id, tab.created_at, tab.agent_type, tab.session_kind, tab.managed_session_id, tab.agent_session_id,
+    tab.cwd, tab.solo_mode, tab.target, tab.remote_profile_id, tab.remote_cwd, tab.remote_reconnect,
+    tab.cursor_transport, coldEnv,
   ])
 }
 

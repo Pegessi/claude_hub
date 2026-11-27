@@ -721,3 +721,38 @@ test('editing a hidden queue yields activation and cannot starve another ready C
   a.editing = false
   assert.equal(store.observedQueuedChatIds(paneId).includes('a'), true)
 })
+
+test('switchEnv updates the target tab optimistically without full-list refetch and rolls back on failure', async t => {
+  const { store } = setup(t)
+  store.tabs = [
+    { id: 'a', cwd: '/repo', session_kind: 'chat', agent_type: 'codex', env: { CODEX_MODEL: 'old' } },
+  ]
+  const switchReq = deferred()
+  const requests = []
+  globalThis.fetch.mock.mockImplementation(async (url, init) => {
+    requests.push([init?.method ?? 'GET', url])
+    if (url === '/api/tabs/a/switch-env') return switchReq.promise
+    throw new Error(`unexpected request: ${url}`)
+  })
+
+  const pending = store.switchEnv('a', { env: { CODEX_MODEL: 'new' } })
+  assert.equal(store.isLoading, false)
+  assert.deepEqual(store.tabs[0].env, { CODEX_MODEL: 'new' })
+
+  switchReq.resolve({
+    ok: true,
+    json: async () => ({ id: 'a', cwd: '/repo', session_kind: 'chat', agent_type: 'codex', env: { CODEX_MODEL: 'new' } }),
+  })
+  await pending
+  assert.deepEqual(requests, [['POST', '/api/tabs/a/switch-env']])
+  assert.deepEqual(store.tabs[0].env, { CODEX_MODEL: 'new' })
+
+  globalThis.fetch.mock.mockImplementation(async url => {
+    if (url === '/api/tabs/a/switch-env') {
+      return { ok: false, status: 409, text: async () => 'conflict' }
+    }
+    throw new Error(`unexpected request: ${url}`)
+  })
+  await assert.rejects(store.switchEnv('a', { env: { CODEX_MODEL: 'rejected' } }), /conflict/)
+  assert.deepEqual(store.tabs[0].env, { CODEX_MODEL: 'new' })
+})

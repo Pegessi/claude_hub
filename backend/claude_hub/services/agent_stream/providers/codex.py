@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import time
 from abc import abstractmethod
 from collections import deque
 from dataclasses import dataclass, field
@@ -25,6 +27,11 @@ from .process import ProcessSession
 _NATIVE_GOAL_STATUSES = frozenset(
     {"active", "paused", "blocked", "usageLimited", "budgetLimited", "complete"}
 )
+_DISCOVERED_CATALOG_TTL_S = 1800.0
+_FOREGROUND_MODEL_DISCOVERY_BUDGET_S = 0.25
+_DISCOVERED_CATALOG_CACHE: Dict[
+    Tuple[str, str, str], Tuple[float, List[StreamModelOption], set[str]]
+] = {}
 
 
 def _validate_native_goal(value: Any, thread_id: str) -> ProviderGoal:
@@ -133,6 +140,7 @@ class CodexConfiguredSession(ProcessSession):
         self._mode_discovery_attempted = False
         self._provider_goal_api_available: Optional[bool] = None
         self._model_discovery_attempted = False
+        self._model_discovery_task: Optional[asyncio.Task[bool]] = None
         self._provider_model_options: Optional[List[StreamModelOption]] = None
         self._provider_hidden_model_ids: set[str] = set()
         self._network_config_fingerprint: Optional[str] = None
@@ -162,6 +170,14 @@ class CodexConfiguredSession(ProcessSession):
     async def stop(self) -> None:
         """Terminate the app-server and clean up any staged image temp files."""
         async with self._start_lock:
+            discovery_task = self._model_discovery_task
+            self._model_discovery_task = None
+            if discovery_task is not None and not discovery_task.done():
+                discovery_task.cancel()
+                try:
+                    await discovery_task
+                except (asyncio.CancelledError, Exception):
+                    pass
             staged = self._staged_images
             inflight = self._inflight_images
             self._staged_images = []
@@ -520,6 +536,22 @@ class CodexConfiguredSession(ProcessSession):
                 continue
             self._mode_presets[ui_mode] = dict(item)
 
+    def _uses_live_catalog_cache(self) -> bool:
+        return (
+            isinstance(self._process, asyncio.subprocess.Process)
+            and "_send_request" not in self.__dict__
+        )
+
+    def _discovered_catalog_cache_key(self) -> Tuple[str, str, str]:
+        effective = {**os.environ, **self.session.env}
+        home = Path(effective.get("HOME") or "~").expanduser()
+        codex_home = str(Path(effective.get("CODEX_HOME") or home / ".codex").expanduser())
+        return (
+            self.session.agent_type.value,
+            codex_home,
+            self._provider_network_fingerprint(),
+        )
+
     async def prepare_capabilities(self) -> None:
         # Capture the on-disk catalog before startup can refresh the CLI cache.
         if self.session.agent_type == AgentType.CODEX:
@@ -531,6 +563,27 @@ class CodexConfiguredSession(ProcessSession):
             await self._discover_modes()
         if self._provider_model_options is not None:
             self._merge_provider_models()
+        elif self._uses_live_catalog_cache():
+            cache_key = self._discovered_catalog_cache_key()
+            cached = _DISCOVERED_CATALOG_CACHE.get(cache_key)
+            if cached is not None and cached[0] > time.monotonic():
+                self._model_discovery_attempted = True
+                self._provider_model_options = list(cached[1])
+                self._provider_hidden_model_ids = set(cached[2])
+                self._merge_provider_models()
+            elif self.session.agent_type == AgentType.CODEX and self._available_models:
+                task = self._model_discovery_task
+                if task is None or task.done():
+                    task = asyncio.create_task(self._discover_models())
+                    self._model_discovery_task = task
+                done, _ = await asyncio.wait({task}, timeout=_FOREGROUND_MODEL_DISCOVERY_BUDGET_S)
+                if task in done:
+                    try:
+                        await task
+                    except Exception:
+                        pass
+            else:
+                await self._discover_models()
         else:
             await self._discover_models()
         # Keep rereading the file on explicit/polling capability requests even
@@ -588,6 +641,12 @@ class CodexConfiguredSession(ProcessSession):
         if options or self._provider_hidden_model_ids:
             self._model_discovery_attempted = True
             self._provider_model_options = options
+            if self._uses_live_catalog_cache():
+                _DISCOVERED_CATALOG_CACHE[self._discovered_catalog_cache_key()] = (
+                    time.monotonic() + _DISCOVERED_CATALOG_TTL_S,
+                    list(options),
+                    set(self._provider_hidden_model_ids),
+                )
             self._merge_provider_models()
             return True
         return False

@@ -302,11 +302,18 @@ async def stream_live_for(
     allow_pending_source: bool = False,
     cache_preparation: bool = False,
 ) -> StreamingResponse:
-    caps = await bindings.capabilities_for(
-        session,
-        manager,
-        cache_preparation=cache_preparation,
-    )
+    if allow_pending_source:
+        caps = await bindings.tab_capabilities_for(
+            session,
+            manager,
+            cache_preparation=cache_preparation,
+        )
+    else:
+        caps = await bindings.capabilities_for(
+            session,
+            manager,
+            cache_preparation=cache_preparation,
+        )
     if not session_exists():
         return bindings.closed_unavailable_stream(caps, missing_message)
     if not caps.structured and not allow_pending_source:
@@ -330,12 +337,6 @@ async def stream_live_for(
     if not session_exists():
         manager.unsubscribe(session.id, queue)
         return bindings.closed_unavailable_stream(caps, missing_message)
-    if allow_pending_source:
-        caps = await bindings.tab_capabilities_for(
-            session,
-            manager,
-            cache_preparation=cache_preparation,
-        )
     store = manager.get_store(session.workspace_id, session.id)
 
     async def event_stream() -> Any:
