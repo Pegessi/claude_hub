@@ -601,6 +601,17 @@ def dot_unwatch(ctx: click.Context, task_id: str) -> None:
     default=None,
     help="Run it in this existing agent session (e.g. one set to a model the user chose).",
 )
+@click.option(
+    "--readonly/--writable",
+    "readonly",
+    default=False,
+    help="Read-only investigation: no edits or worktree; triage-style subagent mode.",
+)
+@click.option(
+    "--why",
+    default="",
+    help="One line: why this model/directory/mode was chosen (shown on the receipt).",
+)
 @click.option("--confirm", is_flag=True, help="Send even if the brief check warns.")
 @click.pass_context
 def dot_delegate(
@@ -624,6 +635,8 @@ def dot_delegate(
     request_key: Optional[str],
     stall_hours: Optional[float],
     session_id: Optional[str],
+    readonly: bool,
+    why: str,
     confirm: bool,
 ) -> None:
     """Hand a job to a Hub Task with a full brief. Dot is woken when it ends.
@@ -641,6 +654,8 @@ def dot_delegate(
         "out_of_scope": out_of_scope,
         "constraints": constraints,
         "agent_type": agent_type,
+        "readonly": readonly,
+        "why": why,
         "start": not no_start,
         "confirm": confirm,
     }
@@ -677,6 +692,8 @@ def dot_delegate(
             click.echo(
                 f"delegated {item.get('task_id')} ({item.get('status')}): {item.get('title')}"
             )
+            if result.get("receipt_summary"):
+                click.echo(result["receipt_summary"])
     if result.get("held"):
         ctx.exit(1)
 

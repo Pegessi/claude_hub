@@ -110,7 +110,12 @@ class DotMemoryStore(DotRepository):
         return None
 
     def pending_reviews(self) -> list[dict[str, Any]]:
-        """Delegated tasks with a result Dot has not judged yet (oldest first)."""
+        """Delegated tasks Dot could still judge with an explicit `dot review`.
+
+        Turn packs no longer surface these as a standing todo: the Workspace's
+        own blind review and human acceptance own the gate. The list only backs
+        the optional review command and first-pass review stats.
+        """
         return [
             item
             for item in self.list_work(include_closed=True)

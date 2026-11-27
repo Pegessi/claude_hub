@@ -177,36 +177,7 @@ _EVENTS_PER_TURN = 12
 _EVENTS_TITLE = "## New events since your last turn"
 # The user's turn shows waiting events too, but a wake-up handles them.
 _WAITING_EVENTS_TITLE = "## Events waiting for your next wake-up"
-_REVIEWS_PER_TURN = 8
 _RECENT_TITLE = "## Recent talk (before this fresh session)"
-
-
-def _review_lines(store: DotStore, wake: bool) -> list[str]:
-    """Returned tasks stay listed every turn until Dot records a verdict."""
-    pending = store.pending_reviews()
-    if not pending:
-        return []
-    lines = []
-    for item in pending[:_REVIEWS_PER_TURN]:
-        notes = [str(item.get("status") or "?")]
-        if item.get("result_card"):
-            notes.append(f"card {item['result_card']}")
-        if item.get("asked"):
-            notes.append("the worker had to ask a question")
-        lines.append(
-            f"- [{item.get('task_id')}] {_clip(item.get('title', ''), 120)} — {', '.join(notes)}"
-        )
-    if len(pending) > _REVIEWS_PER_TURN:
-        lines.append(f"- ({len(pending) - _REVIEWS_PER_TURN} more)")
-    if not wake:
-        lines.append("- Prefer to answer the user first; unrelated reviews can wait for a wake-up.")
-        return lines
-    lines.append(
-        "- Consider the evidence against each done-when item. "
-        "`claude-hub dot review` records ok/redo/skip for delegated tasks; "
-        "see `claude-hub dot review --help` for causes and notes."
-    )
-    return lines
 
 
 def _event_lines(events: list[dict[str, Any]]) -> list[str]:
@@ -298,10 +269,6 @@ def build_turn_pack(
         ("## Focus (what matters now)", focus or ["- (empty — ask what matters)"]),
         ("## Tracked work", work or ["- (none)"]),
     ]
-    # Reviews go before events: a busy inbox must not push them out of the pack.
-    reviews = _review_lines(store, wake)
-    if reviews:
-        sections.append(("## Waiting for your review", reviews))
     events_title = _EVENTS_TITLE if wake else _WAITING_EVENTS_TITLE
     if events:
         sections.append((events_title, _event_lines(events)))

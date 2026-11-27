@@ -37,6 +37,9 @@ TURN_RULES = """\
   it and that you will report back, rather than doing or re-checking it yourself.
 - Start agent work with `claude-hub dot delegate` (`--session` for a chosen
   agent or model) so its result wakes you; `dot watch` a task started another way.
+- Right after `dot delegate`, show the user its 4-line contract receipt (goal;
+  acceptance checks; model/session and isolation reason; notification timing).
+  The work starts in the background immediately; never make the user wait for it.
 - In a user turn, answer their request first. Unrelated events can wait for a wake-up.
 - Wake/tidy turns yield to user messages and may retry later; small, safe steps
   are easier to resume.
@@ -77,12 +80,12 @@ TOOL_GUIDE = """\
 """
 
 _BRIEF_GOAL_PACKET_LINE = (
-    "- Post your plan (Goal Packet) before substantial work; the user sees it and may\n"
-    "  redirect you through a follow-up message."
+    "- Work directly from the Goal and the Done-when list; do not pause for a\n"
+    "  separate Goal Packet approval round."
 )
 
-# Recipes that replace the default "post your plan" line. Everything else in the
-# brief stays the caller's text: a recipe never prescribes acceptance checklists
+# Recipes that replace the default working line. Everything else in the brief
+# stays the caller's text: a recipe never prescribes acceptance checklists
 # or other ceremony, so delegated agents keep their own judgment.
 _RECIPE_GOAL_PACKET_LINES: dict[str, str] = {
     "spec_implement_review": (
@@ -117,17 +120,23 @@ BRIEF_TEMPLATE = """\
 {constraints}
 
 ## How to work
-- Post your plan (Goal Packet) before substantial work; the user sees it and may
-  redirect you through a follow-up message.
+- Work directly from the Goal and the Done-when list; do not pause for a
+  separate Goal Packet approval round.
 - Report progress at each milestone: what you learned and what comes next.
 - If findings point away from the Goal or the plan, stop and ask instead of widening scope.
 - Prefer independent progress; use sub-agents when they help.
 - Ask for clarification when a missing decision blocks useful progress.
 - Follow the repository rules (CLAUDE.md / AGENTS.md) when they exist.
+- An independent blind review may send findings. Fix the real defects. If a
+  finding is a false positive from missing context, or it contradicts an
+  existing design tradeoff, do not pile on defensive code: reject it with
+  `path:line` and the code basis. If every finding is a false positive and no
+  code change is needed, report `needs_input` and let the upper layer decide.
 
 ## Report
-Lead with the result and its location. Map each "Done when" item to evidence
-or an open gap, then summarize validation and risks. Keep the report concise.
+Lead with the result and its location. Map each "Done when" item to the exact
+verification command you ran and its result evidence, or an open gap, then
+summarize validation and risks. Keep the report concise.
 """
 
 
@@ -160,20 +169,36 @@ def format_task_brief(
 QUIET_REPLY = "[quiet]"
 
 WAKE_MESSAGE = (
-    "[Dot wake] New task events are in context. For delegated tasks, judge the result "
-    "card against its done-when list and record it with `claude-hub dot review`; a "
-    "targeted check helps only when evidence is missing. `task_attention` events are "
-    "Hub tasks that need a person (a question, acceptance, an owner gone, a "
-    "failure); `task_plan` events are a worker's new plan. Decide whether the "
-    "user should hear about each: tell them what needs their decision or looks off "
-    "course, conclusion first, and skip what does not. With a Feishu bot bound, send it "
-    'with `claude-hub dot notify "<markdown>" --title "..." --tone done|failed|decision`. '
-    "Focus and memory can be updated as needed. "
+    "[Dot wake] New task events are in context. The Workspace already runs its "
+    "own independent heterogeneous blind review, so no per-task review "
+    "accounting pass is required: judge the evidence yourself against the "
+    "done-when list. When a task reaches awaiting_acceptance, check its "
+    "acceptance evidence and briefly tell the user the result. When a task is "
+    "stuck at needs_user (review_failed_not_resumed) after two blind-review "
+    "rounds still disagree, or another real decision is needed, present the "
+    "core disagreement and your recommendation concisely and let the user "
+    "decide. Routine progress stays hidden. Only when the delegation brief "
+    "itself missed key context or boundaries, record one rule with "
+    "`claude-hub dot lessons`. With a Feishu bot bound, send what must reach "
+    'the user with `claude-hub dot notify "<markdown>" --title "..." '
+    "--tone done|failed|decision`. Focus and memory can be updated as needed. "
     f"If nothing needs reporting, replying exactly {QUIET_REPLY} keeps this turn hidden."
 )
 
 # Earlier wake-up words; a schedule still holding one gets the current words.
 RETIRED_WAKE_MESSAGES = (
+    (
+        "[Dot wake] New task events are in context. For delegated tasks, judge the result "
+        "card against its done-when list and record it with `claude-hub dot review`; a "
+        "targeted check helps only when evidence is missing. `task_attention` events are "
+        "Hub tasks that need a person (a question, acceptance, an owner gone, a "
+        "failure); `task_plan` events are a worker's new plan. Decide whether the "
+        "user should hear about each: tell them what needs their decision or looks off "
+        "course, conclusion first, and skip what does not. With a Feishu bot bound, send it "
+        'with `claude-hub dot notify "<markdown>" --title "..." --tone done|failed|decision`. '
+        "Focus and memory can be updated as needed. "
+        f"If nothing needs reporting, replying exactly {QUIET_REPLY} keeps this turn hidden."
+    ),
     (
         "[Dot wake] New task events are in context. For delegated tasks, judge the result "
         "card against its done-when list and record it with `claude-hub dot review`; a "

@@ -53,7 +53,9 @@ def test_guidance_preserves_choices_and_explicit_tool_contracts() -> None:
             constraints="K",
             recipe=std_recipe,
         )
-        assert "Post your plan (Goal Packet) before substantial work" in rendered_std
+        # The blocking Goal Packet approval stop is gone; work starts directly.
+        assert "Post your plan (Goal Packet)" not in rendered_std
+        assert "do not pause for a" in rendered_std
     assert "--title" in TOOL_GUIDE and "--tone" in WAKE_MESSAGE
     assert "open gap" in BRIEF_TEMPLATE
     assert "Follow the repository rules" in BRIEF_TEMPLATE
@@ -109,15 +111,15 @@ def test_format_task_brief_recipes_only_adjust_the_goal_packet_line(recipe: str 
     # Recipes never append acceptance ceremony; the caller's done-when list is the contract.
     assert "acceptance checklist" not in brief.lower()
     assert brief.rstrip().endswith("Keep the report concise.")
+    # No recipe keeps the old blocking Goal Packet stop.
+    assert "Post your plan (Goal Packet)" not in brief
     if recipe == "triage_diagnose":
-        assert "Post your plan (Goal Packet) before substantial work" not in brief
         assert "Perform read-only investigation directly within scope" in brief
     elif recipe == "spec_implement_review":
-        assert "Post your plan (Goal Packet) before substantial work" not in brief
         assert "Execute end-to-end in your isolated feature worktree" in brief
         assert "separate Goal Packet approval round" in brief
     else:
-        assert "Post your plan (Goal Packet) before substantial work" in brief
+        assert "Work directly from the Goal and the Done-when list" in brief
 
 
 def test_format_task_brief_ignores_unknown_recipe() -> None:
@@ -197,8 +199,11 @@ def test_tracked_work_distinguishes_ownership_without_changing_review_state(
     assert "[delegated] delegated — review (delegated; workspace ws)" in pack.text
     assert "[watched] watched — review (watched; workspace ws)" in pack.text
     assert "[legacy] legacy — working (delegated; workspace ws)" in pack.text
-    reviews = pack.text.split("## Waiting for your review", 1)[1]
-    assert "[delegated]" in reviews and "[watched]" not in reviews
+    # The standing review-nag section is gone: pending reviews no longer clutter
+    # every turn pack; the store still tracks them for the optional dot review.
+    assert "## Waiting for your review" not in pack.text
+    pending = {item["task_id"] for item in store.pending_reviews()}
+    assert pending == {"delegated"} and "watched" not in pending
     assert store.list_work() == before
     assert len(pack.text) <= TURN_PACK_CHARS
 

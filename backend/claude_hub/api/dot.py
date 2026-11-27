@@ -115,6 +115,10 @@ class DelegateRequest(BaseModel):
     stall_hours: Optional[float] = Field(default=None, gt=0, le=720)
     # An existing agent session to run it in (its agent type wins).
     session_id: Optional[str] = Field(default=None, min_length=1, max_length=256)
+    # Read-only investigation: no worktree/edits; triage-style subagent defaults.
+    readonly: bool = False
+    # One line on why this model/directory/mode was chosen.
+    why: str = Field(default="", max_length=500)
     # Send even when the brief check has warnings.
     confirm: bool = False
 
