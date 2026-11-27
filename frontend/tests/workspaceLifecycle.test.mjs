@@ -85,7 +85,7 @@ test('workspace mounts one polling lifecycle and releases timers listeners and d
   const detailAttachments = vue.ref([{ id: 'image', preview_url: 'blob:image' }])
   const inputs = {
     tasks: vue.ref([]), selectedTaskId, activeWorkspaceId, selectedWorkspaceId: vue.ref('one'),
-    workspaceSessionView: vue.ref('reviewers'), elapsedClockMs: vue.ref(0), detailAttachments,
+    workspaceSubagentView: vue.ref(true), elapsedClockMs: vue.ref(0), detailAttachments,
     workspaceStore: {
       fetchTaskCapabilities: async id => calls.push(['capabilities', id]),
       fetchWorkspaces: async () => calls.push(['workspaces']),
@@ -110,7 +110,7 @@ test('workspace mounts one polling lifecycle and releases timers listeners and d
   activeWorkspaceId.value = 'two'
   await vue.nextTick()
   assert.equal(inputs.selectedWorkspaceId.value, 'two')
-  assert.equal(inputs.workspaceSessionView.value, 'agents')
+  assert.equal(inputs.workspaceSubagentView.value, false)
   assert.equal(selectedTaskId.value, null)
   mounted.unmount()
   assert.equal(timers.size, 0)

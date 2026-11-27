@@ -156,10 +156,10 @@
           <div
             v-if="
               scopeMode === 'current' &&
-              boardTasksPagination &&
-              boardOlderTasksRemaining > 0 &&
-              !collapsedBuckets.has('done') &&
-              (doneExpanded || doneGroupCount <= TRIAGE_DONE_PREVIEW_SIZE)
+                boardTasksPagination &&
+                boardOlderTasksRemaining > 0 &&
+                !collapsedBuckets.has('done') &&
+                (doneExpanded || doneGroupCount <= TRIAGE_DONE_PREVIEW_SIZE)
             "
             class="tp-load-more-wrap"
           >

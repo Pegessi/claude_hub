@@ -1,70 +1,15 @@
-import {
-  ref,
-  reactive,
-  computed,
-  watch,
-} from 'vue'
-import {
-  type ManagedSession,
-  type AgentType,
-  type SessionKind,
-  type ExecutionTarget,
-} from '@/types'
-import {
-  defaultLaunchEnvPresetForAgent,
-  parseLaunchEnv,
-} from '@/composables/useLaunchEnvPresets'
-import {
-  providerSupportsManagedSurface,
-} from '@/utils/managedChatSurface'
-import {
-  remoteInteractive,
-} from '@/utils/remoteProfiles'
+import { ref, reactive } from 'vue'
+import type { ManagedSession } from '@/types'
+import { parseLaunchEnv } from '@/composables/useLaunchEnvPresets'
 import type { useWorkspaceRuntime } from './useWorkspaceRuntime'
-import type { useWorkspaceEditor } from './useWorkspaceEditor'
 
 type WorkspaceAgentManagerInputs = Pick<ReturnType<typeof useWorkspaceRuntime>,
-  'defaultPresetTextForAgent'
-  | 'reviewerSessions'
-  | 'workspaceAgents'
-  | 'dispatcherAgent'
-  | 'residentAgent'
-  | 'isLoading'
-  | 'isPending'
-  | 'activeWorkspace'
-  | 'getPresetText'
-  | 'workspaceStore'
-  | 'runPending'
-  | 'sessionActionKey'
-  | 'terminalStore'
->
-  & Pick<ReturnType<typeof useWorkspaceEditor>,
-  'remoteProfiles'
-  | 'fetchRemoteProfiles'
+  'getPresetText' | 'workspaceStore' | 'runPending' | 'sessionActionKey' | 'terminalStore'
 >
 
+/** Environment controls for existing task and Resident sessions, not a seat pool. */
 export function useWorkspaceAgentManager(inputs: WorkspaceAgentManagerInputs) {
-  const {
-    defaultPresetTextForAgent,
-    reviewerSessions,
-    workspaceAgents,
-    dispatcherAgent,
-    residentAgent,
-    isLoading,
-    isPending,
-    activeWorkspace,
-    getPresetText,
-    workspaceStore,
-    runPending,
-    sessionActionKey,
-    terminalStore,
-    remoteProfiles,
-    fetchRemoteProfiles,
-  } = inputs
-
-  const showAgentOptionsModal = ref(false)
-
-  const showAgentFileBrowser = ref(false)
+  const { getPresetText, workspaceStore, runPending, sessionActionKey, terminalStore } = inputs
 
   // Switch Env modal state (for hot-swapping env/solo on running Claude agents)
   const showSwitchEnvModal = ref(false)
@@ -78,60 +23,6 @@ export function useWorkspaceAgentManager(inputs: WorkspaceAgentManagerInputs) {
     env_text: '',
     solo_mode: false,
   })
-
-  const agentOptionsForm = reactive({
-    title: '',
-    agent_type: 'codex' as AgentType,
-    session_kind: 'terminal' as SessionKind,
-    target: 'local' as ExecutionTarget,
-    cwd: '',
-    solo_mode: true,
-    remote_profile_id: '',
-    remote_reconnect: true,
-    env_preset: defaultLaunchEnvPresetForAgent('codex'),
-    env_text: defaultPresetTextForAgent('codex'),
-  })
-
-  const agentManagerSessions = computed<ManagedSession[]>(() => [
-    ...workspaceAgents.value,
-    ...reviewerSessions.value,
-    ...(dispatcherAgent.value ? [dispatcherAgent.value] : []),
-    ...(residentAgent.value ? [residentAgent.value] : []),
-  ])
-
-  const agentManagerEmptyText = 'No agents in this workspace.'
-
-  const selectedAgentRemoteProfile = computed(() =>
-    remoteProfiles.value.find(profile => profile.id === agentOptionsForm.remote_profile_id) || null
-  )
-
-  const isAgentOptionsCreateDisabled = computed(
-    () =>
-      isLoading.value ||
-      isPending('agent:create') ||
-      !providerSupportsManagedSurface(
-        agentOptionsForm.agent_type,
-        agentOptionsForm.session_kind,
-        agentOptionsForm.target,
-      ) ||
-      (agentOptionsForm.target === 'remote' && !agentOptionsForm.remote_profile_id) ||
-      (agentOptionsForm.target === 'remote' && !remoteInteractive(selectedAgentRemoteProfile.value))
-  )
-
-  function workspaceDefaultCwd(target: ExecutionTarget, remoteProfileId?: string): string {
-    const workspace = activeWorkspace.value
-    if (!workspace) return ''
-    if (target === 'remote') {
-      // When a specific profile id is supplied (e.g. the resident form's own
-      // selection) resolve its default_cwd; otherwise fall back to the Add-Agent
-      // form's selected profile.
-      const profile = remoteProfileId
-        ? remoteProfiles.value.find(p => p.id === remoteProfileId) || null
-        : selectedAgentRemoteProfile.value
-      return workspace.remote_cwd || profile?.default_cwd || ''
-    }
-    return workspace.path || ''
-  }
 
   // ---- Switch Env (hot-swap on running Claude agents) ----
 
@@ -202,138 +93,8 @@ export function useWorkspaceAgentManager(inputs: WorkspaceAgentManagerInputs) {
     }
   }
 
-  function resetAgentEnvForType(agentType: AgentType) {
-    agentOptionsForm.env_preset = defaultLaunchEnvPresetForAgent(agentType)
-    agentOptionsForm.env_text = defaultPresetTextForAgent(agentType)
-  }
-
-  function resetAgentOptionsForm() {
-    const workspace = activeWorkspace.value
-    agentOptionsForm.title = ''
-    agentOptionsForm.agent_type = 'codex'
-    agentOptionsForm.session_kind = 'terminal'
-    agentOptionsForm.target = workspace?.target ?? 'local'
-    agentOptionsForm.solo_mode = true
-    agentOptionsForm.remote_reconnect = workspace?.remote_reconnect ?? true
-    agentOptionsForm.remote_profile_id =
-      workspace?.remote_profile_id || remoteProfiles.value[0]?.id || ''
-    resetAgentEnvForType(agentOptionsForm.agent_type)
-    agentOptionsForm.cwd = workspaceDefaultCwd(agentOptionsForm.target)
-  }
-
-  function handleAgentSurfaceChange(sessionKind: SessionKind) {
-    if (sessionKind === 'chat' && agentOptionsForm.target === 'remote') return
-    agentOptionsForm.session_kind = sessionKind
-    if (
-      (sessionKind === 'chat' && agentOptionsForm.agent_type === 'terminal') ||
-      (sessionKind === 'terminal' && ['maso', 'antigravity'].includes(agentOptionsForm.agent_type))
-    ) {
-      agentOptionsForm.agent_type = 'codex'
-      agentOptionsForm.solo_mode = true
-      resetAgentEnvForType('codex')
-    }
-  }
-
-  function handleAgentTargetChange(target: ExecutionTarget) {
-    if (agentOptionsForm.target === target) return
-    const previousDefault = workspaceDefaultCwd(agentOptionsForm.target)
-    agentOptionsForm.target = target
-    if (target === 'remote') handleAgentSurfaceChange('terminal')
-    if (!agentOptionsForm.cwd.trim() || agentOptionsForm.cwd === previousDefault) {
-      agentOptionsForm.cwd = workspaceDefaultCwd(target)
-    }
-    if (target === 'remote') {
-      fetchRemoteProfiles()
-    }
-  }
-
-  function openAgentOptionsModal() {
-    resetAgentOptionsForm()
-    if (agentOptionsForm.target === 'remote') {
-      fetchRemoteProfiles()
-    }
-    showAgentOptionsModal.value = true
-  }
-
-  function closeAgentOptionsModal() {
-    showAgentOptionsModal.value = false
-    showAgentFileBrowser.value = false
-  }
-
-  async function handleCreateAdvancedAgent() {
-    const cwd = agentOptionsForm.cwd.trim()
-    const env = parseLaunchEnv(agentOptionsForm.env_text)
-    await runPending('agent:create', async () => {
-      await workspaceStore.ensureWorkspaceAgent({
-        agent_type: agentOptionsForm.agent_type,
-        session_kind: agentOptionsForm.session_kind,
-        title: agentOptionsForm.title.trim() || null,
-        role: 'orchestrator',
-        reuse_existing: false,
-        target: agentOptionsForm.target,
-        cwd: agentOptionsForm.target === 'local' ? cwd || null : null,
-        remote_profile_id:
-          agentOptionsForm.target === 'remote' ? agentOptionsForm.remote_profile_id || null : null,
-        remote_cwd: agentOptionsForm.target === 'remote' ? cwd || null : null,
-        remote_reconnect:
-          agentOptionsForm.target === 'remote' ? agentOptionsForm.remote_reconnect : null,
-        solo_mode:
-          agentOptionsForm.agent_type === 'cursor' ||
-          agentOptionsForm.agent_type === 'terminal'
-            ? false
-            : agentOptionsForm.solo_mode,
-        env,
-      })
-      showAgentFileBrowser.value = false
-      agentOptionsForm.title = ''
-      resetAgentEnvForType(agentOptionsForm.agent_type)
-      await terminalStore.fetchTabs({ force: true })
-    })
-  }
-
-  watch(
-    () => agentOptionsForm.target,
-    target => {
-      if (target === 'remote') {
-        fetchRemoteProfiles()
-        if (!agentOptionsForm.remote_profile_id) {
-          agentOptionsForm.remote_profile_id =
-            activeWorkspace.value?.remote_profile_id || remoteProfiles.value[0]?.id || ''
-        }
-        agentOptionsForm.cwd =
-          activeWorkspace.value?.remote_cwd || selectedAgentRemoteProfile.value?.default_cwd || '~'
-      } else {
-        agentOptionsForm.cwd = activeWorkspace.value?.path || ''
-      }
-    }
-  )
-
-  watch(
-    () => agentOptionsForm.remote_profile_id,
-    () => {
-      if (
-        agentOptionsForm.target === 'remote' &&
-        (!agentOptionsForm.cwd || agentOptionsForm.cwd === '~')
-      ) {
-        agentOptionsForm.cwd = selectedAgentRemoteProfile.value?.default_cwd || '~'
-      }
-    }
-  )
-
   return {
-    openAgentOptionsModal,
     openSwitchEnvModal,
-    showAgentOptionsModal,
-    closeAgentOptionsModal,
-    agentManagerSessions,
-    agentManagerEmptyText,
-    handleCreateAdvancedAgent,
-    agentOptionsForm,
-    handleAgentSurfaceChange,
-    handleAgentTargetChange,
-    selectedAgentRemoteProfile,
-    isAgentOptionsCreateDisabled,
-    showAgentFileBrowser,
     switchEnvForm,
     showSwitchEnvManager,
     closeSwitchEnvPresetManager,

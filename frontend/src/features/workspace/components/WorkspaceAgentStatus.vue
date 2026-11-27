@@ -1,16 +1,32 @@
 <template>
   <section
-    v-if="activeWorkspaceId"
+    v-if="activeWorkspaceId && (visibleWorkspaceSessions.length > 0 || workspaceSubagentTabs.length > 0)"
     class="workspace-agent-status"
-    aria-label="Current workspace agent statuses"
+    aria-label="Active runs and subagents"
   >
-    <div
-      v-if="agentBandEmpty"
-      class="agent-status-compact"
-    >
-      <span class="agent-status-compact-text">
-        No agents, reviewers, or sub-agents in this workspace.
-      </span>
+    <div class="agent-status-header">
+      <div
+        class="agent-status-view-switch"
+        aria-label="Agent status view"
+      >
+        <button
+          type="button"
+          :data-active="!showSubagents"
+          @click="showManagedView()"
+        >
+          <span>Active Runs</span>
+          <strong>{{ visibleWorkspaceSessions.length }}</strong>
+        </button>
+        <button
+          type="button"
+          data-testid="workspace-subagents-toggle"
+          :data-active="showSubagents"
+          @click="toggleWorkspaceSubagentView"
+        >
+          <span>Subagents</span>
+          <strong>{{ workspaceSubagentTabs.length }}</strong>
+        </button>
+      </div>
       <div class="agent-status-toolbar">
         <LoadingButton
           type="button"
@@ -25,222 +41,175 @@
         </LoadingButton>
       </div>
     </div>
-    <template v-else>
-      <div class="agent-status-header">
-        <div
-          class="agent-status-view-switch"
-          aria-label="Agent status view"
-        >
-          <button
-            type="button"
-            :data-active="!workspaceSubagentView && workspaceSessionView === 'agents'"
-            @click="showManagedView('agents')"
-          >
-            <span>Agents</span>
-            <strong>{{ workspaceAgents.length }}</strong>
-          </button>
-          <button
-            type="button"
-            :data-active="!workspaceSubagentView && workspaceSessionView === 'reviewers'"
-            @click="showManagedView('reviewers')"
-          >
-            <span>Reviewers</span>
-            <strong>{{ reviewerSessions.length }}</strong>
-          </button>
-          <button
-            type="button"
-            data-testid="workspace-subagents-toggle"
-            :data-active="workspaceSubagentView"
-            @click="toggleWorkspaceSubagentView"
-          >
-            <span>Subagents</span>
-            <strong>{{ workspaceSubagentTabs.length }}</strong>
-          </button>
-        </div>
-        <div class="agent-status-toolbar">
-          <LoadingButton
-            type="button"
-            class="agent-status-refresh"
-            title="Refresh statuses"
-            :loading="isPending('workspace:refresh-statuses')"
-            hide-content-while-loading
-            loading-label="Refreshing statuses"
-            @click="refreshAgentStatuses"
-          >
-            ↻
-          </LoadingButton>
-        </div>
-      </div>
-      <div
-        v-if="!workspaceSubagentView"
-        class="agent-status-grid"
-      >
-        <article
-          v-for="agent in visibleWorkspaceSessions"
-          :key="agent.id"
-          class="agent-status-card"
-        >
-          <button
-            type="button"
-            class="agent-status-card-main"
-            :disabled="isPending(sessionActionKey('open', agent.id))"
-            @click="openSession(agent)"
-          >
-            <span class="agent-status-avatar-wrap">
-              <AgentAvatar
-                :agent-type="agent.agent_type"
-                size="md"
-              />
-              <span
-                class="agent-status-dot"
-                :data-status="agentRuntimeStatus(agent)"
-              />
-            </span>
-            <span class="agent-status-main">
-              <span class="agent-status-line">
-                <span class="agent-status-name">{{ agent.title }}</span>
-                <span class="agent-status-kind">{{ agentRoleLabel(agent) }}</span>
-                <span
-                  v-if="isResidentAgent(agent) && isResidentPaused"
-                  class="agent-status-kind agent-status-paused-badge"
-                >Paused</span>
-                <span
-                  v-if="isResidentAgent(agent) && isResidentMaster"
-                  class="agent-status-kind agent-status-master-badge"
-                  title="Autopilot: this resident drives the workspace on its own — creating, dispatching, and accepting tasks"
-                >Autopilot</span>
-                <span
-                  class="agent-status-cli"
-                  :data-kind="agent.agent_type || 'terminal'"
-                >{{ agent.agent_type || 'terminal' }}</span>
-              </span>
-              <span class="agent-status-detail">
-                {{ agentRuntimeDetail(agent) }}
-              </span>
-              <span class="agent-status-meta">
-                <span>{{ agent.target }}</span>
-                <span v-if="agent.ephemeral">temporary</span>
-                <span>{{ agentTaskLabel(agent) }}</span>
-                <span>queued {{ agent.queued_count }}</span>
-              </span>
-              <span
-                v-if="isResidentAgent(agent)"
-                class="agent-status-meta"
-              >
-                <span>last run {{ residentLastRunLabel }}</span>
-                <span v-if="residentNextRunLabel">next run {{ residentNextRunLabel }}</span>
-                <span v-if="latestResidentReport">{{ latestResidentReport.message }}</span>
-              </span>
-            </span>
-            <span
-              class="agent-status-pill"
-              :data-status="agentRuntimeStatus(agent)"
-            >
-              <span
-                v-if="isPending(sessionActionKey('open', agent.id))"
-                class="agent-status-inline-spinner"
-                aria-hidden="true"
-              />
-              {{ agentRuntimeText(agent) }}
-            </span>
-          </button>
-          <div
-            v-if="agent.role !== 'dispatcher'"
-            class="agent-status-actions"
-          >
-            <LoadingButton
-              v-if="canSwitchAgentEnv(agent)"
-              type="button"
-              class="agent-status-switch-env"
-              title="Switch Env / Model"
-              :loading="isPending(sessionActionKey('switch-env', agent.id))"
-              loading-label="Switching env"
-              @click.stop="openSwitchEnvModal(agent)"
-            >
-              ⚙ Env
-            </LoadingButton>
-            <LoadingButton
-              v-if="isResidentAgent(agent)"
-              type="button"
-              class="agent-status-pause"
-              :loading="isPending('workspace:resident-pause')"
-              :loading-label="isResidentPaused ? 'Resuming agent' : 'Pausing agent'"
-              @click="toggleResidentPaused"
-            >
-              {{ isResidentPaused ? 'Resume' : 'Pause' }}
-            </LoadingButton>
-            <LoadingButton
-              v-if="isResidentAgent(agent)"
-              type="button"
-              class="agent-status-run-now"
-              :disabled="residentRunPending"
-              :title="residentRunPending
-                ? 'A run is already queued for the next monitor tick'
-                : 'Run the resident now using its saved directive and periodic tasks'"
-              :loading="isPending('resident:run')"
-              loading-label="Queuing run"
-              @click="handleRunResidentNow"
-            >
-              {{ residentRunPending ? 'Run queued' : 'Run now' }}
-            </LoadingButton>
-            <LoadingButton
-              type="button"
-              class="agent-status-delete"
-              :disabled="!canDeleteAgent(agent)"
-              :title="agentDeleteTitle(agent)"
-              :loading="isPending(agentActionKey('delete', agent.id))"
-              loading-label="Deleting agent"
-              @click="deleteAgent(agent)"
-            >
-              Delete
-            </LoadingButton>
-          </div>
-        </article>
-        <div
-          v-if="visibleWorkspaceSessions.length === 0"
-          class="agent-status-empty"
-        >
-          {{ visibleWorkspaceSessionsEmptyText }}
-        </div>
-      </div>
-      <div
-        v-else
-        class="workspace-subagent-list"
-        data-testid="workspace-subagent-list"
+    <div
+      v-if="!showSubagents"
+      class="agent-status-grid"
+    >
+      <article
+        v-for="agent in visibleWorkspaceSessions"
+        :key="agent.id"
+        class="agent-status-card"
       >
         <button
-          v-for="tab in workspaceSubagentTabs"
-          :key="tab.id"
           type="button"
-          class="workspace-subagent-row"
-          @click="openSubagentTab(tab.id)"
+          class="agent-status-card-main"
+          :disabled="isPending(sessionActionKey('open', agent.id))"
+          @click="openSession(agent)"
         >
           <span class="agent-status-avatar-wrap">
             <AgentAvatar
-              :agent-type="tab.agent_type"
-              size="sm"
+              :agent-type="agent.agent_type"
+              size="md"
             />
             <span
               class="agent-status-dot"
-              :data-status="subagentRuntimeStatus(tab)"
+              :data-status="agentRuntimeStatus(agent)"
             />
           </span>
           <span class="agent-status-main">
             <span class="agent-status-line">
-              <span class="agent-status-name">{{ tab.name }}</span>
-              <span class="agent-status-kind">Sub-agent</span>
+              <span class="agent-status-name">{{ agent.title }}</span>
+              <span class="agent-status-kind">{{ agentRoleLabel(agent) }}</span>
+              <span
+                v-if="isResidentAgent(agent) && isResidentPaused"
+                class="agent-status-kind agent-status-paused-badge"
+              >Paused</span>
+              <span
+                v-if="isResidentAgent(agent) && isResidentMaster"
+                class="agent-status-kind agent-status-master-badge"
+                title="Autopilot: this resident drives the workspace on its own — creating, dispatching, and accepting tasks"
+              >Autopilot</span>
+              <span
+                class="agent-status-cli"
+                :data-kind="agent.agent_type || 'terminal'"
+              >{{ agent.agent_type || 'terminal' }}</span>
             </span>
-            <span class="agent-status-detail">{{ subagentStatusText(tab) }}</span>
+            <span class="agent-status-detail">
+              {{ agentRuntimeDetail(agent) }}
+            </span>
+            <span class="agent-status-meta">
+              <span>{{ agent.target }}</span>
+              <span v-if="agent.ephemeral">temporary</span>
+              <span>{{ agentTaskLabel(agent) }}</span>
+              <span>queued {{ agent.queued_count }}</span>
+            </span>
+            <span
+              v-if="isResidentAgent(agent)"
+              class="agent-status-meta"
+            >
+              <span>last run {{ residentLastRunLabel }}</span>
+              <span v-if="residentNextRunLabel">next run {{ residentNextRunLabel }}</span>
+              <span v-if="latestResidentReport">{{ latestResidentReport.message }}</span>
+            </span>
+          </span>
+          <span
+            class="agent-status-pill"
+            :data-status="agentRuntimeStatus(agent)"
+          >
+            <span
+              v-if="isPending(sessionActionKey('open', agent.id))"
+              class="agent-status-inline-spinner"
+              aria-hidden="true"
+            />
+            {{ agentRuntimeText(agent) }}
           </span>
         </button>
         <div
-          v-if="workspaceSubagentTabs.length === 0"
-          class="agent-status-empty"
+          v-if="agent.role !== 'dispatcher'"
+          class="agent-status-actions"
         >
-          No sub-agents in this workspace.
+          <LoadingButton
+            v-if="canSwitchAgentEnv(agent)"
+            type="button"
+            class="agent-status-switch-env"
+            title="Switch Env / Model"
+            :loading="isPending(sessionActionKey('switch-env', agent.id))"
+            loading-label="Switching env"
+            @click.stop="openSwitchEnvModal(agent)"
+          >
+            ⚙ Env
+          </LoadingButton>
+          <LoadingButton
+            v-if="isResidentAgent(agent)"
+            type="button"
+            class="agent-status-pause"
+            :loading="isPending('workspace:resident-pause')"
+            :loading-label="isResidentPaused ? 'Resuming agent' : 'Pausing agent'"
+            @click="toggleResidentPaused"
+          >
+            {{ isResidentPaused ? 'Resume' : 'Pause' }}
+          </LoadingButton>
+          <LoadingButton
+            v-if="isResidentAgent(agent)"
+            type="button"
+            class="agent-status-run-now"
+            :disabled="residentRunPending"
+            :title="residentRunPending
+              ? 'A run is already queued for the next monitor tick'
+              : 'Run the resident now using its saved directive and periodic tasks'"
+            :loading="isPending('resident:run')"
+            loading-label="Queuing run"
+            @click="handleRunResidentNow"
+          >
+            {{ residentRunPending ? 'Run queued' : 'Run now' }}
+          </LoadingButton>
+          <LoadingButton
+            type="button"
+            class="agent-status-delete"
+            :disabled="!canDeleteAgent(agent)"
+            :title="agentDeleteTitle(agent)"
+            :loading="isPending(agentActionKey('delete', agent.id))"
+            loading-label="Deleting agent"
+            @click="deleteAgent(agent)"
+          >
+            Delete
+          </LoadingButton>
         </div>
+      </article>
+      <div
+        v-if="visibleWorkspaceSessions.length === 0"
+        class="agent-status-empty"
+      >
+        No active runs in this workspace.
       </div>
-    </template>
+    </div>
+    <div
+      v-else
+      class="workspace-subagent-list"
+      data-testid="workspace-subagent-list"
+    >
+      <button
+        v-for="tab in workspaceSubagentTabs"
+        :key="tab.id"
+        type="button"
+        class="workspace-subagent-row"
+        @click="openSubagentTab(tab.id)"
+      >
+        <span class="agent-status-avatar-wrap">
+          <AgentAvatar
+            :agent-type="tab.agent_type"
+            size="sm"
+          />
+          <span
+            class="agent-status-dot"
+            :data-status="subagentRuntimeStatus(tab)"
+          />
+        </span>
+        <span class="agent-status-main">
+          <span class="agent-status-line">
+            <span class="agent-status-name">{{ tab.name }}</span>
+            <span class="agent-status-kind">Sub-agent</span>
+          </span>
+          <span class="agent-status-detail">{{ subagentStatusText(tab) }}</span>
+        </span>
+      </button>
+      <div
+        v-if="workspaceSubagentTabs.length === 0"
+        class="agent-status-empty"
+      >
+        No sub-agents in this workspace.
+      </div>
+    </div>
   </section>
 </template>
 
@@ -255,7 +224,6 @@ import {
 } from '../context'
 const {
   activeWorkspaceId,
-  workspaceSessionView,
   workspaceSubagentView,
   workspaceSubagentTabs,
   showManagedView,
@@ -263,8 +231,6 @@ const {
   openSubagentTab,
   subagentRuntimeStatus,
   subagentStatusText,
-  workspaceAgents,
-  reviewerSessions,
   isPending,
   refreshAgentStatuses,
   visibleWorkspaceSessions,
@@ -280,7 +246,6 @@ const {
   agentDeleteTitle,
   agentActionKey,
   deleteAgent,
-  visibleWorkspaceSessionsEmptyText,
 } = useWorkspaceRuntimeContext()
 const {
   isResidentAgent,
@@ -297,14 +262,10 @@ const {
   openSwitchEnvModal,
 } = useWorkspaceAgentManagerContext()
 
-// Every count zero: the switch/grid band would show three empty buttons and a
-// placeholder, so it collapses to one line. The Subagents view is exempt: the
-// user opened it deliberately and its empty state is the answer.
-const agentBandEmpty = computed(() =>
-  !workspaceSubagentView.value
-  && workspaceAgents.value.length === 0
-  && reviewerSessions.value.length === 0
-  && workspaceSubagentTabs.value.length === 0,
+// If only children exist, show their jump cards without an empty first tab.
+const showSubagents = computed(() =>
+  workspaceSubagentTabs.value.length > 0
+  && (workspaceSubagentView.value || visibleWorkspaceSessions.value.length === 0),
 )
 </script>
 
@@ -318,20 +279,6 @@ const agentBandEmpty = computed(() =>
   border-bottom: 1px solid var(--ch-color-border-muted);
   background: var(--ch-color-canvas);
   padding: 12px 18px;
-}
-
-.agent-status-compact {
-  grid-column: 1 / -1;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  min-height: 30px;
-}
-
-.agent-status-compact-text {
-  color: var(--ch-color-text-muted);
-  font-size: 12px;
 }
 
 .agent-status-header {

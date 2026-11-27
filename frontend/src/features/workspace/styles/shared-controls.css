@@ -2,8 +2,7 @@
 .primary-button,
 .abort-button,
 .danger-button,
-.secondary-button,
-.advanced-start select {
+.secondary-button {
   border: 1px solid var(--ch-color-border-strong);
   border-radius: var(--ch-radius-md);
   background: var(--ch-color-surface-control);

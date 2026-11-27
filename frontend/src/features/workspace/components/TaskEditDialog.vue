@@ -49,27 +49,14 @@
           />
         </div>
         <div class="modal-field">
-          <label>Dispatch agent</label>
-          <select v-model="editTaskForm.session_id">
-            <option value="">
-              Auto
-            </option>
-            <option
-              v-for="agent in workspaceAgents"
-              :key="agent.id"
-              :value="agent.id"
-            >
-              {{ agent.title }}
-            </option>
-          </select>
-        </div>
-        <div class="modal-field">
-          <label>Related task</label>
+          <label for="task-edit-related">Related task</label>
           <p class="modal-hint">
-            Session/context reuse hint — not a Task parent (<code>parent_task_id</code>).
-            Task Graph tree UI is follow-up <code>487c630c</code>; not implemented here.
+            Select only when you need to continue another task’s context.
           </p>
-          <select v-model="editTaskForm.related_task_id">
+          <select
+            id="task-edit-related"
+            v-model="editTaskForm.related_task_id"
+          >
             <option value="">
               None
             </option>
@@ -81,15 +68,6 @@
               {{ task.title }}
             </option>
           </select>
-        </div>
-        <div class="modal-field">
-          <label class="checkbox-label">
-            <input
-              v-model="editTaskForm.clear_context"
-              type="checkbox"
-            >
-            Clear context
-          </label>
         </div>
         <div class="modal-actions">
           <button
@@ -132,7 +110,6 @@ const {
   editingTaskId,
 } = useWorkspaceTaskActionsContext()
 const {
-  workspaceAgents,
   tasks,
   isLoading,
   isPending,

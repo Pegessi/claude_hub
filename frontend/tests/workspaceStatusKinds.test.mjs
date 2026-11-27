@@ -32,7 +32,7 @@ for (const [specifier, replacement] of Object.entries(replacements)) {
 }
 const { useWorkspaceRuntime } = await import(asModule(compiled))
 
-test('real runtime and Agents/Reviewers panel show native and terminal busy/idle without parsing transcript text', async (t) => {
+test('real runtime and Active Runs panel show native and terminal busy/idle without parsing transcript text', async (t) => {
   const previousStorage = globalThis.localStorage
   globalThis.localStorage = { getItem: () => null, setItem: () => {}, removeItem: () => {} }
   t.after(() => { globalThis.localStorage = previousStorage })
@@ -50,6 +50,7 @@ test('real runtime and Agents/Reviewers panel show native and terminal busy/idle
   workspace.activeWorkspaceId = 'kind-ws'
   const base = { target: 'local', title: 'Status kind', status: 'idle', runtime_status: 'idle', queued_count: 0 }
   const sessions = [
+    { ...base, id: 'resident', tab_id: 'resident-tab', role: 'resident', session_kind: 'chat', agent_type: 'codex' },
     { ...base, id: 'native-agent', tab_id: 'native-agent-tab', role: 'orchestrator', session_kind: 'chat', agent_type: 'claude' },
     { ...base, id: 'native-codex-agent', tab_id: 'native-codex-agent-tab', role: 'orchestrator', session_kind: 'chat', agent_type: 'codex' },
     { ...base, id: 'native-claude-reviewer', tab_id: 'native-claude-reviewer-tab', role: 'reviewer', session_kind: 'chat', agent_type: 'claude' },
@@ -76,24 +77,37 @@ test('real runtime and Agents/Reviewers panel show native and terminal busy/idle
     }
     return null
   }
-  for (const view of ['agents', 'reviewers']) {
-    runtime.workspaceSessionView.value = view
-    for (const state of ['working', 'idle', 'working']) {
-      // Intentionally stale board runtime: the panel must prefer current tab API status.
-      workspace.board = { ...workspace.board, sessions: sessions.map(s => ({ ...s, runtime_status: state === 'working' ? 'idle' : 'working' })) }
-      terminal.agentStatuses = sessions.map(s => ({ tab_id: s.tab_id, status: state, status_text: state === 'working' ? 'Working' : 'Idle', detail: `${s.session_kind} ${state}` }))
-      await vue.nextTick()
-      for (const session of sessions.filter(s => (view === 'reviewers') === (s.role === 'reviewer'))) {
-        const rendered = panel.find(n => n.props?.class === 'agent-status-card' && contains(n, session.id))
-        assert.ok(rendered, `${view} card ${session.id}`)
-        assert.equal(findIn(rendered, 'agent-status-dot').props['data-status'], state)
-        const badge = findIn(rendered, 'agent-status-pill')
-        assert.equal(badge.props['data-status'], state)
-        assert.ok(contains(badge, state === 'working' ? 'Working' : 'Idle'))
-        assert.ok(contains(rendered, `${session.session_kind} ${state}`))
-      }
+  for (const state of ['working', 'idle', 'working']) {
+    // Intentionally stale board runtime: the panel must prefer current tab API status.
+    workspace.board = { ...workspace.board, sessions: sessions.map(s => ({ ...s, runtime_status: state === 'working' ? 'idle' : 'working' })) }
+    terminal.agentStatuses = sessions.map(s => ({ tab_id: s.tab_id, status: state, status_text: state === 'working' ? 'Working' : 'Idle', detail: `${s.session_kind} ${state}` }))
+    await vue.nextTick()
+    for (const session of sessions) {
+      const rendered = panel.find(n => n.props?.class === 'agent-status-card' && contains(n, session.id))
+      assert.ok(rendered, `Active Runs card ${session.id}`)
+      assert.equal(findIn(rendered, 'agent-status-dot').props['data-status'], state)
+      const badge = findIn(rendered, 'agent-status-pill')
+      assert.equal(badge.props['data-status'], state)
+      assert.ok(contains(badge, state === 'working' ? 'Working' : 'Idle'))
+      assert.ok(contains(rendered, `${session.session_kind} ${state}`))
     }
   }
+  assert.ok(contains(panel.root, 'Active Runs'))
+  assert.equal(contains(panel.root, 'Reviewers'), false)
+  // Stopped/offline sessions must not leave an empty seat pool band.
+  workspace.board = { ...workspace.board, sessions: sessions.map(s => ({ ...s, status: 'stopped' })) }
+  await vue.nextTick()
+  assert.equal(panel.find(n => n.props?.class === 'workspace-agent-status'), null)
+  terminal.tabs = [
+    { id: 'child', workspace_id: 'kind-ws', parent_tab_id: 'parent', session_kind: 'chat' },
+    { id: 'linked-child', workspace_id: 'kind-ws', subagent_id: 'delegation', session_kind: 'chat' },
+    { id: 'archived', workspace_id: 'kind-ws', parent_tab_id: 'parent', session_kind: 'chat', archived: true },
+    { id: 'other', workspace_id: 'elsewhere', parent_tab_id: 'parent', session_kind: 'chat' },
+    { id: 'manual', workspace_id: 'kind-ws', session_kind: 'chat' },
+  ]
+  await vue.nextTick()
+  assert.deepEqual(runtime.workspaceSubagentTabs.value.map(tab => tab.id), ['child', 'linked-child'])
+  assert.ok(panel.find(n => n.props?.class === 'workspace-subagent-row'))
   // Missing tab poll falls back to managed session runtime for both kinds/roles.
   terminal.agentStatuses = []
   await vue.nextTick()

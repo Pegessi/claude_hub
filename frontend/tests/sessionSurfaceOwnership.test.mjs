@@ -8,8 +8,6 @@ const readSource = relativePath => readFileSync(
 )
 
 const sessionCreator = readSource('../src/features/terminal/components/SessionCreator.vue')
-const workspaceAgentDialog = readSource('../src/features/workspace/components/WorkspaceAgentDialog.vue')
-const workspaceAgentManager = readSource('../src/features/workspace/composables/useWorkspaceAgentManager.ts')
 const workspaceRuntime = readSource('../src/features/workspace/composables/useWorkspaceRuntime.ts')
 const terminalPane = readSource('../src/components/TerminalPane.vue')
 const structuredPane = readSource('../src/features/chat/StructuredPane.vue')
@@ -28,7 +26,6 @@ test('Antigravity is opt-in for local Chat surfaces and scheduled tasks, not Res
   assert.match(agentConfigFields, /allowAntigravity: false/)
   assert.match(sessionCreator, /:allow-antigravity="form\.session_kind === 'chat' && form\.target === 'local'"/)
   assert.match(sessionCreator, /kind === 'terminal' && \['maso', 'antigravity'\]\.includes\(form\.agent_type\)/)
-  assert.match(workspaceAgentDialog, /:allow-antigravity="agentOptionsForm\.session_kind === 'chat' && agentOptionsForm\.target === 'local'"/)
   assert.match(scheduledTasksPanel, /<option value="antigravity">\s*antigravity\s*<\/option>/)
   assert.doesNotMatch(residentAgentDialog, /allow-antigravity|value="antigravity"/)
   assert.match(chatComposer, /:show-schedule="!isManagedChat"/)
@@ -44,16 +41,14 @@ test('Antigravity solo is an explicit choice and its identity is not rendered as
   assert.match(agentAvatar, /M11\.04 19\.32Q12 21\.51/)
 })
 
-test('top-level and Workspace launchers both expose an explicit execution surface', () => {
+test('top-level launcher and per-task form expose execution surfaces', () => {
   assert.match(sessionCreator, /@click="setSessionKind\('chat'\)"/)
   assert.match(sessionCreator, /@click="setSessionKind\('terminal'\)"/)
   assert.match(sessionCreator, /session_kind:\s*form\.session_kind/)
 
-  assert.match(workspaceAgentDialog, /<label>Execution surface<\/label>/)
-  assert.match(workspaceAgentDialog, /handleAgentSurfaceChange\('chat'\)/)
-  assert.match(workspaceAgentManager, /session_kind:\s*agentOptionsForm\.session_kind/)
   assert.match(taskDialog, /form\.session_kind === 'chat'/)
-  assert.match(taskDialog, /workspaceAgents\.filter\(agent => agent\.session_kind === form\.session_kind\)/)
+  assert.match(taskDialog, /v-model="form\.agent_type"/)
+  assert.doesNotMatch(taskDialog, /Dispatch agent|Clear context|form\.session_id/)
 })
 
 test('Agent Workspace opens the existing managed tab without creating a second transport', () => {
@@ -82,9 +77,7 @@ test('managed Chat mounts StructuredPane with managed session identity', () => {
   assert.match(chatComposerController, /deps\.submit\(action === 'steer' \? 'steer' : 'normal'\)/)
 })
 
-test('Workspace launcher exposes MASO only for local Chat', () => {
-  assert.match(workspaceAgentDialog, /:allow-maso="agentOptionsForm\.session_kind === 'chat'"/)
-  assert.match(workspaceAgentDialog, /:allow-terminal="agentOptionsForm\.session_kind === 'terminal'"/)
-  assert.match(workspaceAgentDialog, /:disabled="agentOptionsForm\.target === 'remote'"/)
-  assert.match(workspaceAgentManager, /if \(target === 'remote'\) handleAgentSurfaceChange\('terminal'\)/)
+test('task launcher uses supported provider families and disables remote Chat', () => {
+  assert.match(taskDialog, /v-for="agentType in availableAgentTypes"/)
+  assert.match(taskDialog, /:disabled="isRemoteWorkspace"/)
 })

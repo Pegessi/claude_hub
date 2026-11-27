@@ -5,7 +5,7 @@
         v-if="!activeWorkspaceId"
         class="empty-board"
       >
-        Create a workspace to start agents and queue tasks.
+        Create or select a workspace to add and run tasks.
       </div>
 
       <template v-else>
@@ -172,47 +172,6 @@
                 <span>{{ taskSourceLabel(task.source) }}</span>
                 <span>{{ taskExecutionLabel(task) }}</span>
               </div>
-              <details
-                v-if="canUseManagedTaskActions(task) && task.status === 'todo'"
-                class="advanced-start"
-                @click.stop
-              >
-                <summary>Dispatch options</summary>
-                <label>
-                  Agent
-                  <select v-model="startOptionsFor(task).target_session_id">
-                    <option value="">Auto</option>
-                    <option
-                      v-for="agent in workspaceAgents"
-                      :key="agent.id"
-                      :value="agent.id"
-                    >
-                      {{ agent.title }}
-                    </option>
-                  </select>
-                </label>
-                <label>
-                  Related task
-                  <span class="field-hint-inline">Session/context reuse hint — not a Task parent.</span>
-                  <select v-model="startOptionsFor(task).related_task_id">
-                    <option value="">Auto</option>
-                    <option
-                      v-for="candidate in tasks.filter(item => item.id !== task.id)"
-                      :key="candidate.id"
-                      :value="candidate.id"
-                    >
-                      {{ candidate.title }}
-                    </option>
-                  </select>
-                </label>
-                <label class="checkbox-label">
-                  <input
-                    v-model="startOptionsFor(task).clear_context"
-                    type="checkbox"
-                  >
-                  Clear context
-                </label>
-              </details>
               <div
                 v-if="canUseManagedTaskActions(task)"
                 class="task-actions"
@@ -355,6 +314,7 @@ import {
 } from '../context'
 const {
   activeWorkspaceId,
+  tasks,
   boardLoading,
   columns,
   isMobileColumnCollapsed,
@@ -362,8 +322,6 @@ const {
   toggleMobileColumn,
   selectedTaskId,
   latestReportForTask,
-  workspaceAgents,
-  tasks,
   isPending,
   taskActionKey,
   sessionForTask,
@@ -421,7 +379,6 @@ function lifecycleNote(taskId: string): string {
 }
 const {
   selectTask,
-  startOptionsFor,
   startTask,
   openEditTaskModal,
   markTask,

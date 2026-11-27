@@ -138,10 +138,6 @@
         <span>Queued behind</span>
         <strong>{{ selectedSession?.queued_count || 0 }}</strong>
       </div>
-      <div v-if="canUseManagedTaskActions(selectedTask)">
-        <span>Clear context</span>
-        <strong>{{ selectedTask.clear_context ? 'yes' : 'no' }}</strong>
-      </div>
       <div>
         <span>Snapshot</span>
         <strong>{{ board?.snapshot_path || 'none' }}</strong>

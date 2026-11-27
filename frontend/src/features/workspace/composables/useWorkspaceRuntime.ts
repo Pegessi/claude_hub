@@ -23,8 +23,6 @@ import {
   computed,
   ref,
   reactive,
-  watch,
-  onUnmounted,
 } from 'vue'
 import {
   type WorkspaceTaskStatus,
@@ -44,7 +42,6 @@ import {
   boardHasOpenTasks,
   workspaceDeleteConfirmMessage,
 } from '../presentation/workspaceDeletion'
-import type { WorkspaceSessionView } from '../types'
 
 export function useWorkspaceRuntime() {
   const appStore = useAppStore()
@@ -151,8 +148,6 @@ export function useWorkspaceRuntime() {
     }
   }
 
-  const workspaceSessionView = ref<WorkspaceSessionView>('agents')
-
   const elapsedClockMs = ref(Date.now())
 
   const mobileCollapsedColumns = reactive<Record<WorkspaceTaskStatus, boolean>>({
@@ -213,19 +208,12 @@ export function useWorkspaceRuntime() {
     ...(residentAgent.value ? [residentAgent.value] : []),
   ])
 
+  // All live task/review and Resident sessions share one observation surface.
   const visibleWorkspaceSessions = computed<ManagedSession[]>(() =>
-    workspaceSessionView.value === 'reviewers'
-      ? reviewerSessions.value
-      : [
-          ...workspaceAgents.value,
-          ...(residentAgent.value ? [residentAgent.value] : []),
-        ]
-  )
-
-  const visibleWorkspaceSessionsEmptyText = computed(() =>
-    workspaceSessionView.value === 'reviewers'
-      ? 'No reviewers in this workspace.'
-      : 'No agents in this workspace.'
+    managedWorkspaceSessions.value.filter(session =>
+      session.role !== 'dispatcher' && session.status !== 'stopped'
+      && agentRuntimeStatus(session) !== 'offline',
+    ),
   )
 
   const terminalStatusByTabId = computed<Record<string, TerminalAgentStatus>>(() => {
@@ -251,9 +239,8 @@ export function useWorkspaceRuntime() {
     )
   })
 
-  function showManagedView(view: WorkspaceSessionView) {
+  function showManagedView() {
     workspaceSubagentView.value = false
-    workspaceSessionView.value = view
   }
 
   function toggleWorkspaceSubagentView() {
@@ -274,22 +261,6 @@ export function useWorkspaceRuntime() {
     const status = terminalStatusByTabId.value[tab.id]
     return status?.status_text ?? (tab.is_active ? 'Idle' : 'Offline')
   }
-
-  // The board does not refresh terminal tabs; keep the sub-agent list live
-  // only while its view is active.
-  let subagentRefreshTimer: ReturnType<typeof setInterval> | null = null
-  watch(workspaceSubagentView, active => {
-    if (active) {
-      void terminalStore.fetchTabs()
-      subagentRefreshTimer = setInterval(() => void terminalStore.fetchTabs(), 5000)
-    } else if (subagentRefreshTimer !== null) {
-      clearInterval(subagentRefreshTimer)
-      subagentRefreshTimer = null
-    }
-  })
-  onUnmounted(() => {
-    if (subagentRefreshTimer !== null) clearInterval(subagentRefreshTimer)
-  })
 
   function taskActionKey(action: string, taskId: string | null | undefined) {
     return `task:${taskId || 'none'}:${action}`
@@ -464,7 +435,7 @@ export function useWorkspaceRuntime() {
     // Defer background refreshes while the user is typing to keep input smooth.
     if (isTextEntryFocused()) return
     try {
-      await workspaceStore.fetchBoard()
+      await Promise.all([workspaceStore.fetchBoard(), terminalStore.fetchTabs()])
       // Keep the open task's full timeline live without polling its whole history:
       // the trimmed board carries the latest report per task, so refetch the
       // on-demand history only when that latest report id has changed.
@@ -488,6 +459,7 @@ export function useWorkspaceRuntime() {
       Promise.all([
         workspaceStore.fetchBoard(),
         terminalStore.fetchAgentStatuses(),
+        terminalStore.fetchTabs(),
       ])
     )
   }
@@ -552,7 +524,6 @@ export function useWorkspaceRuntime() {
     activeFeedbackLessons,
     columns,
     taskCountByStatus,
-    workspaceSessionView,
     workspaceSubagentView,
     workspaceSubagentTabs,
     showManagedView,
@@ -576,7 +547,6 @@ export function useWorkspaceRuntime() {
     agentActionKey,
     deleteAgent,
     confirmDeleteWorkspace,
-    visibleWorkspaceSessionsEmptyText,
     boardLoading,
     isMobileColumnCollapsed,
     toggleMobileColumn,

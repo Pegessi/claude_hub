@@ -7,7 +7,7 @@
           :size="16"
         />Agent Workspace
       </h1>
-      <p>Manual task queue with multiple resident workspace agents.</p>
+      <p>Per-task isolated sessions with contract-driven blind review.</p>
       <div class="workspace-mobile-identity">
         <span><ThemeChromeIcon
           kind="workspace"
@@ -58,14 +58,6 @@
         @click="openLessonsModal"
       >
         Lessons
-      </button>
-      <button
-        type="button"
-        class="tool-button workspace-desktop-action"
-        :disabled="!activeWorkspaceId"
-        @click="openAgentOptionsModal"
-      >
-        Manage Agents
       </button>
       <button
         type="button"
@@ -139,14 +131,6 @@
           >
             Lessons
           </button>
-          <button
-            type="button"
-            class="workspace-mobile-menu-item"
-            :disabled="!activeWorkspaceId"
-            @click="openAgentOptionsModalFromMenu"
-          >
-            Manage Agents
-          </button>
           <LoadingButton
             type="button"
             class="workspace-mobile-menu-item"
@@ -180,7 +164,6 @@ import {
   useWorkspaceRuntimeContext,
   useWorkspaceEditorContext,
   useWorkspaceLessonsContext,
-  useWorkspaceAgentManagerContext,
   useWorkspaceNavigationContext,
 } from '../context'
 const {
@@ -205,15 +188,11 @@ const {
   openLessonsModal,
 } = useWorkspaceLessonsContext()
 const {
-  openAgentOptionsModal,
-} = useWorkspaceAgentManagerContext()
-const {
   goToTerminalMode,
   closeWorkspaceMobileMenu,
   openWorkspaceModalFromMenu,
   openEditWorkspaceModalFromMenu,
   openLessonsModalFromMenu,
-  openAgentOptionsModalFromMenu,
   refreshAgentStatusesFromMenu,
   openAppearanceFromMenu,
   workspaceMobileMenuRef,

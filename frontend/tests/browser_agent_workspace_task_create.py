@@ -137,8 +137,8 @@ async def main(browser_run: BrowserRun) -> None:
     blocked_requests: list[tuple[str, str]] = []
     unknown_requests: list[tuple[str, str]] = []
     create_calls: list[dict] = []
-    agent_create_calls: list[dict] = []
     task_update_calls: list[dict] = []
+    child_tabs: list[dict] = []
     managed_sessions: dict[str, list[dict]] = {"ws-1": [], "ws-2": []}
     created_by_key: dict[tuple[str, str], dict] = {}
     board_tasks = {
@@ -342,7 +342,7 @@ async def main(browser_run: BrowserRun) -> None:
                     }
                     for sessions in managed_sessions.values()
                     for session in sessions
-                ]
+                ] + child_tabs
             else:
                 capabilities_match = re.fullmatch(
                     r"/api/workspaces/(ws-1|ws-2)/task-capabilities",
@@ -365,42 +365,7 @@ async def main(browser_run: BrowserRun) -> None:
                     path,
                 )
                 update_match = re.fullmatch(r"/api/workspaces/tasks/([A-Za-z0-9._-]+)", path)
-                agent_match = re.fullmatch(
-                    r"/api/workspaces/(ws-1|ws-2)/agent",
-                    path,
-                )
-                if method == "POST" and agent_match and not parsed.query:
-                    workspace_id = agent_match.group(1)
-                    submitted = json.loads(request.post_data or "{}")
-                    agent_create_calls.append(submitted)
-                    index = len(agent_create_calls)
-                    session = {
-                        "id": f"managed-chat-{index}",
-                        "workspace_id": workspace_id,
-                        "task_id": None,
-                        "tab_id": f"managed-tab-{index}",
-                        "role": submitted.get("role", "orchestrator"),
-                        "agent_type": submitted["agent_type"],
-                        "session_kind": submitted.get("session_kind", "terminal"),
-                        "status": "idle",
-                        "runtime_status": "idle",
-                        "current_task_id": None,
-                        "queued_count": 0,
-                        "title": submitted.get("title") or "Managed Chat",
-                        "branch": None,
-                        "workspace_path": submitted.get("cwd") or "/tmp/alpha",
-                        "tmux_session": "managed-chat-fixture",
-                        "target": submitted.get("target", "local"),
-                        "remote_profile_id": None,
-                        "remote_cwd": None,
-                        "remote_reconnect": False,
-                        "solo_mode": False,
-                        "ephemeral": False,
-                        "env": submitted.get("env") or {},
-                    }
-                    managed_sessions[workspace_id].append(session)
-                    body = session
-                elif method == "PATCH" and update_match and not parsed.query:
+                if method == "PATCH" and update_match and not parsed.query:
                     task_id = update_match.group(1)
                     submitted = json.loads(request.post_data or "{}")
                     task_update_calls.append(submitted)
@@ -576,59 +541,79 @@ async def main(browser_run: BrowserRun) -> None:
         await expect(workspace_picker).to_contain_text("Workspace One")
         await expect(page.get_by_role("button", name="Add Task", exact=True)).to_be_enabled()
 
-        # Workspace agents choose their execution surface before
-        # provider selection. MASO is Chat-only, and selecting Remote must force
-        # the form back to Terminal rather than offering unsupported native Chat.
-        await page.get_by_role("button", name="Manage Agents", exact=True).click()
-        agent_modal = page.locator(".workspace-modal").filter(
-            has=page.get_by_role("heading", name="Manage Agents", exact=True)
+        # The workspace header no longer exposes resident seat management.
+        await expect(page.get_by_role("button", name="Manage Agents", exact=True)).to_have_count(0)
+        await expect(page.locator(".workspace-agent-status")).to_have_count(0)
+
+        # Active runs/children must be available in the default Triage layout,
+        # as well as Classic Board. Real clicks open the existing tab identity.
+        managed_sessions["ws-1"].append(
+            {
+                "id": "task-session",
+                "workspace_id": "ws-1",
+                "tab_id": "task-session-tab",
+                "title": "Active task run",
+                "role": "orchestrator",
+                "agent_type": "codex",
+                "session_kind": "chat",
+                "status": "working",
+                "runtime_status": "working",
+                "workspace_path": "/fixture/one",
+                "target": "local",
+                "current_task_id": "record-1",
+                "queued_count": 0,
+                "ephemeral": True,
+            }
         )
-        await expect(agent_modal).to_be_visible()
-        await expect(agent_modal.locator(".agent-manager-view-switch")).to_have_count(0)
-        await expect(agent_modal.locator('option[value="reviewer"]')).to_have_count(0)
-        await agent_modal.get_by_role("button", name="Chat", exact=True).click()
-        agent_type = agent_modal.get_by_label("Agent Type", exact=True)
-        await expect(agent_type.locator('option[value="maso"]')).to_have_count(1)
-        await agent_type.select_option("maso")
-        await agent_modal.get_by_role("button", name="Remote", exact=True).click()
-        await expect(agent_modal.get_by_role("button", name="Chat", exact=True)).to_be_disabled()
-        await expect(agent_type).to_have_value("codex")
-        await expect(agent_type.locator('option[value="maso"]')).to_have_count(0)
-        await agent_modal.get_by_role("button", name="Local", exact=True).click()
-        await agent_modal.get_by_role("button", name="Chat", exact=True).click()
-        await agent_type.select_option("maso")
-        title_field = agent_modal.locator('input[placeholder="Workspace Agent"]')
-        await title_field.fill("MASO Chat reviewer")
-        await agent_modal.get_by_role("button", name="Create agent", exact=True).click()
-        await expect(agent_modal.get_by_text("MASO Chat reviewer", exact=True)).to_be_visible()
-        assert len(agent_create_calls) == 1
-        agent_payload = agent_create_calls[0]
-        assert agent_payload["agent_type"] == "maso"
-        assert agent_payload["session_kind"] == "chat"
-        assert agent_payload["role"] == "orchestrator"
-        assert agent_payload["target"] == "local"
-        assert agent_payload["title"] == "MASO Chat reviewer"
-        # A historical reviewer remains visible beside generic agents, with its
-        # existing Open/Delete controls, without a separate role-selection page.
-        legacy_reviewer = dict(managed_sessions["ws-1"][0])
-        legacy_reviewer.update(
-            id="legacy-reviewer",
-            tab_id="legacy-reviewer-tab",
-            title="Legacy reviewer",
-            role="reviewer",
+        child_tabs.append(
+            {
+                "id": "child-tab",
+                "name": "Active child",
+                "agent_type": "claude",
+                "session_kind": "chat",
+                "workspace_id": "ws-1",
+                "parent_tab_id": "task-session-tab",
+                "is_active": True,
+                "target": "local",
+                "cwd": "/fixture/one",
+                "port": 0,
+                "created_at": NOW,
+            }
         )
-        managed_sessions["ws-1"].append(legacy_reviewer)
-        await page.evaluate("""async () => {
-          const {useWorkspaceStore} = await import('/src/stores/workspaceStore.ts');
-          await useWorkspaceStore().fetchBoard('ws-1');
+
+        async def refresh_run_fixtures():
+            await page.evaluate("""async () => {
+              const {useWorkspaceStore} = await import('/src/stores/workspaceStore.ts');
+              const {useTerminalStore} = await import('/src/stores/terminalStore.ts');
+              await useWorkspaceStore().fetchBoard('ws-1');
+              await useTerminalStore().fetchTabs({ force: true });
+            }""")
+
+        await refresh_run_fixtures()
+        await expect(page.locator(".tp-shell")).to_be_visible()
+        await expect(page.get_by_role("button", name="Active Runs 1", exact=True)).to_be_visible()
+        await expect(page.get_by_role("button", name="Reviewers", exact=True)).to_have_count(0)
+        await page.locator(".agent-status-card-main").click()
+        await page.wait_for_function("""async () => {
+          const {useTerminalStore} = await import('/src/stores/terminalStore.ts');
+          return useTerminalStore().activeTabId === "task-session-tab";
         }""")
-        reviewer_row = agent_modal.locator(".agent-row").filter(has_text="Legacy reviewer")
-        await expect(reviewer_row).to_be_visible()
-        await expect(reviewer_row.get_by_role("button", name="Open", exact=True)).to_be_enabled()
-        await expect(reviewer_row.get_by_role("button", name="Delete", exact=True)).to_be_enabled()
-        await expect(agent_modal.get_by_text("MASO Chat reviewer", exact=True)).to_be_visible()
-        await page.screenshot(path=output / "managed-chat-agent.png", full_page=True)
-        await agent_modal.get_by_role("button", name="Cancel", exact=True).click()
+        await page.get_by_role("button", name="Subagents 1", exact=True).click()
+        await page.locator(".workspace-subagent-row").click()
+        await page.wait_for_function("""async () => {
+          const {useTerminalStore} = await import('/src/stores/terminalStore.ts');
+          return useTerminalStore().activeTabId === "child-tab";
+        }""")
+        await page.get_by_role("button", name="Classic Board", exact=True).click()
+        await expect(page.locator(".workspace-subagent-row")).to_be_visible()
+        await page.get_by_role("button", name="Triage View", exact=True).click()
+        await expect(page.locator(".workspace-subagent-row")).to_be_visible()
+        child_tabs.clear()
+        await refresh_run_fixtures()
+        await expect(page.locator(".agent-status-card-main")).to_be_visible()
+        managed_sessions["ws-1"].clear()
+        await refresh_run_fixtures()
+        await expect(page.locator(".workspace-agent-status")).to_have_count(0)
 
         async def open_add_task():
             await page.get_by_role("button", name="Add Task", exact=True).click()
@@ -636,6 +621,13 @@ async def main(browser_run: BrowserRun) -> None:
                 has=page.get_by_role("heading", name="Add Task", exact=True)
             )
             await expect(modal).to_be_visible()
+            if await modal.get_by_label("Title", exact=True).count():
+                await expect(modal.get_by_role("button", name="Chat", exact=True)).to_have_class(
+                    "segment-button active"
+                )
+                await expect(modal.get_by_label("Agent", exact=True)).to_have_value("codex")
+            await expect(modal.get_by_text("Dispatch agent", exact=True)).to_have_count(0)
+            await expect(modal.get_by_text("Clear context", exact=True)).to_have_count(0)
             return modal
 
         async def fill_task(modal, title: str, *, initiator: bool = False) -> None:
@@ -871,6 +863,7 @@ async def main(browser_run: BrowserRun) -> None:
         assert await load_create_attempt("ws-1") is None
 
         await modal.get_by_role("button", name="Chat", exact=True).click()
+        await modal.get_by_label("Agent", exact=True).select_option("maso")
         await modal.get_by_label("Title", exact=True).fill("Attachment-only uncertain create")
         await paste_task_attachment(modal)
         await expect(modal.get_by_label("Task description", exact=True)).to_have_value("")
@@ -884,6 +877,9 @@ async def main(browser_run: BrowserRun) -> None:
         assert first_attachment_call["body"]["title"] == "Attachment-only uncertain create"
         assert first_attachment_call["body"]["prompt"] == ""
         assert first_attachment_call["body"]["session_kind"] == "chat"
+        assert first_attachment_call["body"]["agent_type"] == "maso"
+        assert "session_id" not in first_attachment_call["body"]
+        assert "clear_context" not in first_attachment_call["body"]
         assert first_attachment_call["body"]["attachments"] == [EXPECTED_ATTACHMENT_CREATE]
         attachment_request_key = first_attachment_call["body"]["request_key"]
         assert isinstance(attachment_request_key, str) and attachment_request_key
@@ -1300,93 +1296,9 @@ async def main(browser_run: BrowserRun) -> None:
         await cancel.click()
         await expect(page.get_by_role("heading", name="Add Task")).to_have_count(0)
 
-        # Also verify Workspace Manage Agents -> Browse (AgentDirectoryDialog) with 20
-        # populated directories under a 300px soft-keyboard visualViewport (offsetTop=70):
-        # the compact path bar keeps a usable nonzero directory list area so wheel-scrolling
-        # to the bottom exposes folder-19 above the sticky footer for click navigation.
         await page.locator(".workspace-mobile-menu-trigger").click()
-        await page.locator(".workspace-mobile-menu-panel").get_by_role(
-            "button", name="Manage Agents", exact=True
-        ).click()
-        agent_modal = page.locator(".agent-manager-modal")
-        await expect(agent_modal).to_be_visible()
-        await agent_modal.get_by_role("button", name="Browse", exact=True).click()
-        ws_fb_modal = page.locator(".file-browser-modal")
-        await expect(ws_fb_modal).to_be_visible()
-        await expect(ws_fb_modal.locator(".file-item.is-dir")).to_have_count(21)
-        await ws_fb_modal.locator(".file-browser-path input").focus()
-        await page.evaluate("""async () => {
-          const root = document.documentElement;
-          root.style.setProperty('--visual-viewport-offset-top', '70px');
-          root.style.setProperty('--visual-viewport-height', '300px');
-          const vv = window.visualViewport;
-          Object.defineProperty(vv, 'height', { configurable: true, get: () => 300 });
-          Object.defineProperty(vv, 'offsetTop', { configurable: true, get: () => 70 });
-          vv.dispatchEvent(new Event('resize'));
-          vv.dispatchEvent(new Event('scroll'));
-          await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
-        }""")
-        try:
-            await ws_fb_modal.locator(".file-browser-list").hover()
-            await page.mouse.wheel(0, 1200)
-            ws_fb_kb_state = await page.evaluate("""async () => {
-              await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
-              const modal = document.querySelector('.file-browser-modal');
-              const pathBar = modal.querySelector('.file-browser-path');
-              const list = modal.querySelector('.file-browser-list');
-              const footer = modal.querySelector('.modal-actions');
-              const items = modal.querySelectorAll('.file-item.is-dir');
-              const last = items[items.length - 1];
-              const mr = modal.getBoundingClientRect();
-              const pr = pathBar.getBoundingClientRect();
-              const lr = list.getBoundingClientRect();
-              const fr = footer.getBoundingClientRect();
-              const ir = last.getBoundingClientRect();
-              const hit = document.elementFromPoint(ir.left + ir.width / 2, ir.top + ir.height / 2);
-              return {
-                modalTop: mr.top,
-                modalBottom: mr.bottom,
-                pathHeight: pr.height,
-                listTop: lr.top,
-                listBottom: lr.bottom,
-                listClientHeight: list.clientHeight,
-                listScrollTop: list.scrollTop,
-                footerTop: fr.top,
-                lastTop: ir.top,
-                lastBottom: ir.bottom,
-                lastHit: Boolean(hit && (last === hit || last.contains(hit))),
-              };
-            }""")
-            assert ws_fb_kb_state["modalTop"] >= 70 - 1, ws_fb_kb_state
-            assert abs(ws_fb_kb_state["modalBottom"] - 370) <= 1, ws_fb_kb_state
-            assert ws_fb_kb_state["pathHeight"] <= 56, ws_fb_kb_state
-            assert ws_fb_kb_state["listClientHeight"] >= 72, ws_fb_kb_state
-            assert ws_fb_kb_state["listBottom"] <= ws_fb_kb_state["footerTop"] + 1, ws_fb_kb_state
-            assert ws_fb_kb_state["listScrollTop"] > 0, ws_fb_kb_state
-            assert ws_fb_kb_state["lastTop"] >= ws_fb_kb_state["listTop"] - 1, ws_fb_kb_state
-            assert ws_fb_kb_state["lastBottom"] <= ws_fb_kb_state["footerTop"] + 1, ws_fb_kb_state
-            assert ws_fb_kb_state["lastHit"], ws_fb_kb_state
-            await ws_fb_modal.locator(".file-item.is-dir").last.click()
-            await expect(ws_fb_modal.locator(".file-browser-path input")).to_have_value(
-                "/fixture/one/folder-19"
-            )
-        finally:
-            await page.evaluate("""async () => {
-              const root = document.documentElement;
-              const vv = window.visualViewport;
-              delete vv.height;
-              delete vv.offsetTop;
-              root.style.removeProperty('--visual-viewport-offset-top');
-              root.style.removeProperty('--visual-viewport-height');
-              vv.dispatchEvent(new Event('resize'));
-              vv.dispatchEvent(new Event('scroll'));
-              await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
-            }""")
-        await ws_fb_modal.get_by_role("button", name="Cancel", exact=True).click()
-        await expect(ws_fb_modal).to_have_count(0)
-        await agent_modal.get_by_role("button", name="Cancel", exact=True).click()
-        await expect(agent_modal).to_have_count(0)
-        assert await browser_create_count() == mobile_create_count
+        await expect(page.get_by_role("button", name="Manage Agents", exact=True)).to_have_count(0)
+        await page.locator(".workspace-mobile-menu-trigger").click()
 
         # Verify WorkspaceEditorDialog and TaskEditDialog at 390x844 do not
         # auto-focus text inputs and move focus into the modal container.

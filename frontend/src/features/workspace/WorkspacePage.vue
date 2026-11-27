@@ -2,14 +2,14 @@
   <section class="workspace-view">
     <WorkspaceHeader />
 
+    <WorkspaceAgentStatus />
+
     <WorkspaceTriagePro
       v-if="runtime.workspaceLayoutMode.value === 'triage' && (Boolean(runtime.activeWorkspaceId.value) || runtime.workspaces.value.length > 0)"
     />
 
     <template v-else>
       <WorkspaceSummary />
-
-      <WorkspaceAgentStatus />
 
       <WorkspaceBoard />
 
@@ -28,10 +28,6 @@
     <TaskEditDialog />
 
     <WorkspaceLessonsDialog />
-
-    <WorkspaceAgentDialog />
-
-    <AgentDirectoryDialog />
   </section>
 
   <SwitchEnvDialog />
@@ -52,8 +48,6 @@ import WorkspaceEditorDialog from './components/WorkspaceEditorDialog.vue'
 import ResidentAgentDialog from './components/ResidentAgentDialog.vue'
 import TaskEditDialog from './components/TaskEditDialog.vue'
 import WorkspaceLessonsDialog from './components/WorkspaceLessonsDialog.vue'
-import WorkspaceAgentDialog from './components/WorkspaceAgentDialog.vue'
-import AgentDirectoryDialog from './components/AgentDirectoryDialog.vue'
 import SwitchEnvDialog from './components/SwitchEnvDialog.vue'
 import WorkspaceNotifications from './components/WorkspaceNotifications.vue'
 import {
@@ -65,9 +59,6 @@ import {
 import {
   useWorkspaceAgentManager,
 } from './composables/useWorkspaceAgentManager'
-import {
-  useWorkspaceDirectoryBrowser,
-} from './composables/useWorkspaceDirectoryBrowser'
 import {
   useWorkspaceArtifacts,
 } from './composables/useWorkspaceArtifacts'
@@ -90,7 +81,6 @@ import {
   provideWorkspaceRuntimeContext,
   provideWorkspaceEditorContext,
   provideWorkspaceAgentManagerContext,
-  provideWorkspaceDirectoryBrowserContext,
   provideWorkspaceArtifactsContext,
   provideWorkspaceTaskPresentationContext,
   provideWorkspaceTaskActionsContext,
@@ -108,27 +98,11 @@ const editor = useWorkspaceEditor({
   elapsedClockMs: runtime.elapsedClockMs,
 })
 const agents = useWorkspaceAgentManager({
-  defaultPresetTextForAgent: runtime.defaultPresetTextForAgent,
-  reviewerSessions: runtime.reviewerSessions,
-  workspaceAgents: runtime.workspaceAgents,
-  dispatcherAgent: runtime.dispatcherAgent,
-  residentAgent: runtime.residentAgent,
-  isLoading: runtime.isLoading,
-  isPending: runtime.isPending,
-  activeWorkspace: runtime.activeWorkspace,
   getPresetText: runtime.getPresetText,
   workspaceStore: runtime.workspaceStore,
   runPending: runtime.runPending,
   sessionActionKey: runtime.sessionActionKey,
   terminalStore: runtime.terminalStore,
-  remoteProfiles: editor.remoteProfiles,
-  fetchRemoteProfiles: editor.fetchRemoteProfiles,
-})
-const directory = useWorkspaceDirectoryBrowser({
-  agentOptionsForm: agents.agentOptionsForm,
-  showAgentFileBrowser: agents.showAgentFileBrowser,
-  remoteProfiles: editor.remoteProfiles,
-  runPending: runtime.runPending,
 })
 const artifacts = useWorkspaceArtifacts({
   selectedTask: runtime.selectedTask,
@@ -168,7 +142,6 @@ const navigation = useWorkspaceNavigation({
   refreshAgentStatuses: runtime.refreshAgentStatuses,
   openWorkspaceModal: editor.openWorkspaceModal,
   openEditWorkspaceModal: editor.openEditWorkspaceModal,
-  openAgentOptionsModal: agents.openAgentOptionsModal,
   openLessonsModal: lessons.openLessonsModal,
 })
 useWorkspaceLifecycle({
@@ -177,7 +150,7 @@ useWorkspaceLifecycle({
   workspaceStore: runtime.workspaceStore,
   activeWorkspaceId: runtime.activeWorkspaceId,
   selectedWorkspaceId: runtime.selectedWorkspaceId,
-  workspaceSessionView: runtime.workspaceSessionView,
+  workspaceSubagentView: runtime.workspaceSubagentView,
   taskCreateFlow: runtime.taskCreateFlow,
   terminalStore: runtime.terminalStore,
   refreshBoard: runtime.refreshBoard,
@@ -207,7 +180,6 @@ provideWorkspaceRuntimeContext({
   activeFeedbackLessons: runtime.activeFeedbackLessons,
   columns: runtime.columns,
   taskCountByStatus: runtime.taskCountByStatus,
-  workspaceSessionView: runtime.workspaceSessionView,
   workspaceSubagentView: runtime.workspaceSubagentView,
   workspaceSubagentTabs: runtime.workspaceSubagentTabs,
   showManagedView: runtime.showManagedView,
@@ -231,7 +203,6 @@ provideWorkspaceRuntimeContext({
   agentActionKey: runtime.agentActionKey,
   deleteAgent: runtime.deleteAgent,
   confirmDeleteWorkspace: runtime.confirmDeleteWorkspace,
-  visibleWorkspaceSessionsEmptyText: runtime.visibleWorkspaceSessionsEmptyText,
   boardLoading: runtime.boardLoading,
   isMobileColumnCollapsed: runtime.isMobileColumnCollapsed,
   toggleMobileColumn: runtime.toggleMobileColumn,
@@ -300,19 +271,7 @@ provideWorkspaceEditorContext({
   handleSaveResidentAndRunNow: editor.handleSaveResidentAndRunNow,
 })
 provideWorkspaceAgentManagerContext({
-  openAgentOptionsModal: agents.openAgentOptionsModal,
   openSwitchEnvModal: agents.openSwitchEnvModal,
-  showAgentOptionsModal: agents.showAgentOptionsModal,
-  closeAgentOptionsModal: agents.closeAgentOptionsModal,
-  agentManagerSessions: agents.agentManagerSessions,
-  agentManagerEmptyText: agents.agentManagerEmptyText,
-  handleCreateAdvancedAgent: agents.handleCreateAdvancedAgent,
-  agentOptionsForm: agents.agentOptionsForm,
-  handleAgentSurfaceChange: agents.handleAgentSurfaceChange,
-  handleAgentTargetChange: agents.handleAgentTargetChange,
-  selectedAgentRemoteProfile: agents.selectedAgentRemoteProfile,
-  isAgentOptionsCreateDisabled: agents.isAgentOptionsCreateDisabled,
-  showAgentFileBrowser: agents.showAgentFileBrowser,
   switchEnvForm: agents.switchEnvForm,
   showSwitchEnvManager: agents.showSwitchEnvManager,
   closeSwitchEnvPresetManager: agents.closeSwitchEnvPresetManager,
@@ -322,21 +281,6 @@ provideWorkspaceAgentManagerContext({
   handleSwitchEnv: agents.handleSwitchEnv,
   applySwitchEnvPreset: agents.applySwitchEnvPreset,
   openSwitchEnvPresetManager: agents.openSwitchEnvPresetManager,
-})
-provideWorkspaceDirectoryBrowserContext({
-  openAgentDirectoryBrowser: directory.openAgentDirectoryBrowser,
-  browserPlacement: directory.browserPlacement,
-  navigateAgentBrowserHome: directory.navigateAgentBrowserHome,
-  agentBrowserParentPath: directory.agentBrowserParentPath,
-  navigateAgentBrowserParent: directory.navigateAgentBrowserParent,
-  agentBrowserPathInput: directory.agentBrowserPathInput,
-  loadAgentDirectory: directory.loadAgentDirectory,
-  refreshAgentDirectory: directory.refreshAgentDirectory,
-  agentBrowserItems: directory.agentBrowserItems,
-  handleAgentFileItemClick: directory.handleAgentFileItemClick,
-  agentBrowserLoading: directory.agentBrowserLoading,
-  agentBrowserError: directory.agentBrowserError,
-  selectAgentCurrentDirectory: directory.selectAgentCurrentDirectory,
 })
 provideWorkspaceArtifactsContext({
   openMarkdownPreviewModal: artifacts.openMarkdownPreviewModal,
@@ -390,7 +334,6 @@ provideWorkspaceTaskPresentationContext({
 })
 provideWorkspaceTaskActionsContext({
   selectTask: tasks.selectTask,
-  startOptionsFor: tasks.startOptionsFor,
   startTask: tasks.startTask,
   openEditTaskModal: tasks.openEditTaskModal,
   markTask: tasks.markTask,
@@ -432,7 +375,6 @@ provideWorkspaceNavigationContext({
   openWorkspaceModalFromMenu: navigation.openWorkspaceModalFromMenu,
   openEditWorkspaceModalFromMenu: navigation.openEditWorkspaceModalFromMenu,
   openLessonsModalFromMenu: navigation.openLessonsModalFromMenu,
-  openAgentOptionsModalFromMenu: navigation.openAgentOptionsModalFromMenu,
   refreshAgentStatusesFromMenu: navigation.refreshAgentStatusesFromMenu,
   openAppearanceFromMenu: navigation.openAppearanceFromMenu,
   workspaceMobileMenuRef: navigation.workspaceMobileMenuRef,

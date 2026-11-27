@@ -94,7 +94,6 @@
 .task-card--done .task-card-description,
 .task-card--done .latest-report,
 .task-card--done .session-meta,
-.task-card--done .advanced-start,
 .task-card--done .task-actions {
   display: none;
 }
@@ -328,34 +327,6 @@
 .session-meta {
   flex-wrap: wrap;
   margin-bottom: 8px;
-}
-
-.advanced-start {
-  margin: 0 0 8px;
-  border-top: 1px solid var(--ch-color-border-strong);
-  padding-top: 8px;
-}
-
-.advanced-start summary {
-  margin-bottom: 8px;
-  color: var(--ch-color-accent);
-  font-size: 11px;
-  cursor: pointer;
-}
-
-.advanced-start label {
-  margin-bottom: 8px;
-}
-
-.advanced-start .checkbox-label {
-  flex-direction: row;
-  align-items: center;
-}
-
-.advanced-start input[type='checkbox'] {
-  width: 14px;
-  height: 14px;
-  accent-color: var(--ch-color-accent);
 }
 
 .task-actions {
