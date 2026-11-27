@@ -379,8 +379,8 @@ class _TaskAbortMixin(_TaskFollowupMixin):
                         live.workspace_id,
                         live.id,
                     )
-            await self.dispatch_workspace(live.workspace_id)
-            return self.tasks[live.id]
+        await self.dispatch_workspace(resolved_workspace_id)
+        return self.tasks[task_id]
 
     async def abort_task(
         self,

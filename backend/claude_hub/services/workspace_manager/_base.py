@@ -71,6 +71,7 @@ class _WorkspaceManagerBase(_RuntimeHostContract):
     _task_notice_jobs: dict[str, asyncio.Task[None]]
     _monitor_task: asyncio.Task[None] | None
     _pump_locks: dict[str, asyncio.Lock]
+    _rehoming_task_ids: set[str]
     _retiring_session_ids: set[str]
     _report_intake_committed: set[str]
     _report_intake_locks: dict[str, asyncio.Lock]

@@ -19,11 +19,19 @@ class _DispatchQueueMixin(_WorkspaceManagerBase):
         if workspace_id not in self.workspaces:
             raise KeyError(workspace_id)
 
+        if refresh_sessions:
+            await self._refresh_session_statuses(workspace_id)
+        # Rehome stranded implicitly-associated tasks BEFORE acquiring the
+        # dispatch lock so session provisioning (which acquires
+        # workspace_mutation_lock) never inverts lock order against callers
+        # that hold workspace_mutation_lock -> _dispatch_locks.
+        await self._rehome_stranded_queued_tasks(workspace_id)
+
         lock = self._dispatch_locks.setdefault(workspace_id, asyncio.Lock())
         async with lock:
             await self._dispatch_workspace_locked(
                 workspace_id,
-                refresh_sessions=refresh_sessions,
+                refresh_sessions=False,
             )
 
     async def _dispatch_workspace_locked(
@@ -55,7 +63,6 @@ class _DispatchQueueMixin(_WorkspaceManagerBase):
         # (sent to tmux), it is not re-sent; if it is still in
         # pending_call_ids, the pump sends it to the tmux inbox exactly once.
         await self._recover_queued_task_ownership(workspace_id)
-        await self._rehome_stranded_queued_tasks(workspace_id)
         for session in self._workspace_agents(workspace_id, include_stopped=True):
             if not self._can_dispatch_to(session):
                 logger.info(
@@ -185,71 +192,82 @@ class _DispatchQueueMixin(_WorkspaceManagerBase):
             key=_sort_time,
         )
         for task in candidates:
-            live = self.tasks.get(task.id)
-            if (
-                live is None
-                or live.status != WorkspaceTaskStatus.QUEUED
-                or live.dispatch_pending
-                or (live.dispatch_reason or "") in _NON_MIGRATABLE_DISPATCH_REASONS
-                or task_dependency_blockers(self.tasks, live)
-            ):
+            if task.id in self._rehoming_task_ids:
                 continue
-            current_session = self.sessions.get(live.session_id or "")
-            if not self._session_blocks_implicit_queue_progress(current_session, live.id):
-                continue
-            if (
-                workspace.target == ExecutionTarget.LOCAL
-                and live.auto_worktree
-                and not live.worktree_path
-            ):
-                continue
-            cwd = (
-                live.worktree_path
-                if (workspace.target == ExecutionTarget.LOCAL and live.auto_worktree)
-                else workspace.path
-            )
-            inherited_env = dict(current_session.env) if current_session else {}
-            inherited_preset = current_session.env_preset if current_session else None
-            replacement = await self.ensure_workspace_agent(
-                workspace.id,
-                EnsureWorkspaceAgentRequest(
-                    agent_type=live.agent_type,
-                    session_kind=live.session_kind,
-                    role=WorkspaceSessionRole.ORCHESTRATOR,
-                    target=workspace.target,
-                    reuse_existing=False,
-                    ephemeral=True,
-                    caller_owned_ephemeral=True,
-                    cwd=cwd,
-                    env=inherited_env,
-                    env_preset=inherited_preset,
-                ),
-            )
-            adopted = False
+            self._rehoming_task_ids.add(task.id)
             try:
-                async with self.workspace_mutation_lock(workspace_id):
-                    latest = self.tasks.get(task.id)
-                    latest_session = self.sessions.get(latest.session_id or "") if latest else None
-                    if (
-                        latest is not None
-                        and latest.status == WorkspaceTaskStatus.QUEUED
-                        and not latest.dispatch_pending
-                        and (latest.dispatch_reason or "") not in _NON_MIGRATABLE_DISPATCH_REASONS
-                        and self._session_blocks_implicit_queue_progress(latest_session, latest.id)
-                        and replacement.id in self.sessions
-                    ):
-                        self.tasks[latest.id] = latest.model_copy(
-                            update={
-                                "session_id": replacement.id,
-                                "dispatch_reason": "Dedicated task session",
-                                "updated_at": self._runtime_now(),
-                            }
+                live = self.tasks.get(task.id)
+                if (
+                    live is None
+                    or live.status != WorkspaceTaskStatus.QUEUED
+                    or live.dispatch_pending
+                    or (live.dispatch_reason or "") in _NON_MIGRATABLE_DISPATCH_REASONS
+                    or task_dependency_blockers(self.tasks, live)
+                ):
+                    continue
+                current_session = self.sessions.get(live.session_id or "")
+                if not self._session_blocks_implicit_queue_progress(current_session, live.id):
+                    continue
+                if (
+                    workspace.target == ExecutionTarget.LOCAL
+                    and live.auto_worktree
+                    and not live.worktree_path
+                ):
+                    continue
+                cwd = (
+                    live.worktree_path
+                    if (workspace.target == ExecutionTarget.LOCAL and live.auto_worktree)
+                    else workspace.path
+                )
+                inherited_env = dict(current_session.env) if current_session else {}
+                inherited_preset = current_session.env_preset if current_session else None
+                replacement = await self.ensure_workspace_agent(
+                    workspace.id,
+                    EnsureWorkspaceAgentRequest(
+                        agent_type=live.agent_type,
+                        session_kind=live.session_kind,
+                        role=WorkspaceSessionRole.ORCHESTRATOR,
+                        target=workspace.target,
+                        reuse_existing=False,
+                        ephemeral=True,
+                        caller_owned_ephemeral=True,
+                        cwd=cwd,
+                        env=inherited_env,
+                        env_preset=inherited_preset,
+                    ),
+                )
+                adopted = False
+                try:
+                    async with self.workspace_mutation_lock(workspace_id):
+                        latest = self.tasks.get(task.id)
+                        latest_session = (
+                            self.sessions.get(latest.session_id or "") if latest else None
                         )
-                        self._save_state()
-                        adopted = True
+                        if (
+                            latest is not None
+                            and latest.status == WorkspaceTaskStatus.QUEUED
+                            and not latest.dispatch_pending
+                            and (latest.dispatch_reason or "")
+                            not in _NON_MIGRATABLE_DISPATCH_REASONS
+                            and self._session_blocks_implicit_queue_progress(
+                                latest_session, latest.id
+                            )
+                            and replacement.id in self.sessions
+                        ):
+                            self.tasks[latest.id] = latest.model_copy(
+                                update={
+                                    "session_id": replacement.id,
+                                    "dispatch_reason": "Dedicated task session",
+                                    "updated_at": self._runtime_now(),
+                                }
+                            )
+                            self._save_state()
+                            adopted = True
+                finally:
+                    if not adopted:
+                        await asyncio.shield(self._best_effort_delete_session(replacement.id))
             finally:
-                if not adopted:
-                    await asyncio.shield(self._best_effort_delete_session(replacement.id))
+                self._rehoming_task_ids.discard(task.id)
 
     async def _recover_queued_task_ownership(self, workspace_id: str) -> None:
         """Re-send the assignment prompt for sessions that claimed a QUEUED
