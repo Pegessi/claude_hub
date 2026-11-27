@@ -267,3 +267,29 @@ class _SessionLifecycleMixin(_WorkspaceManagerBase):
             self._restore_report_intake_workspace(workspace_id, snapshot)
             raise
         self._task_activity_cursors.pop(task_id, None)
+
+        orphan_session_id = task.session_id
+        if orphan_session_id is not None and self._deleted_task_session_is_orphan(
+            orphan_session_id
+        ):
+            cleanup = self._best_effort_delete_session(
+                orphan_session_id,
+                before_delete=lambda: self._deleted_task_session_is_orphan(orphan_session_id),
+            )
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                asyncio.run(cleanup)
+            else:
+                loop.create_task(cleanup, name=f"deleted-task-session-{orphan_session_id}")
+
+    def _deleted_task_session_is_orphan(self, session_id: str) -> bool:
+        session = self.sessions.get(session_id)
+        if session is None or not session.ephemeral:
+            return False
+        workspace = self.workspaces.get(session.workspace_id)
+        return bool(
+            workspace is not None
+            and workspace.resident_agent_session_id != session_id
+            and not any(task.session_id == session_id for task in self.tasks.values())
+        )

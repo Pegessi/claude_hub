@@ -270,6 +270,8 @@ class _TaskStartMixin(_WorkspaceManagerBase):
                 staged_task = apply_task_update(task, base_update, cause="start")
                 decision = await self._choose_dispatch_target(workspace, staged_task, payload)
                 target, clear_context, reason = decision
+                if target.id == created_ephemeral_session_id:
+                    reason = "Dedicated task session"
 
                 # Re-read live task after _choose_dispatch_target await and enforce
                 # the auto_worktree isolation invariant before committing!

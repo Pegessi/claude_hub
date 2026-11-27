@@ -637,6 +637,7 @@ def test_task_execution_complexity_prompts_and_legacy_normalization(
     complex_task = client.post(
         f"/api/workspaces/{workspace['id']}/tasks",
         json={
+            "session_kind": "terminal",
             "title": "Complex task",
             "prompt": "Implement a broad feature with tests",
             "execution_complexity": "complex",
@@ -690,7 +691,7 @@ def test_task_execution_complexity_prompts_and_legacy_normalization(
 
     auto_task = client.post(
         f"/api/workspaces/{workspace['id']}/tasks",
-        json={"title": "Auto task", "prompt": "Judge the size"},
+        json={"session_kind": "terminal", "title": "Auto task", "prompt": "Judge the size"},
     ).json()
     assert auto_task["execution_complexity"] == "auto"
 
@@ -726,6 +727,7 @@ def test_autonomous_task_passes_after_evaluator_review(
     task = client.post(
         f"/api/workspaces/{workspace['id']}/tasks",
         json={
+            "session_kind": "terminal",
             "title": "Auto pass",
             "prompt": "Complete and evaluate",
             "task_mode": "autonomous",
@@ -826,6 +828,7 @@ def test_autonomous_passed_ignores_stale_worker_reports(
     task = client.post(
         f"/api/workspaces/{workspace['id']}/tasks",
         json={
+            "session_kind": "terminal",
             "title": "Auto stale",
             "prompt": "Complete and evaluate",
             "task_mode": "autonomous",
@@ -941,6 +944,7 @@ def test_autonomous_task_exhausts_iteration_budget(
     task = client.post(
         f"/api/workspaces/{workspace['id']}/tasks",
         json={
+            "session_kind": "terminal",
             "title": "Auto exhaust",
             "prompt": "Use one iteration",
             "task_mode": "autonomous",
@@ -1002,6 +1006,7 @@ def test_direct_task_completed_does_not_auto_request_ai_review(
     task = client.post(
         f"/api/workspaces/{workspace['id']}/tasks",
         json={
+            "session_kind": "terminal",
             "title": "Direct complete",
             "prompt": "Complete without AI review",
             "task_mode": "direct",
@@ -1055,6 +1060,7 @@ def test_direct_task_waiting_reports_do_not_become_accept_ready(
     task = client.post(
         f"/api/workspaces/{workspace['id']}/tasks",
         json={
+            "session_kind": "terminal",
             "title": f"Direct {report_state}",
             "prompt": "Report unfinished work without AI review",
             "task_mode": "direct",
@@ -1109,6 +1115,7 @@ def test_direct_task_explicit_review_request_still_creates_reviewer(
     task = client.post(
         f"/api/workspaces/{workspace['id']}/tasks",
         json={
+            "session_kind": "terminal",
             "title": "Direct review",
             "prompt": "Request review explicitly",
             "task_mode": "direct",
@@ -1196,7 +1203,7 @@ def test_agent_report_stores_goal_packet_and_acceptance_check(
     ).json()
     task = client.post(
         f"/api/workspaces/{workspace['id']}/tasks",
-        json={"title": "Goal report", "prompt": "Report a Goal Packet"},
+        json={"session_kind": "terminal", "title": "Goal report", "prompt": "Report a Goal Packet"},
     ).json()
     started = client.post(f"/api/workspaces/tasks/{task['id']}/start", json={}).json()
     assert "list brief acceptance criteria" in sent_messages[-1][1]
@@ -1305,7 +1312,11 @@ def test_working_goal_packet_triggers_approval_review(
     ).json()
     task = client.post(
         f"/api/workspaces/{workspace['id']}/tasks",
-        json={"title": "Plan first", "prompt": "Implement after plan approval"},
+        json={
+            "session_kind": "terminal",
+            "title": "Plan first",
+            "prompt": "Implement after plan approval",
+        },
     ).json()
     started = client.post(f"/api/workspaces/tasks/{task['id']}/start", json={}).json()
     sent_messages.clear()
@@ -1362,7 +1373,11 @@ def test_goal_packet_review_pass_resumes_original_agent(
     ).json()
     task = client.post(
         f"/api/workspaces/{workspace['id']}/tasks",
-        json={"title": "Approve packet", "prompt": "Implement after approval"},
+        json={
+            "session_kind": "terminal",
+            "title": "Approve packet",
+            "prompt": "Implement after approval",
+        },
     ).json()
     started = client.post(f"/api/workspaces/tasks/{task['id']}/start", json={}).json()
     client.post(
@@ -1457,7 +1472,11 @@ def test_goal_packet_review_failed_returns_revision_to_original_agent(
     ).json()
     task = client.post(
         f"/api/workspaces/{workspace['id']}/tasks",
-        json={"title": "Revise packet", "prompt": "Do the full task, not just docs"},
+        json={
+            "session_kind": "terminal",
+            "title": "Revise packet",
+            "prompt": "Do the full task, not just docs",
+        },
     ).json()
     started = client.post(f"/api/workspaces/tasks/{task['id']}/start", json={}).json()
     client.post(
@@ -1535,7 +1554,11 @@ def test_implementation_review_not_misrouted_as_goal_packet_review(
     ).json()
     task = client.post(
         f"/api/workspaces/{workspace['id']}/tasks",
-        json={"title": "Impl review stays review", "prompt": "Build it and review it"},
+        json={
+            "session_kind": "terminal",
+            "title": "Impl review stays review",
+            "prompt": "Build it and review it",
+        },
     ).json()
     started = client.post(f"/api/workspaces/tasks/{task['id']}/start", json={}).json()
 
@@ -1681,7 +1704,11 @@ def test_duplicate_goal_packet_review_does_not_strand_task_in_working(
     ).json()
     task = client.post(
         f"/api/workspaces/{workspace['id']}/tasks",
-        json={"title": "Stale dup review", "prompt": "Build it and review it"},
+        json={
+            "session_kind": "terminal",
+            "title": "Stale dup review",
+            "prompt": "Build it and review it",
+        },
     ).json()
     started = client.post(f"/api/workspaces/tasks/{task['id']}/start", json={}).json()
 
@@ -2432,7 +2459,7 @@ def test_completed_report_creates_temporary_reviewer(
     worker = client.post(f"/api/workspaces/{workspace['id']}/agent", json={}).json()
     task = client.post(
         f"/api/workspaces/{workspace['id']}/tasks",
-        json={"title": "Review me", "prompt": "Implement then review"},
+        json={"session_kind": "terminal", "title": "Review me", "prompt": "Implement then review"},
     ).json()
     started = client.post(
         f"/api/workspaces/tasks/{task['id']}/start",
@@ -2504,7 +2531,7 @@ def test_reviewer_clears_context_between_unrelated_tasks(
 
     first_task = client.post(
         f"/api/workspaces/{workspace['id']}/tasks",
-        json={"title": "First", "prompt": "Implement first"},
+        json={"session_kind": "terminal", "title": "First", "prompt": "Implement first"},
     ).json()
     client.post(
         f"/api/workspaces/tasks/{first_task['id']}/start",
@@ -2534,7 +2561,7 @@ def test_reviewer_clears_context_between_unrelated_tasks(
 
     second_task = client.post(
         f"/api/workspaces/{workspace['id']}/tasks",
-        json={"title": "Second", "prompt": "Implement second"},
+        json={"session_kind": "terminal", "title": "Second", "prompt": "Implement second"},
     ).json()
     client.post(
         f"/api/workspaces/tasks/{second_task['id']}/start",
@@ -2603,7 +2630,12 @@ def test_reviewer_honors_task_clear_context_flag(
     # Fresh reviewer, first-ever review, but the task opts into clear_context.
     task = client.post(
         f"/api/workspaces/{workspace['id']}/tasks",
-        json={"title": "Clear me", "prompt": "Implement clearable", "clear_context": True},
+        json={
+            "session_kind": "terminal",
+            "title": "Clear me",
+            "prompt": "Implement clearable",
+            "clear_context": True,
+        },
     ).json()
     client.post(
         f"/api/workspaces/tasks/{task['id']}/start",
@@ -2661,7 +2693,7 @@ def test_reviewer_bound_to_working_task_is_not_reused_for_other_review(
 
     first_task = client.post(
         f"/api/workspaces/{workspace['id']}/tasks",
-        json={"title": "First", "prompt": "Needs revision"},
+        json={"session_kind": "terminal", "title": "First", "prompt": "Needs revision"},
     ).json()
     client.post(
         f"/api/workspaces/tasks/{first_task['id']}/start",
@@ -2689,7 +2721,7 @@ def test_reviewer_bound_to_working_task_is_not_reused_for_other_review(
 
     second_task = client.post(
         f"/api/workspaces/{workspace['id']}/tasks",
-        json={"title": "Second", "prompt": "Independent review"},
+        json={"session_kind": "terminal", "title": "Second", "prompt": "Independent review"},
     ).json()
     client.post(
         f"/api/workspaces/tasks/{second_task['id']}/start",
@@ -2744,11 +2776,11 @@ def test_shared_review_session_id_does_not_steal_busy_reviewer(
 
     first_task = client.post(
         f"/api/workspaces/{workspace['id']}/tasks",
-        json={"title": "First", "prompt": "First task"},
+        json={"session_kind": "terminal", "title": "First", "prompt": "First task"},
     ).json()
     second_task = client.post(
         f"/api/workspaces/{workspace['id']}/tasks",
-        json={"title": "Second", "prompt": "Second task"},
+        json={"session_kind": "terminal", "title": "Second", "prompt": "Second task"},
     ).json()
 
     # First task: start and complete to get a reviewer assigned.
@@ -2835,7 +2867,11 @@ def test_failed_review_continues_reviewed_task_after_repeated_attempts(
     worker = client.post(f"/api/workspaces/{workspace['id']}/agent", json={}).json()
     task = client.post(
         f"/api/workspaces/{workspace['id']}/tasks",
-        json={"title": "Keep iterating", "prompt": "Fix until review passes"},
+        json={
+            "session_kind": "terminal",
+            "title": "Keep iterating",
+            "prompt": "Fix until review passes",
+        },
     ).json()
     client.post(
         f"/api/workspaces/tasks/{task['id']}/start",
@@ -2896,7 +2932,7 @@ def test_reviewer_keeps_context_when_re_reviewing_same_task(
 
     task = client.post(
         f"/api/workspaces/{workspace['id']}/tasks",
-        json={"title": "Same", "prompt": "Implement and revise"},
+        json={"session_kind": "terminal", "title": "Same", "prompt": "Implement and revise"},
     ).json()
     client.post(
         f"/api/workspaces/tasks/{task['id']}/start",
@@ -2964,7 +3000,7 @@ def test_reviewer_clears_context_even_when_prior_task_review_session_id_nulled(
 
     first_task = client.post(
         f"/api/workspaces/{workspace['id']}/tasks",
-        json={"title": "First", "prompt": "Implement first"},
+        json={"session_kind": "terminal", "title": "First", "prompt": "Implement first"},
     ).json()
     client.post(
         f"/api/workspaces/tasks/{first_task['id']}/start",
@@ -2988,7 +3024,7 @@ def test_reviewer_clears_context_even_when_prior_task_review_session_id_nulled(
 
     second_task = client.post(
         f"/api/workspaces/{workspace['id']}/tasks",
-        json={"title": "Second", "prompt": "Implement second"},
+        json={"session_kind": "terminal", "title": "Second", "prompt": "Implement second"},
     ).json()
     client.post(
         f"/api/workspaces/tasks/{second_task['id']}/start",
@@ -3102,7 +3138,7 @@ def test_agent_review_gate_states_trigger_reviewer(
     ).json()
     task = client.post(
         f"/api/workspaces/{workspace['id']}/tasks",
-        json={"title": "Manual gate", "prompt": "Stop at human review"},
+        json={"session_kind": "terminal", "title": "Manual gate", "prompt": "Stop at human review"},
     ).json()
     started = client.post(f"/api/workspaces/tasks/{task['id']}/start", json={}).json()
 
@@ -3147,6 +3183,7 @@ def test_completed_skip_review_marks_review_without_reviewer(
     task = client.post(
         f"/api/workspaces/{workspace['id']}/tasks",
         json={
+            "session_kind": "terminal",
             "title": "Analysis task",
             "prompt": "Analyze without editing",
             "goal_packet": {
@@ -3234,7 +3271,11 @@ def test_manual_feedback_reaper_promotes_lesson(
     ).json()
     task = client.post(
         f"/api/workspaces/{workspace['id']}/tasks",
-        json={"title": "CLI symbols", "prompt": "Figure out the --symbols CLI format"},
+        json={
+            "session_kind": "terminal",
+            "title": "CLI symbols",
+            "prompt": "Figure out the --symbols CLI format",
+        },
     ).json()
     started = client.post(f"/api/workspaces/tasks/{task['id']}/start", json={}).json()
 
@@ -3405,7 +3446,11 @@ def test_task_assignment_injects_lessons_index_with_api_and_take_tracking(
 
     task = client.post(
         f"/api/workspaces/{workspace['id']}/tasks",
-        json={"title": "Symbols CLI probe", "prompt": "Probe market data symbols via CLI"},
+        json={
+            "session_kind": "terminal",
+            "title": "Symbols CLI probe",
+            "prompt": "Probe market data symbols via CLI",
+        },
     ).json()
     start_response = client.post(f"/api/workspaces/tasks/{task['id']}/start", json={})
 
@@ -4072,6 +4117,7 @@ def test_lessons_index_filters_by_relevance_without_full_body_leak(
     cjk_task = client.post(
         f"/api/workspaces/{cjk_workspace['id']}/tasks",
         json={
+            "session_kind": "terminal",
             "title": "写真图片生成",
             "prompt": "生成希希芙写真图片，先看仓库工作流。",
         },
@@ -4132,7 +4178,7 @@ def test_lessons_index_filters_by_relevance_without_full_body_leak(
     )
     emoji_task = client.post(
         f"/api/workspaces/{emoji_workspace['id']}/tasks",
-        json={"title": "😀😀", "prompt": "🔥🔥"},
+        json={"session_kind": "terminal", "title": "😀😀", "prompt": "🔥🔥"},
     ).json()
     emoji_start_response = client.post(
         f"/api/workspaces/tasks/{emoji_task['id']}/start",
@@ -4206,6 +4252,7 @@ def test_completed_skip_review_does_not_backfill_optional_plan_evidence(
         json={"name": "Skip Goal Required", "path": str(repo), "session_prefix": "skipg"},
     ).json()
     task_payload: dict[str, object] = {
+        "session_kind": "terminal",
         "title": "Analysis task",
         "prompt": "Analyze without editing",
     }
@@ -4270,6 +4317,7 @@ def test_completed_skip_review_allows_explicit_trivial_changed_files(
     task = client.post(
         f"/api/workspaces/{workspace['id']}/tasks",
         json={
+            "session_kind": "terminal",
             "title": "Bind host",
             "prompt": "Switch dev server host to 0.0.0.0",
             "goal_packet": {
@@ -4339,6 +4387,7 @@ def test_completed_skip_review_is_denied_for_changed_files(
     task = client.post(
         f"/api/workspaces/{workspace['id']}/tasks",
         json={
+            "session_kind": "terminal",
             "title": "Code task",
             "prompt": "Change code",
             "goal_packet": {
@@ -4415,6 +4464,7 @@ def test_completed_skip_review_is_denied_for_tracked_diff(
     task = client.post(
         f"/api/workspaces/{workspace['id']}/tasks",
         json={
+            "session_kind": "terminal",
             "title": "Dirty task",
             "prompt": "Change tracked files",
             "goal_packet": {
@@ -4479,6 +4529,7 @@ def test_manual_request_review_after_skipped_review(
     task = client.post(
         f"/api/workspaces/{workspace['id']}/tasks",
         json={
+            "session_kind": "terminal",
             "title": "Manual request",
             "prompt": "Maybe review later",
             "goal_packet": {
@@ -4614,7 +4665,7 @@ def test_review_passed_keeps_task_in_review(
     ).json()
     task = client.post(
         f"/api/workspaces/{workspace['id']}/tasks",
-        json={"title": "Pass task", "prompt": "Complete cleanly"},
+        json={"session_kind": "terminal", "title": "Pass task", "prompt": "Complete cleanly"},
     ).json()
     started = client.post(f"/api/workspaces/tasks/{task['id']}/start", json={}).json()
     client.post(
@@ -4750,7 +4801,7 @@ def test_review_failed_returns_feedback_to_original_agent(
     ).json()
     task = client.post(
         f"/api/workspaces/{workspace['id']}/tasks",
-        json={"title": "Fail task", "prompt": "Needs a fix"},
+        json={"session_kind": "terminal", "title": "Fail task", "prompt": "Needs a fix"},
     ).json()
     started = client.post(f"/api/workspaces/tasks/{task['id']}/start", json={}).json()
     client.post(
@@ -4774,256 +4825,6 @@ def test_review_failed_returns_feedback_to_original_agent(
     assert workspace_manager.sessions[started["session_id"]].current_task_id == task["id"]
     assert "Reviewer requested changes" in sent_messages[-1][1]
     assert "add the missing assertion" in sent_messages[-1][1]
-
-
-def test_request_changes_cannot_preempt_agent_reused_after_review(
-    monkeypatch: MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    sent_messages: list[tuple[str, str]] = []
-    stub_workspace_terminal(
-        monkeypatch,
-        repo,
-        tab_id="busy-agent-tab",
-        port=12750,
-        sent_messages=sent_messages,
-    )
-
-    client = TestClient(app)
-    workspace = client.post(
-        "/api/workspaces",
-        json={"name": "Busy Agent", "path": str(repo), "session_prefix": "busy"},
-    ).json()
-    worker = client.post(f"/api/workspaces/{workspace['id']}/agent", json={}).json()
-    first_task = client.post(
-        f"/api/workspaces/{workspace['id']}/tasks",
-        json={"title": "First task", "prompt": "Implement first"},
-    ).json()
-    first_started = client.post(
-        f"/api/workspaces/tasks/{first_task['id']}/start",
-        json={"target_session_id": worker["id"]},
-    ).json()
-    client.post(
-        f"/api/workspaces/sessions/{first_started['session_id']}/reports",
-        json={
-            "task_id": first_task["id"],
-            "state": "completed",
-            "message": "First task done",
-        },
-    )
-    pass_response = pass_task_review(client, first_task["id"])
-    assert pass_response.status_code == 201
-
-    second_task = client.post(
-        f"/api/workspaces/{workspace['id']}/tasks",
-        json={"title": "Second task", "prompt": "Implement second"},
-    ).json()
-    second_started = client.post(
-        f"/api/workspaces/tasks/{second_task['id']}/start",
-        json={"target_session_id": worker["id"]},
-    )
-    assert second_started.status_code == 201
-    # Review completion frees the idle worker for the next task, even before
-    # human acceptance. A later rejection must not preempt that new assignment.
-    assert workspace_manager.tasks[second_task["id"]].status == WorkspaceTaskStatus.WORKING
-    assert workspace_manager.sessions[worker["id"]].current_task_id == second_task["id"]
-    message_count = len(sent_messages)
-    response = client.post(
-        f"/api/workspaces/tasks/{first_task['id']}/continue",
-        json={"message": "Please adjust before human acceptance."},
-    )
-
-    assert response.status_code == 400
-    assert "busy with another task" in response.json()["detail"]
-    assert workspace_manager.tasks[first_task["id"]].status == WorkspaceTaskStatus.REVIEW
-    assert workspace_manager.sessions[worker["id"]].current_task_id == second_task["id"]
-    assert workspace_manager.tasks[second_task["id"]].status == WorkspaceTaskStatus.WORKING
-    assert len(sent_messages) == message_count
-
-
-def test_start_task_dispatches_to_resident_agent(
-    monkeypatch: MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    repo = tmp_path / "repo"
-    repo.mkdir()
-
-    async def fake_create_tab(
-        name: str,
-        shell: Optional[str] = None,
-        cwd: Optional[str] = None,
-        solo_mode: bool = False,
-        agent_type: AgentType = AgentType.CLAUDE,
-        session_kind: SessionKind = SessionKind.TERMINAL,
-        target: ExecutionTarget = ExecutionTarget.LOCAL,
-        remote_profile_id: Optional[str] = None,
-        remote_cwd: Optional[str] = None,
-        remote_reconnect: bool = True,
-        remote_forward_port: Optional[int] = None,
-        workspace_id: Optional[str] = None,
-        workspace_name: Optional[str] = None,
-        workspace_role: WorkspaceSessionRole | None = None,
-        managed_session_id: str | None = None,
-    ) -> TerminalTab:
-        return TerminalTab(
-            id="tab-agent",
-            name=name,
-            shell=shell,
-            cwd=cwd,
-            solo_mode=solo_mode,
-            agent_type=agent_type,
-            session_kind=session_kind,
-            target=target,
-            remote_profile_id=remote_profile_id,
-            remote_cwd=remote_cwd,
-            remote_reconnect=remote_reconnect,
-            port=12346,
-            created_at=datetime.now(),
-            is_active=True,
-            workspace_id=workspace_id,
-            workspace_name=workspace_name,
-            workspace_role=workspace_role,
-            managed_session_id=managed_session_id,
-        )
-
-    sent_messages: list[tuple[str, str]] = []
-    tab_metadata_updates: list[
-        tuple[str, str | None, str | None, WorkspaceSessionRole | None, str | None]
-    ] = []
-    renamed_tabs: list[tuple[str, str | None]] = []
-
-    async def fake_send_tmux_message(tmux_session: str, message: str) -> None:
-        sent_messages.append((tmux_session, message))
-
-    async def fake_ensure_session_ready(_session) -> None:
-        return None
-
-    async def fake_update_tab(tab_id: str, name: Optional[str] = None, **_: object) -> TerminalTab:
-        renamed_tabs.append((tab_id, name))
-        return TerminalTab(
-            id=tab_id,
-            name=name or "unchanged",
-            shell=None,
-            cwd=str(repo),
-            solo_mode=True,
-            agent_type=AgentType.CODEX,
-            target=ExecutionTarget.LOCAL,
-            remote_profile_id=None,
-            remote_cwd=None,
-            remote_reconnect=True,
-            port=12346,
-            created_at=datetime.now(),
-            is_active=True,
-            workspace_id=workspace_response.json()["id"],
-            workspace_name="Resident Repo",
-            workspace_role=WorkspaceSessionRole.ORCHESTRATOR,
-        )
-
-    def fake_set_tab_workspace_metadata(
-        tab_id: str,
-        workspace_id: str | None,
-        workspace_name: str | None,
-        workspace_role: WorkspaceSessionRole | None,
-        managed_session_id: str | None = None,
-    ) -> bool:
-        tab_metadata_updates.append(
-            (tab_id, workspace_id, workspace_name, workspace_role, managed_session_id)
-        )
-        return True
-
-    monkeypatch.setattr(workspace_module.ttyd_manager, "create_tab", fake_create_tab)
-    monkeypatch.setattr(workspace_module.ttyd_manager, "update_tab", fake_update_tab)
-    monkeypatch.setattr(
-        workspace_module.ttyd_manager,
-        "set_tab_workspace_metadata",
-        fake_set_tab_workspace_metadata,
-    )
-    monkeypatch.setattr(workspace_manager, "_send_tmux_message", fake_send_tmux_message)
-
-    async def _fake_send_with_receipt(tmux_session: str, message: str, call_id: str) -> None:
-        await fake_send_tmux_message(tmux_session, message)
-
-    monkeypatch.setattr(
-        workspace_manager,
-        "_send_tmux_message_with_receipt",
-        _fake_send_with_receipt,
-    )
-
-    async def _fake_query_receipt(tmux_session: str, call_id: str) -> bool:
-        return False
-
-    monkeypatch.setattr(workspace_manager, "_query_tmux_receipt", _fake_query_receipt)
-    monkeypatch.setattr(
-        workspace_manager,
-        "_ensure_session_ready_for_send",
-        fake_ensure_session_ready,
-    )
-
-    client = TestClient(app)
-    workspace_response = client.post(
-        "/api/workspaces",
-        json={
-            "name": "Resident Repo",
-            "path": str(repo),
-            "default_branch": "main",
-            "session_prefix": "resident",
-        },
-    )
-    task_response = client.post(
-        f"/api/workspaces/{workspace_response.json()['id']}/tasks",
-        json={
-            "title": "Resident task",
-            "prompt": "Run this in the resident terminal",
-            "agent_type": "codex",
-        },
-    )
-
-    response = client.post(
-        f"/api/workspaces/tasks/{task_response.json()['id']}/start",
-        json={},
-    )
-
-    assert response.status_code == 201
-    started_task = response.json()
-    assert started_task["status"] == "working"
-    assert started_task["session_id"] == "resident-agent-1"
-    session = workspace_manager.sessions[started_task["session_id"]]
-    assert session.role == WorkspaceSessionRole.ORCHESTRATOR
-    assert session.title == "Resident task"
-    assert session.workspace_path == str(repo)
-    assert renamed_tabs == [("tab-agent", "Resident task")]
-    assert len(sent_messages) == 1
-    assert "New workspace task assigned" in sent_messages[0][1]
-    assert "Run this in the resident terminal" in sent_messages[0][1]
-    assert renamed_tabs == [("tab-agent", "Resident task")]
-
-    board_response = client.get(f"/api/workspaces/{workspace_response.json()['id']}/board")
-    board = board_response.json()
-    assert board["workspace"]["dispatcher_session_id"] is None
-    assert board["tasks"][0]["status"] == "working"
-    assert board["tasks"][0]["session_id"] == "resident-agent-1"
-    assert tab_metadata_updates[-1] == (
-        "tab-agent",
-        workspace_response.json()["id"],
-        "Resident Repo",
-        WorkspaceSessionRole.ORCHESTRATOR,
-        "resident-agent-1",
-    )
-
-    report_response = client.post(
-        "/api/workspaces/sessions/resident-agent-1/reports",
-        json={
-            "task_id": task_response.json()["id"],
-            "state": "started",
-            "message": "Started resident task",
-        },
-    )
-
-    assert report_response.status_code == 201
-    board_response = client.get(f"/api/workspaces/{workspace_response.json()['id']}/board")
-    assert board_response.json()["tasks"][0]["status"] == "working"
 
 
 def test_review_passed_frees_agent_before_human_acceptance(
@@ -5065,6 +4866,7 @@ def test_review_passed_frees_agent_before_human_acceptance(
     first_task = client.post(
         f"/api/workspaces/{workspace['id']}/tasks",
         json={
+            "session_kind": "terminal",
             "title": "First task",
             "prompt": "Complete this before the next queued task",
         },
@@ -5105,13 +4907,14 @@ def test_review_passed_frees_agent_before_human_acceptance(
     second_task = client.post(
         f"/api/workspaces/{workspace['id']}/tasks",
         json={
+            "session_kind": "terminal",
             "title": "Second task",
             "prompt": "Run while the reviewed task awaits human acceptance",
         },
     ).json()
     second_start = client.post(
         f"/api/workspaces/tasks/{second_task['id']}/start",
-        json={},
+        json={"target_session_id": session_id},
     )
 
     # A passed review parks the result for human acceptance, not the idle
@@ -5133,288 +4936,6 @@ def test_review_passed_frees_agent_before_human_acceptance(
     assert workspace_manager.tasks[second_task["id"]].status == WorkspaceTaskStatus.WORKING
     assert workspace_manager.sessions[session_id].current_task_id == second_task["id"]
     assert "Run while the reviewed task awaits human acceptance" in sent_messages[-1][1]
-
-
-def test_reassigns_auto_queued_task_when_another_agent_becomes_free(
-    monkeypatch: MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """Auto-queued work should not stay stuck behind a held review if another agent frees up."""
-
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    sent_messages: list[tuple[str, str]] = []
-    stub_workspace_terminal(
-        monkeypatch,
-        repo,
-        tab_id="queue-rebalance-tab",
-        port=12348,
-        sent_messages=sent_messages,
-    )
-
-    async def fake_list_statuses(*_args, **_kwargs) -> list[TerminalAgentStatus]:
-        return []
-
-    monkeypatch.setattr(
-        workspace_module.ttyd_manager,
-        "list_tab_agent_statuses",
-        fake_list_statuses,
-    )
-
-    client = TestClient(app)
-    workspace = client.post(
-        "/api/workspaces",
-        json={
-            "name": "Queue Rebalance Repo",
-            "path": str(repo),
-            "default_branch": "main",
-            "session_prefix": "queue-rebalance",
-        },
-    ).json()
-    first_agent = client.post(f"/api/workspaces/{workspace['id']}/agent", json={}).json()
-    second_agent = client.post(f"/api/workspaces/{workspace['id']}/agent", json={}).json()
-
-    first_task = client.post(
-        f"/api/workspaces/{workspace['id']}/tasks",
-        json={"title": "First review task", "prompt": "Hold first agent"},
-    ).json()
-    client.post(
-        f"/api/workspaces/tasks/{first_task['id']}/start",
-        json={"target_session_id": first_agent["id"]},
-    )
-    client.post(
-        f"/api/workspaces/sessions/{first_agent['id']}/reports",
-        json={
-            "task_id": first_task["id"],
-            "state": "ready_for_review",
-            "message": "Ready",
-        },
-    )
-
-    second_task = client.post(
-        f"/api/workspaces/{workspace['id']}/tasks",
-        json={"title": "Second review task", "prompt": "Hold second agent"},
-    ).json()
-    client.post(
-        f"/api/workspaces/tasks/{second_task['id']}/start",
-        json={"target_session_id": second_agent["id"]},
-    )
-    client.post(
-        f"/api/workspaces/sessions/{second_agent['id']}/reports",
-        json={
-            "task_id": second_task["id"],
-            "state": "ready_for_review",
-            "message": "Ready",
-        },
-    )
-
-    queued_task = client.post(
-        f"/api/workspaces/{workspace['id']}/tasks",
-        json={"title": "Queued task", "prompt": "Run on the next available agent"},
-    ).json()
-    queued_start = client.post(
-        f"/api/workspaces/tasks/{queued_task['id']}/start",
-        json={},
-    )
-
-    assert queued_start.status_code == 201
-    queued = queued_start.json()
-    assert queued["status"] == "queued"
-    assert queued["session_id"] == first_agent["id"]
-    assert queued["dispatch_reason"] == "Queued behind existing workspace agent"
-
-    # Both seats were held by in-flight reviews. Finishing only the second
-    # review makes that seat reusable without waiting for human acceptance.
-    assert pass_task_review(client, second_task["id"]).status_code == 201
-    assert client.post(f"/api/workspaces/{workspace['id']}/dispatch").status_code == 204
-    assert workspace_manager.tasks[second_task["id"]].status == WorkspaceTaskStatus.REVIEW
-    rebalanced = workspace_manager.tasks[queued_task["id"]]
-    assert rebalanced.status == WorkspaceTaskStatus.WORKING
-    assert rebalanced.session_id == second_agent["id"]
-    assert rebalanced.dispatch_reason == "Reassigned to newly available workspace agent"
-    assert workspace_manager.sessions[first_agent["id"]].current_task_id == first_task["id"]
-    assert workspace_manager.sessions[second_agent["id"]].current_task_id == queued_task["id"]
-    assert "Run on the next available agent" in sent_messages[-1][1]
-
-
-def test_reassigns_auto_queued_task_off_busy_working_agent(
-    monkeypatch: MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """A task auto-queued behind a genuinely WORKING agent should migrate to a
-    freshly available agent instead of starving until that one specific agent
-    goes idle."""
-
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    sent_messages: list[tuple[str, str]] = []
-    stub_workspace_terminal(
-        monkeypatch,
-        repo,
-        tab_id="queue-working-tab",
-        port=12349,
-        sent_messages=sent_messages,
-    )
-
-    async def fake_list_statuses(*_args, **_kwargs) -> list[TerminalAgentStatus]:
-        return []
-
-    monkeypatch.setattr(
-        workspace_module.ttyd_manager,
-        "list_tab_agent_statuses",
-        fake_list_statuses,
-    )
-
-    client = TestClient(app)
-    workspace = client.post(
-        "/api/workspaces",
-        json={
-            "name": "Queue Working Repo",
-            "path": str(repo),
-            "default_branch": "main",
-            "session_prefix": "queue-working",
-        },
-    ).json()
-    first_agent = client.post(f"/api/workspaces/{workspace['id']}/agent", json={}).json()
-
-    # First agent picks up a task and stays WORKING (no live status sample flips
-    # it back to idle), so the next task has nowhere free to land.
-    first_task = client.post(
-        f"/api/workspaces/{workspace['id']}/tasks",
-        json={"title": "Long running task", "prompt": "Keep first agent busy"},
-    ).json()
-    client.post(
-        f"/api/workspaces/tasks/{first_task['id']}/start",
-        json={"target_session_id": first_agent["id"]},
-    )
-    assert (
-        workspace_manager.sessions[first_agent["id"]].runtime_status == AgentRuntimeStatus.WORKING
-    )
-
-    queued_task = client.post(
-        f"/api/workspaces/{workspace['id']}/tasks",
-        json={"title": "Queued task", "prompt": "Run on the next available agent"},
-    ).json()
-    queued_start = client.post(
-        f"/api/workspaces/tasks/{queued_task['id']}/start",
-        json={},
-    )
-
-    assert queued_start.status_code == 201
-    queued = queued_start.json()
-    assert queued["status"] == "queued"
-    assert queued["session_id"] == first_agent["id"]
-    assert queued["dispatch_reason"] == "Queued behind existing workspace agent"
-
-    # A second agent comes online; a dispatch pass should migrate the queued
-    # task off the still-WORKING first agent onto the now-idle second agent.
-    second_agent = client.post(f"/api/workspaces/{workspace['id']}/agent", json={}).json()
-    dispatch_response = client.post(f"/api/workspaces/{workspace['id']}/dispatch")
-    assert dispatch_response.status_code == 204
-
-    rebalanced = workspace_manager.tasks[queued_task["id"]]
-    assert rebalanced.status == WorkspaceTaskStatus.WORKING
-    assert rebalanced.session_id == second_agent["id"]
-    assert rebalanced.dispatch_reason == "Reassigned to newly available workspace agent"
-    assert workspace_manager.sessions[first_agent["id"]].current_task_id == first_task["id"]
-    assert workspace_manager.sessions[second_agent["id"]].current_task_id == queued_task["id"]
-    assert "Run on the next available agent" in sent_messages[-1][1]
-
-
-def test_reassigns_related_pinned_task_off_inflight_review_agent(
-    monkeypatch: MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """Related-task affinity may yield to another idle agent while the preferred
-    agent is held by an in-flight review; explicit operator pins may not."""
-
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    sent_messages: list[tuple[str, str]] = []
-    stub_workspace_terminal(
-        monkeypatch,
-        repo,
-        tab_id="related-pinned-tab",
-        port=12352,
-        sent_messages=sent_messages,
-    )
-
-    async def fake_list_statuses(*_args, **_kwargs) -> list[TerminalAgentStatus]:
-        return []
-
-    monkeypatch.setattr(
-        workspace_module.ttyd_manager,
-        "list_tab_agent_statuses",
-        fake_list_statuses,
-    )
-
-    client = TestClient(app)
-    workspace = client.post(
-        "/api/workspaces",
-        json={
-            "name": "Related Pinned Repo",
-            "path": str(repo),
-            "default_branch": "main",
-            "session_prefix": "related-pinned",
-        },
-    ).json()
-    first_agent = client.post(f"/api/workspaces/{workspace['id']}/agent", json={}).json()
-
-    # An in-flight review still reserves its worker. Related-task continuity
-    # initially queues the follow-up there, but is only a soft preference.
-    parked_task = client.post(
-        f"/api/workspaces/{workspace['id']}/tasks",
-        json={"title": "Review parked task", "prompt": "Hold first agent in review"},
-    ).json()
-    client.post(
-        f"/api/workspaces/tasks/{parked_task['id']}/start",
-        json={"target_session_id": first_agent["id"]},
-    )
-    client.post(
-        f"/api/workspaces/sessions/{first_agent['id']}/reports",
-        json={
-            "task_id": parked_task["id"],
-            "state": "ready_for_review",
-            "message": "Ready",
-        },
-    )
-    parked = workspace_manager.tasks[parked_task["id"]]
-    assert parked.status == WorkspaceTaskStatus.REVIEW
-    assert workspace_manager.sessions[first_agent["id"]].current_task_id == parked_task["id"]
-    assert not workspace_manager._can_dispatch_to(workspace_manager.sessions[first_agent["id"]])
-
-    # A follow-up task related to the parked one gets pinned to the same agent
-    # for context continuity (dispatch_reason "Related to task ...").
-    related_task = client.post(
-        f"/api/workspaces/{workspace['id']}/tasks",
-        json={"title": "Follow-up fix", "prompt": "Continue from the related task"},
-    ).json()
-    related_start = client.post(
-        f"/api/workspaces/tasks/{related_task['id']}/start",
-        json={"related_task_id": parked_task["id"]},
-    )
-
-    assert related_start.status_code == 201
-    queued = related_start.json()
-    assert queued["status"] == "queued"
-    assert queued["session_id"] == first_agent["id"]
-    assert queued["dispatch_reason"] == f"Related to task {parked_task['id']}"
-
-    # A second idle agent can take the follow-up without disturbing the
-    # preferred agent or its still-running reviewer.
-    second_agent = client.post(f"/api/workspaces/{workspace['id']}/agent", json={}).json()
-    dispatch_response = client.post(f"/api/workspaces/{workspace['id']}/dispatch")
-    assert dispatch_response.status_code == 204
-
-    rebalanced = workspace_manager.tasks[related_task["id"]]
-    assert rebalanced.status == WorkspaceTaskStatus.WORKING
-    assert rebalanced.session_id == second_agent["id"]
-    assert rebalanced.dispatch_reason == "Reassigned to newly available workspace agent"
-    assert rebalanced.clear_context is True
-    # The parked agent keeps holding its review task untouched.
-    assert workspace_manager.sessions[first_agent["id"]].current_task_id == parked_task["id"]
-    assert workspace_manager.sessions[second_agent["id"]].current_task_id == related_task["id"]
-    assert "Continue from the related task" in sent_messages[-1][1]
 
 
 def test_user_pinned_task_waits_for_inflight_review_without_migration(
@@ -5460,7 +4981,11 @@ def test_user_pinned_task_waits_for_inflight_review_without_migration(
 
     parked_task = client.post(
         f"/api/workspaces/{workspace['id']}/tasks",
-        json={"title": "Review parked task", "prompt": "Hold first agent in review"},
+        json={
+            "session_kind": "terminal",
+            "title": "Review parked task",
+            "prompt": "Hold first agent in review",
+        },
     ).json()
     client.post(
         f"/api/workspaces/tasks/{parked_task['id']}/start",
@@ -5478,7 +5003,11 @@ def test_user_pinned_task_waits_for_inflight_review_without_migration(
     # Operator explicitly targets the busy first agent.
     pinned_task = client.post(
         f"/api/workspaces/{workspace['id']}/tasks",
-        json={"title": "Operator pinned fix", "prompt": "Must run on first agent only"},
+        json={
+            "session_kind": "terminal",
+            "title": "Operator pinned fix",
+            "prompt": "Must run on first agent only",
+        },
     ).json()
     pinned_start = client.post(
         f"/api/workspaces/tasks/{pinned_task['id']}/start",
@@ -5553,7 +5082,7 @@ def test_dispatch_holds_agent_during_in_flight_review(
 
     first_task = client.post(
         f"/api/workspaces/{workspace['id']}/tasks",
-        json={"title": "First task", "prompt": "Review held"},
+        json={"session_kind": "terminal", "title": "First task", "prompt": "Review held"},
     ).json()
     first_start = client.post(
         f"/api/workspaces/tasks/{first_task['id']}/start",
@@ -5579,7 +5108,7 @@ def test_dispatch_holds_agent_during_in_flight_review(
 
     second_task = client.post(
         f"/api/workspaces/{workspace['id']}/tasks",
-        json={"title": "Second task", "prompt": "Pick the free agent"},
+        json={"session_kind": "terminal", "title": "Second task", "prompt": "Pick the free agent"},
     ).json()
     second_start = client.post(
         f"/api/workspaces/tasks/{second_task['id']}/start",
@@ -5589,7 +5118,8 @@ def test_dispatch_holds_agent_during_in_flight_review(
     assert second_start.status_code == 201
     started_second = second_start.json()
     assert started_second["status"] == "working"
-    assert started_second["session_id"] == free_agent["id"]
+    assert started_second["session_id"] not in {free_agent["id"], busy_agent["id"]}
+    assert started_second["dispatch_reason"] == "Dedicated task session"
     assert workspace_manager.sessions[busy_agent["id"]].current_task_id == first_task["id"]
 
 
@@ -5795,7 +5325,11 @@ def test_start_task_prefers_related_task_agent(
 
     original_task = client.post(
         f"/api/workspaces/{workspace_id}/tasks",
-        json={"title": "Original task", "prompt": "Use the second agent"},
+        json={
+            "session_kind": "terminal",
+            "title": "Original task",
+            "prompt": "Use the second agent",
+        },
     ).json()
     original_start = client.post(
         f"/api/workspaces/tasks/{original_task['id']}/start",
@@ -5813,6 +5347,7 @@ def test_start_task_prefers_related_task_agent(
     related_task = client.post(
         f"/api/workspaces/{workspace_id}/tasks",
         json={
+            "session_kind": "terminal",
             "title": "Follow-up task",
             "prompt": "Continue with the related agent",
             "related_task_id": original_task["id"],
@@ -5928,7 +5463,7 @@ def test_related_task_clear_context_checkbox_sends_clear(
 
     original_task = client.post(
         f"/api/workspaces/{workspace_id}/tasks",
-        json={"title": "Original task", "prompt": "Seed the agent"},
+        json={"session_kind": "terminal", "title": "Original task", "prompt": "Seed the agent"},
     ).json()
     original_start = client.post(
         f"/api/workspaces/tasks/{original_task['id']}/start",
@@ -5944,6 +5479,7 @@ def test_related_task_clear_context_checkbox_sends_clear(
     related_task = client.post(
         f"/api/workspaces/{workspace_id}/tasks",
         json={
+            "session_kind": "terminal",
             "title": "Follow-up task",
             "prompt": "Fresh context please",
             "related_task_id": original_task["id"],
@@ -6059,7 +5595,11 @@ def test_start_task_skips_offline_related_task_agent(
 
     original_task = client.post(
         f"/api/workspaces/{workspace_id}/tasks",
-        json={"title": "Original offline context", "prompt": "Use first agent"},
+        json={
+            "session_kind": "terminal",
+            "title": "Original offline context",
+            "prompt": "Use first agent",
+        },
     ).json()
     original_start = client.post(
         f"/api/workspaces/tasks/{original_task['id']}/start",
@@ -6086,6 +5626,7 @@ def test_start_task_skips_offline_related_task_agent(
     related_task = client.post(
         f"/api/workspaces/{workspace_id}/tasks",
         json={
+            "session_kind": "terminal",
             "title": "Related task",
             "prompt": "Continue without the offline agent",
             "related_task_id": original_task["id"],
@@ -6099,8 +5640,8 @@ def test_start_task_skips_offline_related_task_agent(
     assert related_start.status_code == 201
     started_related = related_start.json()
     assert started_related["status"] == "working"
-    assert started_related["session_id"] == second_agent["id"]
-    assert started_related["dispatch_reason"] == "Only one workspace agent is available"
+    assert started_related["session_id"] not in {first_agent["id"], second_agent["id"]}
+    assert started_related["dispatch_reason"] == "Dedicated task session"
 
 
 def test_tmux_pending_input_detection_matches_codex_paste_prompt() -> None:
@@ -6450,7 +5991,7 @@ def test_dispatch_workspace_serializes_concurrent_dispatches(
     sent_messages.clear()
     task = client.post(
         f"/api/workspaces/{workspace['id']}/tasks",
-        json={"title": "Race task", "prompt": "Do the work"},
+        json={"session_kind": "terminal", "title": "Race task", "prompt": "Do the work"},
     ).json()
 
     queued_at = datetime.now()
@@ -6633,7 +6174,7 @@ def test_background_monitor_auto_continues_interrupted_idle_working_agent(
     client.post(f"/api/workspaces/{workspace['id']}/agent", json={})
     task = client.post(
         f"/api/workspaces/{workspace['id']}/tasks",
-        json={"title": "Retry task", "prompt": "Handle flaky API"},
+        json={"session_kind": "terminal", "title": "Retry task", "prompt": "Handle flaky API"},
     ).json()
     started = client.post(f"/api/workspaces/tasks/{task['id']}/start", json={}).json()
     sent_messages.clear()
@@ -6776,7 +6317,11 @@ def test_non_interrupted_idle_working_agent_is_not_auto_continued(
     client.post(f"/api/workspaces/{workspace['id']}/agent", json={})
     task = client.post(
         f"/api/workspaces/{workspace['id']}/tasks",
-        json={"title": "Idle task", "prompt": "Handle a normal stopped task"},
+        json={
+            "session_kind": "terminal",
+            "title": "Idle task",
+            "prompt": "Handle a normal stopped task",
+        },
     ).json()
     started = client.post(f"/api/workspaces/tasks/{task['id']}/start", json={}).json()
     sent_messages.clear()
@@ -6921,7 +6466,11 @@ def test_completed_idle_working_agent_is_prompted_to_report(
     client.post(f"/api/workspaces/{workspace['id']}/agent", json={})
     task = client.post(
         f"/api/workspaces/{workspace['id']}/tasks",
-        json={"title": "Report task", "prompt": "Finish but forget report"},
+        json={
+            "session_kind": "terminal",
+            "title": "Report task",
+            "prompt": "Finish but forget report",
+        },
     ).json()
     started = client.post(f"/api/workspaces/tasks/{task['id']}/start", json={}).json()
     sent_messages.clear()
@@ -7070,7 +6619,11 @@ def test_idle_working_agent_with_review_in_flight_is_not_prompted(
     client.post(f"/api/workspaces/{workspace['id']}/agent", json={})
     task = client.post(
         f"/api/workspaces/{workspace['id']}/tasks",
-        json={"title": "Review task", "prompt": "Finish and request review"},
+        json={
+            "session_kind": "terminal",
+            "title": "Review task",
+            "prompt": "Finish and request review",
+        },
     ).json()
     started = client.post(f"/api/workspaces/tasks/{task['id']}/start", json={}).json()
     sent_messages.clear()
@@ -7230,7 +6783,11 @@ def test_bound_reviewer_on_reopened_task_is_not_auto_prompted(
     worker = client.post(f"/api/workspaces/{workspace['id']}/agent", json={}).json()
     task = client.post(
         f"/api/workspaces/{workspace['id']}/tasks",
-        json={"title": "Reopened task", "prompt": "Address the review feedback"},
+        json={
+            "session_kind": "terminal",
+            "title": "Reopened task",
+            "prompt": "Address the review feedback",
+        },
     ).json()
     started = client.post(
         f"/api/workspaces/tasks/{task['id']}/start",
@@ -7354,7 +6911,7 @@ def test_monitor_surfaces_worker_prompt_stuck_in_input(
     client.post(f"/api/workspaces/{workspace['id']}/agent", json={})
     task = client.post(
         f"/api/workspaces/{workspace['id']}/tasks",
-        json={"title": "Worker stuck", "prompt": "Start this task"},
+        json={"session_kind": "terminal", "title": "Worker stuck", "prompt": "Start this task"},
     ).json()
     started = client.post(f"/api/workspaces/tasks/{task['id']}/start", json={}).json()
     sent_messages.clear()
@@ -7460,7 +7017,11 @@ def test_monitor_surfaces_reviewer_prompt_stuck_in_input(
     client.post(f"/api/workspaces/{workspace['id']}/agent", json={})
     task = client.post(
         f"/api/workspaces/{workspace['id']}/tasks",
-        json={"title": "Reviewer stuck", "prompt": "Complete and review this task"},
+        json={
+            "session_kind": "terminal",
+            "title": "Reviewer stuck",
+            "prompt": "Complete and review this task",
+        },
     ).json()
     started = client.post(f"/api/workspaces/tasks/{task['id']}/start", json={}).json()
     client.post(
@@ -7562,7 +7123,11 @@ def test_fallback_reaper_grace_skips_recently_dispatched_idle_reviewer(
     client.post(f"/api/workspaces/{workspace['id']}/agent", json={})
     task = client.post(
         f"/api/workspaces/{workspace['id']}/tasks",
-        json={"title": "Slow reviewer", "prompt": "Finish then request review"},
+        json={
+            "session_kind": "terminal",
+            "title": "Slow reviewer",
+            "prompt": "Finish then request review",
+        },
     ).json()
     started = client.post(f"/api/workspaces/tasks/{task['id']}/start", json={}).json()
     client.post(
@@ -7674,7 +7239,11 @@ def test_fallback_reaper_does_not_redispatch_already_judged_round(
     client.post(f"/api/workspaces/{workspace['id']}/agent", json={})
     task = client.post(
         f"/api/workspaces/{workspace['id']}/tasks",
-        json={"title": "Already judged", "prompt": "Finish then request review"},
+        json={
+            "session_kind": "terminal",
+            "title": "Already judged",
+            "prompt": "Finish then request review",
+        },
     ).json()
     started = client.post(f"/api/workspaces/tasks/{task['id']}/start", json={}).json()
     client.post(
@@ -7816,7 +7385,7 @@ def _setup_review_in_flight_task(
     client.post(f"/api/workspaces/{workspace['id']}/agent", json={})
     task = client.post(
         f"/api/workspaces/{workspace['id']}/tasks",
-        json={"title": name, "prompt": "Finish then request review"},
+        json={"title": name, "prompt": "Finish then request review", "session_kind": "terminal"},
     ).json()
     started = client.post(f"/api/workspaces/tasks/{task['id']}/start", json={}).json()
     client.post(
@@ -8095,7 +7664,11 @@ def test_interrupted_idle_working_agent_auto_continue_stops_after_limit(
     client.post(f"/api/workspaces/{workspace['id']}/agent", json={})
     task = client.post(
         f"/api/workspaces/{workspace['id']}/tasks",
-        json={"title": "Limit task", "prompt": "Handle repeated API failures"},
+        json={
+            "session_kind": "terminal",
+            "title": "Limit task",
+            "prompt": "Handle repeated API failures",
+        },
     ).json()
     started = client.post(f"/api/workspaces/tasks/{task['id']}/start", json={}).json()
     session = workspace_manager.sessions[started["session_id"]]
@@ -8242,6 +7815,7 @@ def test_review_passed_task_stays_in_review_when_agent_runtime_is_working(
     task = client.post(
         f"/api/workspaces/{workspace['id']}/tasks",
         json={
+            "session_kind": "terminal",
             "title": "Review task",
             "prompt": "Do work then wait for review",
         },
@@ -8298,8 +7872,12 @@ def test_review_passed_task_stays_in_review_when_agent_runtime_is_working(
     # though the agent runtime reports WORKING.
     assert board["tasks"][0]["status"] == "review"
     assert board["tasks"][0]["session_id"] == session_id
-    assert board["sessions"][0]["runtime_status"] == "working"
-    assert board["sessions"][0]["current_task_id"] == task["id"]
+    assert (
+        next(s for s in board["sessions"] if s["id"] == session_id)["runtime_status"] == "working"
+    )
+    assert (
+        next(s for s in board["sessions"] if s["id"] == session_id)["current_task_id"] == task["id"]
+    )
     after = workspace_manager.tasks[task["id"]]
     assert after.review_cycle == parked_review_cycle
     assert after.reviewed_cycle == parked_reviewed_cycle
@@ -8411,6 +7989,7 @@ def test_review_passed_task_does_not_reopen_when_agent_has_new_activity(
     task = client.post(
         f"/api/workspaces/{workspace['id']}/tasks",
         json={
+            "session_kind": "terminal",
             "title": "Review continued task",
             "prompt": "Do work then wait for review",
         },
@@ -8456,8 +8035,12 @@ def test_review_passed_task_does_not_reopen_when_agent_has_new_activity(
 
     assert board["tasks"][0]["status"] == "review"
     assert board["tasks"][0]["session_id"] == session_id
-    assert board["sessions"][0]["runtime_status"] == "working"
-    assert board["sessions"][0]["current_task_id"] == task["id"]
+    assert (
+        next(s for s in board["sessions"] if s["id"] == session_id)["runtime_status"] == "working"
+    )
+    assert (
+        next(s for s in board["sessions"] if s["id"] == session_id)["current_task_id"] == task["id"]
+    )
 
 
 def test_review_passed_reconciles_stale_working_task(
@@ -8554,6 +8137,7 @@ def test_review_passed_reconciles_stale_working_task(
     task = client.post(
         f"/api/workspaces/{workspace['id']}/tasks",
         json={
+            "session_kind": "terminal",
             "title": "Stale working task",
             "prompt": "Do work then report review",
         },
@@ -8606,7 +8190,7 @@ def test_review_cycle_stale_echo_suppressed_when_parked(
     client.post(f"/api/workspaces/{workspace['id']}/agent", json={})
     task = client.post(
         f"/api/workspaces/{workspace['id']}/tasks",
-        json={"title": "Echo task", "prompt": "Work then review"},
+        json={"session_kind": "terminal", "title": "Echo task", "prompt": "Work then review"},
     ).json()
     started = client.post(f"/api/workspaces/tasks/{task['id']}/start", json={}).json()
 
@@ -8658,7 +8242,7 @@ def test_review_cycle_continue_task_reopens_and_redispatches_review(
     client.post(f"/api/workspaces/{workspace['id']}/agent", json={})
     task = client.post(
         f"/api/workspaces/{workspace['id']}/tasks",
-        json={"title": "Reopen task", "prompt": "Work then review"},
+        json={"session_kind": "terminal", "title": "Reopen task", "prompt": "Work then review"},
     ).json()
     started = client.post(f"/api/workspaces/tasks/{task['id']}/start", json={}).json()
 
@@ -8715,7 +8299,7 @@ def test_review_cycle_review_failed_reopens_for_fresh_review(
     client.post(f"/api/workspaces/{workspace['id']}/agent", json={})
     task = client.post(
         f"/api/workspaces/{workspace['id']}/tasks",
-        json={"title": "Fail task", "prompt": "Work then review"},
+        json={"session_kind": "terminal", "title": "Fail task", "prompt": "Work then review"},
     ).json()
     started = client.post(f"/api/workspaces/tasks/{task['id']}/start", json={}).json()
 
@@ -8853,6 +8437,7 @@ def test_late_orchestrator_working_report_after_review_verdict_does_not_flip_sta
     task = client.post(
         f"/api/workspaces/{workspace['id']}/tasks",
         json={
+            "session_kind": "terminal",
             "title": "Late working guard",
             "prompt": "Produce something, pass review, emit late working",
         },
@@ -8938,6 +8523,7 @@ def test_late_orchestrator_completed_report_after_verdict_does_not_redispatch_re
     task = client.post(
         f"/api/workspaces/{workspace['id']}/tasks",
         json={
+            "session_kind": "terminal",
             "title": "Late completed guard",
             "prompt": "Produce something, pass review, emit late completed",
         },
@@ -9130,6 +8716,7 @@ def test_fresh_ready_report_is_not_immediately_reopened_by_runtime_working(
     task = client.post(
         f"/api/workspaces/{workspace['id']}/tasks",
         json={
+            "session_kind": "terminal",
             "title": "Fresh ready task",
             "prompt": "Report ready while terminal still updates",
         },
@@ -9279,6 +8866,7 @@ def test_completed_review_passed_task_stays_in_review_despite_runtime_activity(
     task = client.post(
         f"/api/workspaces/{workspace['id']}/tasks",
         json={
+            "session_kind": "terminal",
             "title": "Completed review task",
             "prompt": "Do work then report completion",
         },
@@ -9415,6 +9003,7 @@ def test_continue_task_marks_working_before_send_verification_failure(
     task = client.post(
         f"/api/workspaces/{workspace['id']}/tasks",
         json={
+            "session_kind": "terminal",
             "title": "Continue task",
             "prompt": "Do work then wait for review",
         },
@@ -9902,130 +9491,6 @@ def test_create_agent_can_override_target_and_yolo_mode(
     assert created_tabs[0]["remote_reconnect"] is False
 
 
-def test_start_task_does_not_dispatch_to_stopped_resident_agent(
-    monkeypatch: MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    repo = tmp_path / "repo"
-    repo.mkdir()
-
-    created_tabs: list[str] = []
-
-    async def fake_create_tab(
-        name: str,
-        shell: Optional[str] = None,
-        cwd: Optional[str] = None,
-        solo_mode: bool = False,
-        agent_type: AgentType = AgentType.CLAUDE,
-        session_kind: SessionKind = SessionKind.TERMINAL,
-        target: ExecutionTarget = ExecutionTarget.LOCAL,
-        remote_profile_id: Optional[str] = None,
-        remote_cwd: Optional[str] = None,
-        remote_reconnect: bool = True,
-        remote_forward_port: Optional[int] = None,
-        workspace_id: Optional[str] = None,
-        workspace_name: Optional[str] = None,
-        workspace_role: WorkspaceSessionRole | None = None,
-        managed_session_id: str | None = None,
-    ) -> TerminalTab:
-        tab_id = f"tab-agent-{len(created_tabs) + 1}"
-        created_tabs.append(tab_id)
-        return TerminalTab(
-            id=tab_id,
-            name=name,
-            shell=shell,
-            cwd=cwd,
-            solo_mode=solo_mode,
-            agent_type=agent_type,
-            session_kind=session_kind,
-            target=target,
-            remote_profile_id=remote_profile_id,
-            remote_cwd=remote_cwd,
-            remote_reconnect=remote_reconnect,
-            port=12346 + len(created_tabs),
-            created_at=datetime.now(),
-            is_active=True,
-            workspace_id=workspace_id,
-            workspace_name=workspace_name,
-            workspace_role=workspace_role,
-            managed_session_id=managed_session_id,
-        )
-
-    sent_messages: list[tuple[str, str]] = []
-
-    async def fake_send_tmux_message(tmux_session: str, message: str) -> None:
-        sent_messages.append((tmux_session, message))
-
-    async def fake_ensure_session_ready(_session) -> None:
-        return None
-
-    monkeypatch.setattr(workspace_module.ttyd_manager, "create_tab", fake_create_tab)
-    monkeypatch.setattr(workspace_manager, "_send_tmux_message", fake_send_tmux_message)
-
-    async def _fake_send_with_receipt(tmux_session: str, message: str, call_id: str) -> None:
-        await fake_send_tmux_message(tmux_session, message)
-
-    monkeypatch.setattr(
-        workspace_manager,
-        "_send_tmux_message_with_receipt",
-        _fake_send_with_receipt,
-    )
-
-    async def _fake_query_receipt(tmux_session: str, call_id: str) -> bool:
-        return False
-
-    monkeypatch.setattr(workspace_manager, "_query_tmux_receipt", _fake_query_receipt)
-    monkeypatch.setattr(
-        workspace_manager,
-        "_ensure_session_ready_for_send",
-        fake_ensure_session_ready,
-    )
-
-    client = TestClient(app)
-    workspace_response = client.post(
-        "/api/workspaces",
-        json={
-            "name": "Restart Repo",
-            "path": str(repo),
-            "default_branch": "main",
-            "session_prefix": "restart",
-        },
-    )
-    workspace_id = workspace_response.json()["id"]
-
-    first_agent = client.post(f"/api/workspaces/{workspace_id}/agent", json={}).json()
-    workspace_manager.sessions[first_agent["id"]] = workspace_manager.sessions[
-        first_agent["id"]
-    ].model_copy(
-        update={
-            "status": ManagedSessionStatus.STOPPED,
-            "runtime_status": AgentRuntimeStatus.OFFLINE,
-        }
-    )
-
-    task_response = client.post(
-        f"/api/workspaces/{workspace_id}/tasks",
-        json={
-            "title": "Offline task",
-            "prompt": "Do not dispatch to offline agent",
-            "agent_type": "codex",
-        },
-    )
-    response = client.post(
-        f"/api/workspaces/tasks/{task_response.json()['id']}/start",
-        json={},
-    )
-
-    assert response.status_code == 400
-    assert "No idle or working workspace agent is available" in response.json()["detail"]
-    assert "restart-agent-2" not in workspace_manager.sessions
-    assert len(created_tabs) == 1
-    assert sent_messages == []
-    board = client.get(f"/api/workspaces/{workspace_id}/board").json()
-    assert board["tasks"][0]["status"] == "todo"
-    assert board["tasks"][0]["session_id"] is None
-
-
 def test_delete_task_removes_reports_and_unlinks_session(
     monkeypatch: MonkeyPatch,
     tmp_path: Path,
@@ -10113,6 +9578,7 @@ def test_delete_task_removes_reports_and_unlinks_session(
     task_response = client.post(
         f"/api/workspaces/{workspace_id}/tasks",
         json={
+            "session_kind": "terminal",
             "title": "Delete task",
             "prompt": "Delete me",
             "agent_type": "codex",
@@ -10136,7 +9602,7 @@ def test_delete_task_removes_reports_and_unlinks_session(
     board = client.get(f"/api/workspaces/{workspace_id}/board").json()
     assert board["tasks"] == []
     assert board["reports"] == []
-    assert board["sessions"][0]["task_id"] is None
+    assert all(session["id"] != session_id for session in board["sessions"])
 
 
 def test_done_task_writes_delete_safe_task_record(
@@ -10232,6 +9698,7 @@ def test_done_task_writes_delete_safe_task_record(
     task = client.post(
         f"/api/workspaces/{workspace['id']}/tasks",
         json={
+            "session_kind": "terminal",
             "title": "Record task",
             "prompt": "Archive this task",
             "agent_type": "codex",
@@ -10386,7 +9853,11 @@ def test_abort_task_returns_active_review_to_todo_and_releases_sessions(
     ).json()
     task = client.post(
         f"/api/workspaces/{workspace['id']}/tasks",
-        json={"title": "Abortable task", "prompt": "Start and get stuck"},
+        json={
+            "session_kind": "terminal",
+            "title": "Abortable task",
+            "prompt": "Start and get stuck",
+        },
     ).json()
     started = client.post(f"/api/workspaces/tasks/{task['id']}/start", json={}).json()
 
@@ -10422,8 +9893,7 @@ def test_abort_task_returns_active_review_to_todo_and_releases_sessions(
     assert aborted["manual_aborted_at"] is not None
     assert aborted["manual_abort_reason"] == "Reviewer did not respond"
     assert aborted["dispatch_reason"] == "Manually aborted: Reviewer did not respond"
-    assert workspace_manager.sessions[started["session_id"]].current_task_id is None
-    assert workspace_manager.sessions[started["session_id"]].status == ManagedSessionStatus.IDLE
+    assert started["session_id"] not in workspace_manager.sessions
     assert reviewer_id not in workspace_manager.sessions
     abort_report = list(workspace_manager.reports.values())[-1]
     assert abort_report.state.value == "blocked"
@@ -10438,10 +9908,8 @@ def test_abort_task_returns_active_review_to_todo_and_releases_sessions(
             "message": "Late worker completion",
         },
     )
-    assert late_worker_response.status_code == 400
-    assert "manually aborted" in late_worker_response.json()["detail"]
+    assert late_worker_response.status_code == 404
     assert workspace_manager.tasks[task["id"]].status == WorkspaceTaskStatus.TODO
-    assert workspace_manager.sessions[started["session_id"]].current_task_id is None
 
     late_reviewer_response = client.post(
         f"/api/workspaces/sessions/{reviewer_id}/reports",
@@ -10819,7 +10287,7 @@ def test_gp_review_passed_with_stopped_worker_marks_stall_not_http_error(
     ).json()
     task = client.post(
         f"/api/workspaces/{workspace['id']}/tasks",
-        json={"title": "GP stop", "prompt": "x"},
+        json={"session_kind": "terminal", "title": "GP stop", "prompt": "x"},
     ).json()
     started = client.post(f"/api/workspaces/tasks/{task['id']}/start", json={}).json()
     client.post(
@@ -10907,7 +10375,7 @@ def test_gp_review_failed_with_stopped_worker_marks_stall(
     ).json()
     task = client.post(
         f"/api/workspaces/{workspace['id']}/tasks",
-        json={"title": "GP stop fail", "prompt": "x"},
+        json={"session_kind": "terminal", "title": "GP stop fail", "prompt": "x"},
     ).json()
     started = client.post(f"/api/workspaces/tasks/{task['id']}/start", json={}).json()
     client.post(
@@ -10975,7 +10443,7 @@ def test_impl_review_failed_with_stopped_worker_marks_stall(
     ).json()
     task = client.post(
         f"/api/workspaces/{workspace['id']}/tasks",
-        json={"title": "impl fail stall", "prompt": "build something"},
+        json={"session_kind": "terminal", "title": "impl fail stall", "prompt": "build something"},
     ).json()
     started = client.post(f"/api/workspaces/tasks/{task['id']}/start", json={}).json()
     # Submit GP, approve it.
@@ -11066,7 +10534,7 @@ def test_fast_path_gp_review_does_not_set_human_acceptance(
     ).json()
     task = client.post(
         f"/api/workspaces/{workspace['id']}/tasks",
-        json={"title": "gp no ha", "prompt": "x"},
+        json={"session_kind": "terminal", "title": "gp no ha", "prompt": "x"},
     ).json()
     started = client.post(f"/api/workspaces/tasks/{task['id']}/start", json={}).json()
     client.post(
@@ -11156,7 +10624,7 @@ def test_monitor_recovers_sealed_gp_verdict_when_worker_idle(
     ).json()
     task = client.post(
         f"/api/workspaces/{workspace['id']}/tasks",
-        json={"title": "gprec", "prompt": "x"},
+        json={"session_kind": "terminal", "title": "gprec", "prompt": "x"},
     ).json()
     started = client.post(f"/api/workspaces/tasks/{task['id']}/start", json={}).json()
     client.post(
@@ -11303,7 +10771,7 @@ def test_monitor_does_not_auto_continue_parked_human_acceptance(
     ).json()
     task = client.post(
         f"/api/workspaces/{workspace['id']}/tasks",
-        json={"title": "nohapark", "prompt": "build it"},
+        json={"session_kind": "terminal", "title": "nohapark", "prompt": "build it"},
     ).json()
     started = client.post(f"/api/workspaces/tasks/{task['id']}/start", json={}).json()
 
@@ -11450,7 +10918,7 @@ def _seed_sealed_round(
     ).json()
     task = client.post(
         f"/api/workspaces/{workspace['id']}/tasks",
-        json={"title": task_title, "prompt": prompt},
+        json={"session_kind": "terminal", "title": task_title, "prompt": prompt},
     ).json()
     started = client.post(f"/api/workspaces/tasks/{task['id']}/start", json={}).json()
     client.post(
