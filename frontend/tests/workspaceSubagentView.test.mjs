@@ -32,16 +32,13 @@ function mountPanel(t, options = {}) {
     activeWorkspaceId = 'ws-1',
     subagentTabs = [],
     subagentViewActive = true,
+    sessions = [],
   } = options
   const openedTabIds = []
   const terminalTabs = vue.ref(subagentTabs)
   const runtime = {
     activeWorkspaceId: vue.ref(activeWorkspaceId),
-    workspaceSessionView: vue.ref('agents'),
-    workspaceAgents: vue.ref([]),
-    reviewerSessions: vue.ref([]),
-    visibleWorkspaceSessions: vue.ref([]),
-    visibleWorkspaceSessionsEmptyText: vue.ref('No agents in this workspace.'),
+    visibleWorkspaceSessions: vue.ref(sessions),
     isPending: () => false,
     refreshAgentStatuses: () => {},
     sessionActionKey: () => 'noop',
@@ -68,9 +65,8 @@ function mountPanel(t, options = {}) {
       )
     }),
     workspaceSubagentView: vue.ref(subagentViewActive),
-    showManagedView(view) {
+    showManagedView() {
       runtime.workspaceSubagentView.value = false
-      runtime.workspaceSessionView.value = view
     },
     toggleWorkspaceSubagentView() {
       runtime.workspaceSubagentView.value = !runtime.workspaceSubagentView.value
@@ -146,16 +142,17 @@ test('clicking a sub-agent row jumps to its tab id', t => {
   assert.deepEqual(openedTabIds, ['jump-target'])
 })
 
-test('toggle hides the list for the managed Agents grid and returns with the count', async t => {
+test('toggle switches between Active Runs and Subagents jump cards', async t => {
   const { panel } = mountPanel(t, {
     subagentTabs: [tab({ id: 'a' }), tab({ id: 'b' })],
+    sessions: [{ id: 'run', title: 'Task session', agent_type: 'codex' }],
   })
   assert.equal(subagentRows(panel).length, 2)
 
   toggleButton(panel).props.onClick()
   await vue.nextTick()
   assert.deepEqual(subagentRows(panel), [])
-  // Managed grid is back; its empty-state placeholder exists.
+  // The task session grid is back.
   assert.ok(
     findAll(panel.root, node => node.props?.class === 'agent-status-grid').length >= 1,
   )
@@ -168,14 +165,46 @@ test('toggle hides the list for the managed Agents grid and returns with the cou
   assert.ok(contains(button, '2'))
 })
 
-test('empty sub-agent view shows the dedicated empty state', t => {
+test('no sessions or children hides the whole strip, even with Subagents selected', t => {
   const { panel } = mountPanel(t, { subagentTabs: [] })
   assert.deepEqual(subagentRows(panel), [])
-  assert.ok(contains(panel.root, 'No sub-agents in this workspace.'))
+  assert.equal(panel.find(n => n.props?.class === 'workspace-agent-status'), null)
 })
 
 test('no sub-agent view is rendered without an active workspace', t => {
   const { panel } = mountPanel(t, { activeWorkspaceId: null, subagentTabs: [tab()] })
   assert.deepEqual(subagentRows(panel), [])
   assert.equal(toggleButton(panel), undefined)
+})
+
+test('a child alone opens its jump card by default and last-child removal hides the strip', async t => {
+  const { panel, terminalTabs } = mountPanel(t, {
+    subagentViewActive: false, subagentTabs: [tab({ id: 'only-child' })],
+  })
+  assert.equal(subagentRows(panel).length, 1)
+  terminalTabs.value = []
+  await vue.nextTick()
+  assert.equal(panel.find(n => n.props?.class === 'workspace-agent-status'), null)
+})
+
+test('an active run alone keeps a jump card and does not expose a Reviewers tab', t => {
+  const { panel } = mountPanel(t, {
+    subagentViewActive: false,
+    sessions: [{ id: 'task-run', title: 'Task run', agent_type: 'claude' }],
+  })
+  assert.ok(panel.find(n => n.props?.class === 'agent-status-card-main'))
+  assert.ok(contains(panel.root, 'Active Runs'))
+  assert.equal(contains(panel.root, 'Reviewers'), false)
+})
+
+test('when the last child leaves, an existing run remains visible instead of an empty Subagents view', async t => {
+  const { panel, terminalTabs } = mountPanel(t, {
+    subagentTabs: [tab({ id: 'last-child' })],
+    sessions: [{ id: 'run', title: 'Task session', agent_type: 'codex' }],
+  })
+  assert.equal(subagentRows(panel).length, 1)
+  terminalTabs.value = []
+  await vue.nextTick()
+  assert.ok(panel.find(n => n.props?.class === 'agent-status-card-main'))
+  assert.deepEqual(subagentRows(panel), [])
 })

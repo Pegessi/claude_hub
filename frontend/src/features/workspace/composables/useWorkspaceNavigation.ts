@@ -3,7 +3,6 @@ import {
 } from 'vue'
 import type { useWorkspaceRuntime } from './useWorkspaceRuntime'
 import type { useWorkspaceEditor } from './useWorkspaceEditor'
-import type { useWorkspaceAgentManager } from './useWorkspaceAgentManager'
 import type { useWorkspaceLessons } from './useWorkspaceLessons'
 
 type WorkspaceNavigationInputs = Pick<ReturnType<typeof useWorkspaceRuntime>,
@@ -13,9 +12,6 @@ type WorkspaceNavigationInputs = Pick<ReturnType<typeof useWorkspaceRuntime>,
   & Pick<ReturnType<typeof useWorkspaceEditor>,
   'openWorkspaceModal'
   | 'openEditWorkspaceModal'
->
-  & Pick<ReturnType<typeof useWorkspaceAgentManager>,
-  'openAgentOptionsModal'
 >
   & Pick<ReturnType<typeof useWorkspaceLessons>,
   'openLessonsModal'
@@ -27,7 +23,6 @@ export function useWorkspaceNavigation(inputs: WorkspaceNavigationInputs) {
     refreshAgentStatuses,
     openWorkspaceModal,
     openEditWorkspaceModal,
-    openAgentOptionsModal,
     openLessonsModal,
   } = inputs
 
@@ -65,11 +60,6 @@ export function useWorkspaceNavigation(inputs: WorkspaceNavigationInputs) {
     closeWorkspaceMobileMenu()
   }
 
-  function openAgentOptionsModalFromMenu() {
-    openAgentOptionsModal()
-    closeWorkspaceMobileMenu()
-  }
-
   function openLessonsModalFromMenu() {
     openLessonsModal()
     closeWorkspaceMobileMenu()
@@ -91,7 +81,6 @@ export function useWorkspaceNavigation(inputs: WorkspaceNavigationInputs) {
     openWorkspaceModalFromMenu,
     openEditWorkspaceModalFromMenu,
     openLessonsModalFromMenu,
-    openAgentOptionsModalFromMenu,
     refreshAgentStatusesFromMenu,
     openAppearanceFromMenu,
     workspaceMobileMenuRef,

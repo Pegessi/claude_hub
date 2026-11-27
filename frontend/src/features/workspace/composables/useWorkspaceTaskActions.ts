@@ -16,7 +16,6 @@ import {
   DEFAULT_ABORT_REASON,
   resolveAbortReason,
 } from '@/utils/taskAbort'
-import type { TaskStartOptions } from '../types'
 import type { useWorkspaceRuntime } from './useWorkspaceRuntime'
 import type { useWorkspaceArtifacts } from './useWorkspaceArtifacts'
 import type { useWorkspaceTaskPresentation } from './useWorkspaceTaskPresentation'
@@ -70,29 +69,14 @@ export function useWorkspaceTaskActions(inputs: WorkspaceTaskActionsInputs) {
     out_of_scope: [] as string[],
   })
 
-  const startOptions = reactive<Record<string, TaskStartOptions>>({})
-
   const editTaskForm = reactive({
     title: '',
     prompt: '',
     goal: '',
     done_when: '',
     out_of_scope: '',
-    session_id: '',
     related_task_id: '',
-    clear_context: false,
   })
-
-  function startOptionsFor(task: WorkspaceTask): TaskStartOptions {
-    if (!startOptions[task.id]) {
-      startOptions[task.id] = {
-        target_session_id: task.session_id || '',
-        related_task_id: task.related_task_id || '',
-        clear_context: Boolean(task.clear_context),
-      }
-    }
-    return startOptions[task.id]
-  }
 
   function isInteractiveElement(target: EventTarget | null) {
     return target instanceof HTMLElement && Boolean(target.closest(
@@ -158,9 +142,7 @@ export function useWorkspaceTaskActions(inputs: WorkspaceTaskActionsInputs) {
     initialEditContract.goal = effectiveGoal || null
     initialEditContract.done_when = [...effectiveDoneWhen]
     initialEditContract.out_of_scope = [...effectiveOutOfScope]
-    editTaskForm.session_id = task.session_id || ''
     editTaskForm.related_task_id = task.related_task_id || ''
-    editTaskForm.clear_context = Boolean(task.clear_context)
     showEditTaskModal.value = true
   }
 
@@ -175,9 +157,7 @@ export function useWorkspaceTaskActions(inputs: WorkspaceTaskActionsInputs) {
     initialEditContract.goal = null
     initialEditContract.done_when = []
     initialEditContract.out_of_scope = []
-    editTaskForm.session_id = ''
     editTaskForm.related_task_id = ''
-    editTaskForm.clear_context = false
   }
 
   async function handleUpdateTask() {
@@ -201,9 +181,8 @@ export function useWorkspaceTaskActions(inputs: WorkspaceTaskActionsInputs) {
       const payload: WorkspaceTaskUpdate = {
         title: editTaskForm.title.trim(),
         prompt: editTaskForm.prompt.trim(),
-        session_id: editTaskForm.session_id || null,
-        related_task_id: editTaskForm.related_task_id || null,
-        clear_context: editTaskForm.clear_context ? true : null,
+        // The update API uses an empty string to clear; null means unchanged.
+        related_task_id: editTaskForm.related_task_id,
       }
       if (contractChanged) {
         payload.goal = nextGoal
@@ -211,8 +190,6 @@ export function useWorkspaceTaskActions(inputs: WorkspaceTaskActionsInputs) {
         payload.out_of_scope = nextOutOfScope
       }
       await workspaceStore.updateTask(taskId, payload)
-      // Clear cached start options so they re-read from the updated task
-      delete startOptions[taskId]
       closeEditTaskModal()
     })
   }
@@ -220,12 +197,7 @@ export function useWorkspaceTaskActions(inputs: WorkspaceTaskActionsInputs) {
   async function startTask(task: WorkspaceTask) {
     if (!canUseManagedTaskActions(task)) return
     await runPending(taskActionKey('start', task.id), async () => {
-      const options = startOptionsFor(task)
-      await workspaceStore.startTask(task.id, {
-        target_session_id: options.target_session_id || null,
-        related_task_id: options.related_task_id || null,
-        clear_context: options.clear_context ? true : null,
-      })
+      await workspaceStore.startTask(task.id)
       await terminalStore.fetchTabs({ force: true })
     })
   }
@@ -348,7 +320,6 @@ export function useWorkspaceTaskActions(inputs: WorkspaceTaskActionsInputs) {
 
   return {
     selectTask,
-    startOptionsFor,
     startTask,
     openEditTaskModal,
     markTask,

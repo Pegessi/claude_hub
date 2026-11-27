@@ -202,6 +202,21 @@
           >
             These review and autonomy policies are retained for a future Workspace handoff, but do not run while the initiator controls execution.
           </p>
+          <div class="modal-field">
+            <label for="task-create-agent">Agent</label>
+            <select
+              id="task-create-agent"
+              v-model="form.agent_type"
+            >
+              <option
+                v-for="agentType in availableAgentTypes"
+                :key="agentType"
+                :value="agentType"
+              >
+                {{ agentType }}
+              </option>
+            </select>
+          </div>
           <div
             v-if="form.execution_control === 'workspace'"
             class="modal-field"
@@ -211,20 +226,21 @@
               <button
                 type="button"
                 :class="['segment-button', { active: form.session_kind === 'terminal' }]"
-                @click="form.session_kind = 'terminal'; form.session_id = ''"
+                @click="setSessionKind('terminal')"
               >
                 Terminal
               </button>
               <button
                 type="button"
                 :class="['segment-button', { active: form.session_kind === 'chat' }]"
-                @click="form.session_kind = 'chat'; form.session_id = ''"
+                :disabled="isRemoteWorkspace"
+                @click="setSessionKind('chat')"
               >
                 Chat
               </button>
             </div>
             <p class="modal-hint">
-              Chat uses the managed conversation stream. Terminal preserves the native CLI surface.
+              {{ isRemoteWorkspace ? 'Remote SSH workspaces require Terminal.' : 'Each task starts its own isolated session.' }}
             </p>
           </div>
           <div class="modal-field">
@@ -336,45 +352,12 @@
             v-if="form.execution_control === 'workspace'"
             class="modal-field"
           >
-            <label>Dispatch agent</label>
-            <select
-              v-model="form.session_id"
-              :disabled="!targetAvailable"
-            >
-              <option value="">
-                Auto
-              </option>
-              <option
-                v-for="agent in workspaceAgents.filter(agent => agent.session_kind === form.session_kind)"
-                :key="agent.id"
-                :value="agent.id"
-              >
-                {{ agent.title }}
-              </option>
-            </select>
-          </div>
-          <div
-            v-if="form.execution_control === 'workspace'"
-            class="modal-field"
-          >
-            <label class="checkbox-label">
-              <input
-                v-model="form.clear_context"
-                type="checkbox"
-              >
-              Clear context
-            </label>
-          </div>
-          <div
-            v-if="form.execution_control === 'workspace'"
-            class="modal-field"
-          >
-            <label>Related task</label>
+            <label for="task-create-related">Related task</label>
             <p class="modal-hint">
-              Session/context reuse hint — not a Task parent (<code>parent_task_id</code>).
-              Task Graph tree UI is follow-up <code>487c630c</code>; not implemented here.
+              Select only when you need to continue another task’s context.
             </p>
             <select
+              id="task-create-related"
               v-model="form.related_task_id"
               :disabled="!targetAvailable"
             >
@@ -436,7 +419,7 @@ const titleInputRef = ref<HTMLInputElement | null>(null)
 const {
   visible, form, pendingAttempt, reporterRecovery, revealReporterKey,
   capabilities, capabilitiesStatus, capabilitiesError, submitDisabled,
-  submitting, targetAvailable, workspaceAgents, tasks, close, retryCapabilities,
+  submitting, targetAvailable, isRemoteWorkspace, availableAgentTypes, setSessionKind, tasks, close, retryCapabilities,
   discardPendingAttempt, onFormMutation, pasteAttachments, removeAttachment,
   toggleReporterKey, copyReporterCredential, persistReporterCredential, submit,
 } = props.flow

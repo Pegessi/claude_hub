@@ -18,7 +18,7 @@ type WorkspaceLifecycleInputs = Pick<ReturnType<typeof useWorkspaceRuntime>,
   | 'workspaceStore'
   | 'activeWorkspaceId'
   | 'selectedWorkspaceId'
-  | 'workspaceSessionView'
+  | 'workspaceSubagentView'
   | 'taskCreateFlow'
   | 'terminalStore'
   | 'refreshBoard'
@@ -45,7 +45,7 @@ export function useWorkspaceLifecycle(inputs: WorkspaceLifecycleInputs) {
     workspaceStore,
     activeWorkspaceId,
     selectedWorkspaceId,
-    workspaceSessionView,
+    workspaceSubagentView,
     taskCreateFlow,
     terminalStore,
     refreshBoard,
@@ -87,7 +87,7 @@ export function useWorkspaceLifecycle(inputs: WorkspaceLifecycleInputs) {
 
   watch(activeWorkspaceId, value => {
     selectedWorkspaceId.value = value || ''
-    workspaceSessionView.value = 'agents'
+    workspaceSubagentView.value = false
     taskCreateFlow.onWorkspaceChanged(value)
     workspaceStore.clearTaskReports()
     closeTaskDetail()

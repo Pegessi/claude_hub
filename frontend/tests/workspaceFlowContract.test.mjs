@@ -2,7 +2,6 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { loadWorkspaceFeature, vue } from './workspaceFeatureTestHarness.mjs'
 
-const { useWorkspaceAgentManager } = await loadWorkspaceFeature('composables/useWorkspaceAgentManager.ts')
 const { useWorkspaceTaskActions } = await loadWorkspaceFeature('composables/useWorkspaceTaskActions.ts')
 
 function ownScope(t, setup) {
@@ -10,38 +9,6 @@ function ownScope(t, setup) {
   t.after(() => scope.stop())
   return scope.run(setup)
 }
-
-test('one agent list retains historical reviewers and new agents always use the generic role', async t => {
-  const created = []
-  const inputs = {
-    defaultPresetTextForAgent: () => '',
-    reviewerSessions: vue.ref([{ id: 'legacy-reviewer', role: 'reviewer' }]),
-    workspaceAgents: vue.ref([{ id: 'generic', role: 'orchestrator' }]),
-    dispatcherAgent: vue.ref({ id: 'legacy-dispatcher', role: 'dispatcher' }),
-    residentAgent: vue.ref({ id: 'resident', role: 'resident' }),
-    isLoading: vue.ref(false), isPending: () => false,
-    activeWorkspace: vue.ref({ path: '/fixture/workspace', target: 'local' }),
-    getPresetText: () => '',
-    workspaceStore: { ensureWorkspaceAgent: async payload => created.push(payload) },
-    runPending: (_key, action) => action(), sessionActionKey: (action, id) => `${action}:${id}`,
-    terminalStore: { fetchTabs: async () => {} },
-    remoteProfiles: vue.ref([]), fetchRemoteProfiles: async () => {},
-  }
-  const manager = ownScope(t, () => useWorkspaceAgentManager(inputs))
-  assert.deepEqual(manager.agentManagerSessions.value.map(agent => agent.id), [
-    'generic', 'legacy-reviewer', 'legacy-dispatcher', 'resident',
-  ])
-  assert.equal('agentManagerView' in manager, false)
-  assert.equal('role' in manager.agentOptionsForm, false)
-  manager.openAgentOptionsModal()
-  manager.agentOptionsForm.title = '  General agent  '
-  await manager.handleCreateAdvancedAgent()
-  assert.equal(created[0].role, 'orchestrator')
-  assert.equal(created[0].title, 'General agent')
-  assert.equal(created[0].cwd, '/fixture/workspace')
-  inputs.reviewerSessions.value = []
-  assert.equal(manager.agentManagerSessions.value.some(agent => agent.role === 'reviewer'), false)
-})
 
 function taskActions(t, updateTask) {
   return ownScope(t, () => useWorkspaceTaskActions({
@@ -71,6 +38,8 @@ test('task edits round-trip optional contract fields and normalize newline accep
   assert.equal(calls[0][1].goal, 'Revised goal')
   assert.deepEqual(calls[0][1].done_when, ['Build passes', 'Regression passes'])
   assert.deepEqual(calls[0][1].out_of_scope, ['No deployment'])
+  assert.equal('session_id' in calls[0][1], false)
+  assert.equal('clear_context' in calls[0][1], false)
   assert.equal('goal_packet' in calls[0][1], false)
   assert.equal(actions.showEditTaskModal.value, false)
   assert.equal(actions.editTaskForm.goal, '')
@@ -115,4 +84,31 @@ test('legacy goal_packet tasks prefill contract fields and title-only edits omit
   assert.equal('goal' in calls[0][1], false)
   assert.equal('done_when' in calls[0][1], false)
   assert.equal('out_of_scope' in calls[0][1], false)
+})
+
+test('Start dispatches the task without a resident seat or context-reset override', async t => {
+  const calls = []
+  const refreshed = []
+  const actions = ownScope(t, () => useWorkspaceTaskActions({
+    selectedTaskId: vue.ref(null), selectedTask: vue.ref(null),
+    runPending: (_key, action) => action(), taskActionKey: (action, id) => `${action}:${id}`,
+    workspaceStore: { startTask: async (...args) => calls.push(args) },
+    terminalStore: { fetchTabs: async args => refreshed.push(args) },
+    expandedArtifactKey: vue.ref(null), closeMarkdownPreviewModal: () => {},
+    canEditTask: () => true, canUseManagedTaskActions: () => true, selectedSession: vue.ref(null),
+  }))
+  await actions.startTask({ id: 'isolated', session_id: 'old-seat', clear_context: true })
+  assert.deepEqual(calls, [['isolated']])
+  assert.deepEqual(refreshed, [{ force: true }])
+  assert.equal('startOptionsFor' in actions, false)
+})
+
+test('Related task can be cleared with the update API empty-string sentinel', async t => {
+  const calls = []
+  const actions = taskActions(t, async (...args) => calls.push(args))
+  actions.openEditTaskModal({ id: 'related', title: 'Task', prompt: 'Continue', related_task_id: 'previous' })
+  assert.equal(actions.editTaskForm.related_task_id, 'previous')
+  actions.editTaskForm.related_task_id = ''
+  await actions.handleUpdateTask()
+  assert.equal(calls[0][1].related_task_id, '')
 })

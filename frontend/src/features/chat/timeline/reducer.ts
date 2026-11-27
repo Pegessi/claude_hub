@@ -476,7 +476,8 @@ function applyEventToState(state: ReducerState, event: AgentStreamEvent): void {
             nextSynthetic !== tool.subagent.syntheticPrompt ||
             nextThreadIds.join(',') !== tool.subagent.threadIds.join(',')
           ) {
-            const { syntheticPrompt: _prevSynthetic, ...restSubagent } = tool.subagent
+            const restSubagent = { ...tool.subagent }
+            delete restSubagent.syntheticPrompt
             tool.subagent = {
               ...restSubagent,
               agentType: nextAgentType,

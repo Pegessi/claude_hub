@@ -6,7 +6,6 @@ import {
 import type { useWorkspaceRuntime } from './composables/useWorkspaceRuntime'
 import type { useWorkspaceEditor } from './composables/useWorkspaceEditor'
 import type { useWorkspaceAgentManager } from './composables/useWorkspaceAgentManager'
-import type { useWorkspaceDirectoryBrowser } from './composables/useWorkspaceDirectoryBrowser'
 import type { useWorkspaceArtifacts } from './composables/useWorkspaceArtifacts'
 import type { useWorkspaceTaskPresentation } from './composables/useWorkspaceTaskPresentation'
 import type { useWorkspaceTaskActions } from './composables/useWorkspaceTaskActions'
@@ -32,7 +31,6 @@ type WorkspaceRuntimeContext = Pick<ReturnType<typeof useWorkspaceRuntime>,
   | 'activeFeedbackLessons'
   | 'columns'
   | 'taskCountByStatus'
-  | 'workspaceSessionView'
   | 'workspaceSubagentView'
   | 'workspaceSubagentTabs'
   | 'showManagedView'
@@ -56,7 +54,6 @@ type WorkspaceRuntimeContext = Pick<ReturnType<typeof useWorkspaceRuntime>,
   | 'agentActionKey'
   | 'deleteAgent'
   | 'confirmDeleteWorkspace'
-  | 'visibleWorkspaceSessionsEmptyText'
   | 'boardLoading'
   | 'isMobileColumnCollapsed'
   | 'toggleMobileColumn'
@@ -141,19 +138,7 @@ export function useWorkspaceEditorContext(): WorkspaceEditorContext {
 }
 
 type WorkspaceAgentManagerContext = Pick<ReturnType<typeof useWorkspaceAgentManager>,
-  'openAgentOptionsModal'
-  | 'openSwitchEnvModal'
-  | 'showAgentOptionsModal'
-  | 'closeAgentOptionsModal'
-  | 'agentManagerSessions'
-  | 'agentManagerEmptyText'
-  | 'handleCreateAdvancedAgent'
-  | 'agentOptionsForm'
-  | 'handleAgentSurfaceChange'
-  | 'handleAgentTargetChange'
-  | 'selectedAgentRemoteProfile'
-  | 'isAgentOptionsCreateDisabled'
-  | 'showAgentFileBrowser'
+  'openSwitchEnvModal'
   | 'switchEnvForm'
   | 'showSwitchEnvManager'
   | 'closeSwitchEnvPresetManager'
@@ -169,29 +154,6 @@ export function provideWorkspaceAgentManagerContext(value: WorkspaceAgentManager
 export function useWorkspaceAgentManagerContext(): WorkspaceAgentManagerContext {
   const value = inject(agentsKey)
   if (!value) throw new Error('WorkspaceAgentManagerContext requires WorkspacePage')
-  return value
-}
-
-type WorkspaceDirectoryBrowserContext = Pick<ReturnType<typeof useWorkspaceDirectoryBrowser>,
-  'openAgentDirectoryBrowser'
-  | 'browserPlacement'
-  | 'navigateAgentBrowserHome'
-  | 'agentBrowserParentPath'
-  | 'navigateAgentBrowserParent'
-  | 'agentBrowserPathInput'
-  | 'loadAgentDirectory'
-  | 'refreshAgentDirectory'
-  | 'agentBrowserItems'
-  | 'handleAgentFileItemClick'
-  | 'agentBrowserLoading'
-  | 'agentBrowserError'
-  | 'selectAgentCurrentDirectory'
->
-const directoryKey: InjectionKey<WorkspaceDirectoryBrowserContext> = Symbol('WorkspaceDirectoryBrowserContext')
-export function provideWorkspaceDirectoryBrowserContext(value: WorkspaceDirectoryBrowserContext) { provide(directoryKey, value) }
-export function useWorkspaceDirectoryBrowserContext(): WorkspaceDirectoryBrowserContext {
-  const value = inject(directoryKey)
-  if (!value) throw new Error('WorkspaceDirectoryBrowserContext requires WorkspacePage')
   return value
 }
 
@@ -263,7 +225,6 @@ export function useWorkspaceTaskPresentationContext(): WorkspaceTaskPresentation
 
 type WorkspaceTaskActionsContext = Pick<ReturnType<typeof useWorkspaceTaskActions>,
   'selectTask'
-  | 'startOptionsFor'
   | 'startTask'
   | 'openEditTaskModal'
   | 'markTask'
@@ -321,7 +282,6 @@ type WorkspaceNavigationContext = Pick<ReturnType<typeof useWorkspaceNavigation>
   | 'openWorkspaceModalFromMenu'
   | 'openEditWorkspaceModalFromMenu'
   | 'openLessonsModalFromMenu'
-  | 'openAgentOptionsModalFromMenu'
   | 'refreshAgentStatusesFromMenu'
   | 'openAppearanceFromMenu'
   | 'workspaceMobileMenuRef'

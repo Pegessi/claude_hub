@@ -1,7 +1,8 @@
-import { computed, reactive, ref } from 'vue'
+import { computed, reactive, ref, watch } from 'vue'
 import { storeToRefs } from 'pinia'
 import { usePendingActions } from '@/composables/usePendingActions'
 import { useWorkspaceStore } from '@/stores/workspaceStore'
+import { providerSupportsManagedSurface } from '@/utils/managedChatSurface'
 import { writeClipboard } from '@/utils/clipboard'
 import {
   handleAttachmentPaste, removeDraftAttachment, resetDraftAttachments,
@@ -13,7 +14,7 @@ import {
   saveTaskReporterKey, type StoredTaskCreateAttempt,
 } from '@/utils/taskExecution'
 import type {
-  AutonomyPolicy, SessionKind, WorkspaceTask, WorkspaceTaskCapabilitiesStatus,
+  AgentType, AutonomyPolicy, SessionKind, WorkspaceTask, WorkspaceTaskCapabilitiesStatus,
   WorkspaceTaskCreate, WorkspaceTaskExecutionComplexity,
   WorkspaceTaskExecutionControl, WorkspaceTaskMode,
 } from '@/types'
@@ -30,7 +31,7 @@ export function useTaskCreateFlow() {
   const workspaceStore = useWorkspaceStore()
   const {
     activeWorkspaceId, isLoading, taskCapabilities, taskCapabilitiesWorkspaceId,
-    taskCapabilitiesStatus, taskCapabilitiesError, workspaceAgents, tasks,
+    taskCapabilitiesStatus, taskCapabilitiesError, activeWorkspace, tasks,
   } = storeToRefs(workspaceStore)
   const { isPending, runPending } = usePendingActions()
   let disposed = false
@@ -74,9 +75,12 @@ export function useTaskCreateFlow() {
     }
   }
 
+  const isRemoteWorkspace = computed(() => activeWorkspace.value?.target === 'remote')
+
   const taskForm = reactive({
     execution_control: 'workspace' as WorkspaceTaskExecutionControl,
-    session_kind: 'terminal' as SessionKind,
+    session_kind: (isRemoteWorkspace.value ? 'terminal' : 'chat') as SessionKind,
+    agent_type: 'codex' as AgentType,
     title: '',
     prompt: '',
     goal: '',
@@ -88,11 +92,30 @@ export function useTaskCreateFlow() {
     evaluation_strictness: 'balanced' as AutonomyPolicy['evaluation_strictness'],
     allow_web_research: false,
     require_artifact_review: false,
-    session_id: '',
-    clear_context: false,
     related_task_id: '',
     attachments: [] as DraftAttachment[],
   })
+
+  const availableAgentTypes = computed(() =>
+    (['codex', 'claude', 'maso', 'cursor', 'antigravity'] as AgentType[])
+      .filter(type => providerSupportsManagedSurface(
+        type, taskForm.session_kind, isRemoteWorkspace.value ? 'remote' : 'local',
+      )),
+  )
+
+  // Remote workspaces use SSH terminals; Chat-only providers cannot run there.
+  watch([isRemoteWorkspace, () => taskForm.session_kind], ([remote]) => {
+    if (remote) taskForm.session_kind = 'terminal'
+    if (!availableAgentTypes.value.includes(taskForm.agent_type)) {
+      taskForm.agent_type = 'codex'
+    }
+  }, { flush: 'sync' })
+
+  function setSessionKind(kind: SessionKind) {
+    if (isRemoteWorkspace.value && kind === 'chat') return
+    taskForm.session_kind = kind
+    handleTaskFormMutation()
+  }
 
   function removeFrozenCreateAttempt(attempt: StoredTaskCreateAttempt): boolean {
     const requestKey = attempt.payload.request_key
@@ -274,14 +297,13 @@ export function useTaskCreateFlow() {
           done_when: taskForm.done_when.split(/\r?\n/).map(line => line.trim()).filter(Boolean),
           out_of_scope: taskForm.out_of_scope.split(/\r?\n/).map(line => line.trim()).filter(Boolean),
           session_kind: taskForm.session_kind,
+          agent_type: taskForm.agent_type,
           task_mode: taskForm.task_mode,
           execution_complexity: taskForm.execution_complexity,
           autonomy_policy: autonomyPolicy,
           ...(recordOnly
             ? {}
             : {
-                session_id: taskForm.session_id || null,
-                clear_context: taskForm.clear_context || null,
                 related_task_id: taskForm.related_task_id || null,
               }),
           attachments: serializeDraftAttachments(taskForm.attachments),
@@ -387,7 +409,8 @@ export function useTaskCreateFlow() {
 
   function resetTaskForm() {
     taskForm.execution_control = 'workspace'
-    taskForm.session_kind = 'terminal'
+    taskForm.session_kind = isRemoteWorkspace.value ? 'terminal' : 'chat'
+    taskForm.agent_type = 'codex'
     taskForm.title = ''
     taskForm.prompt = ''
     taskForm.goal = ''
@@ -399,8 +422,6 @@ export function useTaskCreateFlow() {
     taskForm.evaluation_strictness = 'balanced'
     taskForm.allow_web_research = false
     taskForm.require_artifact_review = false
-    taskForm.session_id = ''
-    taskForm.clear_context = false
     taskForm.related_task_id = ''
     resetDraftAttachments(taskForm.attachments)
   }
@@ -452,7 +473,7 @@ export function useTaskCreateFlow() {
     revealReporterKey: revealCreatedReporterKey, capabilities,
     capabilitiesStatus: taskModalCapabilitiesStatus, capabilitiesError,
     submitBlocked: taskCreateSubmitBlocked, submitDisabled, submitting, targetAvailable,
-    workspaceAgents, tasks, open, close: closeTaskModal, onWorkspaceChanged, dispose,
+    isRemoteWorkspace, availableAgentTypes, setSessionKind, tasks, open, close: closeTaskModal, onWorkspaceChanged, dispose,
     retryCapabilities: retryTaskCapabilities,
     discardPendingAttempt: discardPendingTaskCreateAttempt,
     onFormMutation: handleTaskFormMutation,
