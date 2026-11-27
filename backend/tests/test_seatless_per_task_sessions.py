@@ -110,6 +110,37 @@ async def test_retiring_session_race_provisions_fresh_ephemeral_session(workflow
 
 
 @pytest.mark.asyncio
+async def test_queued_related_task_rehomes_when_prior_session_goes_offline(workflow):
+    from claude_hub.models import AgentRuntimeStatus, ManagedSessionStatus
+
+    manager = workflow.manager
+    first = await manager.start_task(create(workflow).id)
+    first_session_id = first.session_id
+    assert first_session_id is not None
+
+    followup = create(workflow, related_task_id=first.id)
+    followup = await manager.start_task(followup.id)
+    assert followup.status == WorkspaceTaskStatus.QUEUED
+    assert followup.session_id == first_session_id
+
+    # Simulate the prior session stopping/going offline while followup is queued.
+    dead_session = manager.sessions[first_session_id].model_copy(
+        update={
+            "status": ManagedSessionStatus.STOPPED,
+            "runtime_status": AgentRuntimeStatus.OFFLINE,
+        }
+    )
+    manager.sessions[first_session_id] = dead_session
+
+    await manager.dispatch_workspace(workflow.workspace_id, refresh_sessions=False)
+    rehomed = manager.tasks[followup.id]
+    assert rehomed.status == WorkspaceTaskStatus.WORKING
+    assert rehomed.session_id != first_session_id
+    assert rehomed.dispatch_reason == "Dedicated task session"
+    assert manager.sessions[rehomed.session_id].ephemeral is True
+
+
+@pytest.mark.asyncio
 async def test_standard_done_removes_session(workflow):
     manager = workflow.manager
     task = await manager.start_task(create(workflow).id)
