@@ -85,6 +85,8 @@ class _HubFakes:
                 workspace_id=ws,
                 status=SimpleNamespace(value="todo"),
                 session_id=None,
+                session_kind=payload.session_kind,
+                agent_type=payload.agent_type,
                 auto_worktree=bool(payload.auto_worktree),
                 worktree_path=None,
                 worktree_branch=None,
@@ -103,9 +105,34 @@ class _HubFakes:
             return SimpleNamespace(id=f"eph-{len(self.ensure_requests)}")
 
         async def fake_start(task_id: str, request: Any) -> Any:
+            from claude_hub.models import EnsureWorkspaceAgentRequest, WorkspaceSessionRole
+
             self.start_requests.append(request)
             task = self.tasks[task_id]
-            task.session_id = request.target_session_id
+            target_cwd = workspace.path
+            if workspace.target == ExecutionTarget.LOCAL and task.auto_worktree:
+                wt_path, wt_branch = await fake_provision(workspace, task)
+                task.worktree_path = wt_path
+                task.worktree_branch = wt_branch
+                target_cwd = wt_path
+            target_id = request.target_session_id
+            if target_id is None and workspace.target == ExecutionTarget.LOCAL:
+                ensured = await fake_ensure(
+                    workspace.id,
+                    EnsureWorkspaceAgentRequest(
+                        agent_type=request.agent_type or task.agent_type,
+                        session_kind=task.session_kind,
+                        role=WorkspaceSessionRole.ORCHESTRATOR,
+                        target=workspace.target,
+                        reuse_existing=False,
+                        ephemeral=True,
+                        caller_owned_ephemeral=True,
+                        cwd=target_cwd,
+                        env_preset=request.env_preset,
+                    ),
+                )
+                target_id = ensured.id
+            task.session_id = target_id
             task.status = SimpleNamespace(value="queued")
             return task
 
@@ -161,7 +188,8 @@ async def test_local_chat_agents_default_to_ephemeral_chat_and_isolated_worktree
     assert request.reuse_existing is False
     assert request.cwd and request.cwd.endswith("task-1")
     assert hub.provisioned == [("ws-1", "task-1")]
-    assert hub.start_requests[0].target_session_id == "eph-1"
+    assert hub.start_requests[0].target_session_id is None
+    assert hub.tasks["task-1"].session_id == "eph-1"
 
     receipt = result["receipt_summary"]
     lines = receipt.splitlines()

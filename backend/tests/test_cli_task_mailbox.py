@@ -1,4 +1,4 @@
-"""CLI contract for ``claude-hub task tree|events|wait|ack|followup|send``."""
+"""CLI contract for ``claude-hub task list --tree | events [--wait] | ack | followup``."""
 
 from __future__ import annotations
 
@@ -23,6 +23,7 @@ UUID_RE = re.compile(
 
 SAMPLE_TASK = {
     "id": "task-1",
+    "workspace_id": "ws1",
     "title": "parent",
     "status": "todo",
     "parent_task_id": None,
@@ -31,6 +32,7 @@ SAMPLE_TASK = {
 }
 SAMPLE_CHILD = {
     "id": "task-2",
+    "workspace_id": "ws1",
     "title": "child",
     "status": "todo",
     "parent_task_id": "task-1",
@@ -59,6 +61,8 @@ def patch_get_client(
 
     def recording_handler(request: httpx.Request) -> httpx.Response:
         captured.append(request)
+        if request.method == "GET" and request.url.path == "/api/workspaces/tasks/task-1":
+            return httpx.Response(200, json=SAMPLE_TASK)
         return handler(request)
 
     def fake_get_client(ctx: click.Context) -> HubClient:
@@ -82,36 +86,38 @@ def _json(request: httpx.Request) -> Dict[str, Any]:
     return payload
 
 
-def test_help_registers_task_mailbox_commands() -> None:
+def test_help_registers_streamlined_task_mailbox_commands() -> None:
     runner = CliRunner()
     group = runner.invoke(cli, ["task", "--help"])
     assert group.exit_code == 0, group.output
-    for name in ("tree", "events", "wait", "ack", "followup", "send"):
+    for name in ("list", "events", "ack", "followup"):
         assert name in group.output
-    assert "interrupt" not in group.output
+    for removed in ("tree", "wait", "send", "interrupt"):
+        assert f"\n  {removed} " not in group.output
 
 
-def test_wait_ack_help_requires_task_identity_without_resident_cursor() -> None:
+def test_events_ack_help_requires_task_id_first_without_resident_cursor() -> None:
     runner = CliRunner()
 
-    wait_help = runner.invoke(cli, ["task", "wait", "--help"])
+    events_help = runner.invoke(cli, ["task", "events", "--help"])
     ack_help = runner.invoke(cli, ["task", "ack", "--help"])
-    assert wait_help.exit_code == 0, wait_help.output
+    assert events_help.exit_code == 0, events_help.output
     assert ack_help.exit_code == 0, ack_help.output
-    assert "WORKSPACE_ID TASK_ID" in wait_help.output
-    assert "WORKSPACE_ID TASK_ID SEQUENCE" in ack_help.output
-    assert "resident" not in wait_help.output.lower()
+    assert "TASK_ID" in events_help.output
+    assert "--wait" in events_help.output
+    assert "TASK_ID SEQUENCE" in ack_help.output
+    assert "resident" not in events_help.output.lower()
     assert "resident" not in ack_help.output.lower()
 
-    missing_wait_task = runner.invoke(cli, ["task", "wait", "ws1"])
-    missing_ack_sequence = runner.invoke(cli, ["task", "ack", "ws1", "task-1"])
-    assert missing_wait_task.exit_code == 2
-    assert "Missing argument 'TASK_ID'" in missing_wait_task.output
+    missing_events_task = runner.invoke(cli, ["task", "events"])
+    missing_ack_sequence = runner.invoke(cli, ["task", "ack", "task-1"])
+    assert missing_events_task.exit_code == 2
+    assert "Missing argument 'TASK_ID'" in missing_events_task.output
     assert missing_ack_sequence.exit_code == 2
     assert "Missing argument 'SEQUENCE'" in missing_ack_sequence.output
 
 
-def test_tree_events_hit_workspace_task_paths(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_list_tree_and_events_hit_workspace_task_paths(monkeypatch: pytest.MonkeyPatch) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/tree"):
             return httpx.Response(200, json=[SAMPLE_TASK, SAMPLE_CHILD])
@@ -119,27 +125,43 @@ def test_tree_events_hit_workspace_task_paths(monkeypatch: pytest.MonkeyPatch) -
 
     captured = patch_get_client(monkeypatch, handler)
     runner = CliRunner()
-    tree = runner.invoke(cli, ["--json", "task", "tree", "ws1", "task-1"])
+    tree = runner.invoke(cli, ["--json", "task", "list", "ws1", "--tree", "--root", "task-1"])
     events = runner.invoke(
         cli,
-        ["--json", "task", "events", "ws1", "task-1", "--since-sequence", "2", "--subtree"],
+        ["--json", "task", "events", "task-1", "--since-sequence", "2", "--subtree"],
     )
-    resident = runner.invoke(
-        cli, ["--json", "task", "events", "ws1", "task-1", "--since-sequence", "0"]
+    explicit_ws = runner.invoke(
+        cli,
+        [
+            "--json",
+            "task",
+            "events",
+            "task-1",
+            "--workspace-id",
+            "ws1",
+            "--since-sequence",
+            "0",
+        ],
     )
     assert tree.exit_code == 0, tree.output
     assert events.exit_code == 0, events.output
-    assert resident.exit_code == 0, resident.output
-    assert captured[0].url.path == "/api/workspaces/ws1/tasks/task-1/tree"
-    assert captured[1].url.path == "/api/workspaces/ws1/tasks/task-1/events"
-    assert _query(captured[1])["since_sequence"] == ["2"]
-    assert _query(captured[1])["subtree"] == ["true"]
-    assert captured[2].url.path == "/api/workspaces/ws1/tasks/task-1/events"
+    assert explicit_ws.exit_code == 0, explicit_ws.output
+    paths = [req.url.path for req in captured]
+    assert paths == [
+        "/api/workspaces/ws1/tasks/task-1/tree",
+        "/api/workspaces/tasks/task-1",
+        "/api/workspaces/ws1/tasks/task-1/events",
+        "/api/workspaces/ws1/tasks/task-1/events",
+    ]
+    assert _query(captured[2])["since_sequence"] == ["2"]
+    assert _query(captured[2])["subtree"] == ["true"]
     for request in captured:
         assert "/api/agent-tree" not in request.url.path
 
 
-def test_followup_and_send_alias_use_call_id(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_followup_uses_call_id_and_resolves_workspace_o1(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json=SAMPLE_EVENT)
 
@@ -151,7 +173,6 @@ def test_followup_and_send_alias_use_call_id(monkeypatch: pytest.MonkeyPatch) ->
             "--json",
             "task",
             "followup",
-            "ws1",
             "task-1",
             "--message",
             "fix it",
@@ -159,32 +180,28 @@ def test_followup_and_send_alias_use_call_id(monkeypatch: pytest.MonkeyPatch) ->
             "followup-1",
         ],
     )
-    send = runner.invoke(
+    minted = runner.invoke(
         cli,
-        ["--json", "task", "send", "ws1", "task-1", "--message", "note", "--call-id", "send-1"],
+        ["--json", "task", "followup", "task-1", "--workspace-id", "ws1", "--message", "x"],
     )
-    minted = runner.invoke(cli, ["--json", "task", "followup", "ws1", "task-1", "--message", "x"])
     assert followup.exit_code == 0, followup.output
-    assert send.exit_code == 0, send.output
     assert minted.exit_code == 0, minted.output
     assert [request.url.path for request in captured] == [
-        "/api/workspaces/ws1/tasks/task-1/followup",
+        "/api/workspaces/tasks/task-1",
         "/api/workspaces/ws1/tasks/task-1/followup",
         "/api/workspaces/ws1/tasks/task-1/followup",
     ]
-    assert _json(captured[0]) == {"message": "fix it", "call_id": "followup-1"}
-    assert _json(captured[1]) == {"message": "note", "call_id": "send-1"}
+    assert _json(captured[1]) == {"message": "fix it", "call_id": "followup-1"}
     minted_id = _json(captured[2])["call_id"]
     assert UUID_RE.match(minted_id)
     assert "call_id=followup-1" in followup.stderr
-    assert "call_id=send-1" in send.stderr
     assert f"call_id={minted_id}" in minted.stderr
     for request in captured:
         assert "/sessions/" not in request.url.path
         assert "/api/agent-tree" not in request.url.path
 
 
-def test_wait_ack_flushes_events_then_acks_max_sequence(
+def test_events_wait_ack_flushes_events_then_acks_max_sequence(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     events = [
@@ -202,27 +219,30 @@ def test_wait_ack_flushes_events_then_acks_max_sequence(
     captured = patch_get_client(monkeypatch, handler)
     result = CliRunner().invoke(
         cli,
-        ["--json", "task", "wait", "ws1", "task-1", "--subtree", "--ack"],
+        ["--json", "task", "events", "task-1", "--wait", "--subtree", "--ack"],
     )
     assert result.exit_code == 0, result.output
     assert json.loads(result.stdout) == events
     assert [item.url.path for item in captured] == [
+        "/api/workspaces/tasks/task-1",
         "/api/workspaces/ws1/tasks/task-1/wait",
         "/api/workspaces/ws1/tasks/task-1/ack",
     ]
-    assert _query(captured[0])["subtree"] == ["true"]
+    assert _query(captured[1])["subtree"] == ["true"]
     assert json.loads(result.stderr) == {"acked_sequence": 8}
     assert result.stdout.strip().startswith("[")
     assert "acked_sequence" not in result.stdout
 
 
-def test_empty_wait_ack_does_not_ack(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_empty_events_wait_ack_does_not_ack(monkeypatch: pytest.MonkeyPatch) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path.endswith("/wait")
         return httpx.Response(200, json=[])
 
     captured = patch_get_client(monkeypatch, handler)
-    result = CliRunner().invoke(cli, ["--json", "task", "wait", "ws1", "task-1", "--ack"])
+    result = CliRunner().invoke(
+        cli, ["--json", "task", "events", "task-1", "--workspace-id", "ws1", "--wait", "--ack"]
+    )
     assert result.exit_code == 0, result.output
     assert json.loads(result.stdout) == []
     assert "acked_sequence" not in result.stderr
@@ -235,15 +255,18 @@ def test_ack_task_path(monkeypatch: pytest.MonkeyPatch) -> None:
 
     captured = patch_get_client(monkeypatch, handler)
     runner = CliRunner()
-    task_ack = runner.invoke(cli, ["--json", "task", "ack", "ws1", "task-1", "7"])
+    task_ack = runner.invoke(cli, ["--json", "task", "ack", "task-1", "7"])
     assert task_ack.exit_code == 0, task_ack.output
-    assert captured[0].url.path == "/api/workspaces/ws1/tasks/task-1/ack"
-    assert _json(captured[0]) == {"sequence": 7}
+    assert [item.url.path for item in captured] == [
+        "/api/workspaces/tasks/task-1",
+        "/api/workspaces/ws1/tasks/task-1/ack",
+    ]
+    assert _json(captured[1]) == {"sequence": 7}
     for request in captured:
         assert "/api/agent-tree" not in request.url.path
 
 
-def test_wait_sends_timeout_seconds(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_events_wait_sends_timeout_seconds(monkeypatch: pytest.MonkeyPatch) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json=[])
 
@@ -253,9 +276,11 @@ def test_wait_sends_timeout_seconds(monkeypatch: pytest.MonkeyPatch) -> None:
         [
             "--json",
             "task",
-            "wait",
-            "ws1",
+            "events",
             "task-1",
+            "--workspace-id",
+            "ws1",
+            "--wait",
             "--timeout-seconds",
             "7",
         ],
@@ -267,28 +292,40 @@ def test_wait_sends_timeout_seconds(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "/api/agent-tree" not in captured[0].url.path
 
 
-def test_task_wait_sends_timeout_seconds_alt(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_events_wait_sends_fractional_timeout_seconds(monkeypatch: pytest.MonkeyPatch) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json=[])
 
     captured = patch_get_client(monkeypatch, handler)
     result = CliRunner().invoke(
         cli,
-        ["--json", "task", "wait", "ws1", "task-1", "--timeout-seconds", "0.2"],
+        [
+            "--json",
+            "task",
+            "events",
+            "task-1",
+            "--workspace-id",
+            "ws1",
+            "--wait",
+            "--timeout-seconds",
+            "0.2",
+        ],
     )
     assert result.exit_code == 0, result.output
     assert captured[0].url.path == "/api/workspaces/ws1/tasks/task-1/wait"
     assert _query(captured[0])["timeout_seconds"] == ["0.2"]
 
 
-def test_task_wait_ack_order(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_events_wait_ack_order(monkeypatch: pytest.MonkeyPatch) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/wait"):
             return httpx.Response(200, json=[SAMPLE_EVENT])
         return httpx.Response(200, json={**SAMPLE_TASK, "consumer_ack_sequence": 4})
 
     captured = patch_get_client(monkeypatch, handler)
-    result = CliRunner().invoke(cli, ["--json", "task", "wait", "ws1", "task-1", "--ack"])
+    result = CliRunner().invoke(
+        cli, ["--json", "task", "events", "task-1", "--workspace-id", "ws1", "--wait", "--ack"]
+    )
     assert result.exit_code == 0, result.output
     assert [item.url.path for item in captured] == [
         "/api/workspaces/ws1/tasks/task-1/wait",

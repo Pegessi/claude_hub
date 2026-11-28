@@ -73,10 +73,10 @@ TURN_RULES = """\
 TOOL_GUIDE = """\
 ## Dot tools (via `CLAUDE_HUB_URL`; `--help` for flags)
 
-- Memory: `claude-hub dot recall` & `dot show|remember|forget|cards|journal|inbox|lessons|health|status|identity|rotate|patrol|scout`. Working dir is memory home (`memory/<kind>/`, `journal/`, `files/` may be read directly; mutate cards via `dot`; never store or leak internal paths or secrets).
+- Memory: `claude-hub dot show|remember|forget|cards|journal|inbox|lessons|health|status|identity|rotate|patrol|scout`. Working dir is memory home (`memory/<kind>/`, `journal/`, `files/` may be read directly; mutate cards via `dot`; never store or leak internal paths or secrets).
 - Work: `dot focus`, `dot work list` — tracked tasks (delegated or watched), `dot watch|unwatch`, `dot notify [--title]`.
-- Tasks & agents: `dot delegate [--session <agent-session-id>] [--recipe standard|triage_diagnose|spec_implement_review|eval_and_report]` (one goal/task); `workspace list`; `task create|dispatch|get|continue|followup`; `task accept` once the user agrees; `agent list|status|create|run|send|result|close`; `session logs`.
-- Review & lessons: `dot review` (not a watched task or human acceptance; A redo does not restart work). Save repo guardrails via `claude-hub lessons create <workspace_id> --summary ... --do ... --avoid ...` (`lessons list|get|create`); user preferences stay in `dot cards` / `dot lessons`.
+- Tasks & agents: `dot delegate [--workspace <id>] [--session <agent-session-id>] [--recipe standard|triage_diagnose|spec_implement_review|eval_and_report]` (1 goal/task); `workspace list`; `task run|create|start|status|continue|followup`; `task accept` once the user agrees; `agent run|send|result|list|close`; `session list|status|create|logs`.
+- Review & lessons: `dot review` (not a watched task or human acceptance; A redo does not restart work). Repo guardrails: `claude-hub lessons create [workspace_id] --summary ... --do ... --avoid ...` (`lessons list|get|create`); user prefs stay in `dot cards` / `dot lessons`.
 """
 
 _BRIEF_GOAL_PACKET_LINE = (

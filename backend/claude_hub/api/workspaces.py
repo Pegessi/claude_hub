@@ -90,7 +90,9 @@ logger = logging.getLogger(__name__)
 
 
 @router.get("", response_model=List[Workspace])
-async def list_workspaces(current_user: User = Depends(get_current_user)) -> List[Workspace]:
+async def list_workspaces(
+    current_user: User = Depends(get_current_user),
+) -> List[Workspace]:
     """List Agent Workspace configurations."""
     return workspace_manager.list_workspaces()
 
@@ -577,6 +579,9 @@ class _WorkspaceBindings:
 
 
 _execution_endpoints = register_execution_routes(router, _WorkspaceBindings())
+get_task = _execution_endpoints.get_task
+get_task_status = _execution_endpoints.get_task_status
+get_session = _execution_endpoints.get_session
 update_task = _execution_endpoints.update_task
 delete_task = _execution_endpoints.delete_task
 cleanup_task_session = _execution_endpoints.cleanup_task_session

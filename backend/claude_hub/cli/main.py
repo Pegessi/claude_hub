@@ -11,7 +11,12 @@ import click
 
 from claude_hub.cli.client import HubClient
 from claude_hub.cli.commands.common import lifecycle_group_help
-from claude_hub.cli.config import DEFAULT_BASE_URL, DEFAULT_CONFIG_PATH, Settings, resolve_settings
+from claude_hub.cli.config import (
+    DEFAULT_BASE_URL,
+    DEFAULT_CONFIG_PATH,
+    Settings,
+    resolve_settings,
+)
 
 
 def get_client(ctx: click.Context) -> HubClient:
@@ -50,13 +55,6 @@ class _ExplicitClickExit(Exception):
 
 class _MachineReadableGroup(click.Group):
     """Keep JSON-mode failures parseable without changing Click exit semantics."""
-
-    # Command names registered for backwards compatibility but hidden from
-    # --help and shell completion. Invocation still resolves them.
-    hidden_aliases = frozenset({"fs"})
-
-    def list_commands(self, ctx: click.Context) -> list[str]:
-        return [name for name in super().list_commands(ctx) if name not in self.hidden_aliases]
 
     def _parse_root_json_output(
         self,
@@ -147,7 +145,8 @@ class _MachineReadableGroup(click.Group):
 
 
 @click.group(
-    cls=_MachineReadableGroup, help=lifecycle_group_help("Claude Hub command-line interface.")
+    cls=_MachineReadableGroup,
+    help=lifecycle_group_help("Claude Hub command-line interface."),
 )
 @click.option(
     "--base-url",
@@ -203,51 +202,29 @@ def cli(
 
 def _register() -> None:
     """Attach subcommand groups. Imported here to avoid circular imports."""
-    # Attaches `agent run/send/result/subagents/cancel/close` to the agent group.
-    from claude_hub.cli.commands import subagents as _subagents  # noqa: F401
     from claude_hub.cli.commands.dot import dot
-    from claude_hub.cli.commands.feedback import feedback
     from claude_hub.cli.commands.feishu import feishu
     from claude_hub.cli.commands.lessons import lessons
-    from claude_hub.cli.commands.patrol import patrol
-    from claude_hub.cli.commands.rest import (
-        api,
-        auth,
-        clipboard,
-        filesystem,
-        fs,
-        quota,
-        remote,
-        system,
-        tab,
-        terminal,
-    )
+    from claude_hub.cli.commands.rest import api, auth, quota, remote, tab
     from claude_hub.cli.commands.schedule import schedule
     from claude_hub.cli.commands.sessions import session
+    from claude_hub.cli.commands.subagents import agent
     from claude_hub.cli.commands.tasks import task
-    from claude_hub.cli.commands.workspaces import agent, workspace
+    from claude_hub.cli.commands.workspaces import workspace
 
-    cli.add_command(auth)
-    cli.add_command(system)
-    cli.add_command(quota)
-    cli.add_command(tab)
-    cli.add_command(terminal)
-    cli.add_command(filesystem)
-    # Hidden alias kept for backwards compatibility (see hidden_aliases).
-    cli.add_command(fs, name="fs")
-    cli.add_command(remote)
-    cli.add_command(clipboard)
-    cli.add_command(api)
     cli.add_command(workspace)
-    cli.add_command(agent)
     cli.add_command(task)
+    cli.add_command(agent)
     cli.add_command(session)
     cli.add_command(lessons)
-    cli.add_command(schedule)
-    cli.add_command(feishu)
-    cli.add_command(feedback)
     cli.add_command(dot)
-    cli.add_command(patrol)
+    cli.add_command(schedule)
+    cli.add_command(tab)
+    cli.add_command(feishu)
+    cli.add_command(quota)
+    cli.add_command(remote)
+    cli.add_command(auth)
+    cli.add_command(api)
 
 
 _register()

@@ -339,7 +339,7 @@ def test_send_result_list_and_close(hub: Hub) -> None:
     hub.poll_results = [_turn("running")]
     pending = _run(["agent", "result", "sa-1", "turn-1"])
     assert pending.exit_code == 124
-    listed = _run(["--json", "agent", "subagents"])
+    listed = _run(["--json", "agent", "list"])
     assert json.loads(listed.stdout)[0]["id"] == "sa-1"
     assert hub.requests[-1].url.params["parent_tab_id"] == "parent-tab"
     closed = _run(["--json", "agent", "close", "sa-1"])

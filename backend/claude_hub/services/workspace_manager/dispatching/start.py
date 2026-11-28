@@ -4,6 +4,7 @@ import os
 
 from claude_hub.models.schemas import validate_workspace_session_surface
 from claude_hub.services import work_pipeline, workspace_identity
+from claude_hub.services.agent_stream.providers.spec import get_spec
 from claude_hub.services.task_dependencies import require_task_dependencies
 from claude_hub.services.task_transitions import apply_task_update
 from claude_hub.services.workspace_manager._base import _WorkspaceManagerBase
@@ -24,6 +25,18 @@ class _TaskStartMixin(_WorkspaceManagerBase):
         validate_workspace_session_surface(payload.agent_type or task.agent_type, task.session_kind)
         if payload.related_task_id and payload.related_task_id not in self.tasks:
             raise KeyError(payload.related_task_id)
+        effective_cwd = payload.cwd if payload.cwd is not None else task.cwd
+        if effective_cwd is not None:
+            if task.auto_worktree:
+                raise ValueError("Cannot combine auto_worktree=True with an explicit task cwd")
+            if workspace.target == ExecutionTarget.LOCAL:
+                workspace_identity.reject_relative_local_path(effective_cwd, field="cwd")
+                try:
+                    workspace_identity.validate_local_agent_cwd_for_workspace(
+                        workspace.path, effective_cwd
+                    )
+                except workspace_identity.InvalidLocalAgentCwdError as exc:
+                    raise ValueError(str(exc)) from None
         if payload.target_session_id:
             selected = self.sessions.get(payload.target_session_id)
             if selected is None or selected.workspace_id != workspace.id:
@@ -133,7 +146,10 @@ class _TaskStartMixin(_WorkspaceManagerBase):
                             self.tasks[task.id] = task
                             self._save_workspace_state(workspace.id)
                     task = self.tasks[task_id]
-                    if task.status in (WorkspaceTaskStatus.QUEUED, WorkspaceTaskStatus.WORKING):
+                    if task.status in (
+                        WorkspaceTaskStatus.QUEUED,
+                        WorkspaceTaskStatus.WORKING,
+                    ):
                         return task
                     self._validate_start_admission_inputs(workspace, task, payload)
                     if task.session_kind != selected_kind:
@@ -154,15 +170,28 @@ class _TaskStartMixin(_WorkspaceManagerBase):
                         self.tasks[task.id] = task
                         self._save_workspace_state(workspace.id)
 
-                    if task.status in (WorkspaceTaskStatus.QUEUED, WorkspaceTaskStatus.WORKING):
+                    if task.status in (
+                        WorkspaceTaskStatus.QUEUED,
+                        WorkspaceTaskStatus.WORKING,
+                    ):
                         return task
                     self._validate_start_admission_inputs(workspace, task, payload)
 
                 # Only explicit affinity can reuse a session. Worktree tasks also
                 # require that the selected session runs in the task worktree.
+                requested_cwd = payload.cwd if payload.cwd is not None else task.cwd
                 wanted_wt = (
                     workspace_identity.resolve_path(wt_path)
                     if workspace.target == ExecutionTarget.LOCAL and task.auto_worktree
+                    else (
+                        workspace_identity.resolve_path(requested_cwd)
+                        if workspace.target == ExecutionTarget.LOCAL and requested_cwd
+                        else None
+                    )
+                )
+                wanted_remote_cwd = (
+                    workspace_identity.normalize_remote_cwd(requested_cwd)
+                    if workspace.target == ExecutionTarget.REMOTE and requested_cwd
                     else None
                 )
                 inherited_env: dict[str, str] = {}
@@ -172,19 +201,28 @@ class _TaskStartMixin(_WorkspaceManagerBase):
                     inherited_env = dict(target.env)
                     inherited_preset = target.env_preset
 
+                def _matches_requested_dir(candidate: ManagedSession) -> bool:
+                    if wanted_wt is not None:
+                        return (
+                            workspace_identity.resolve_path(
+                                candidate.workspace_path or workspace.path
+                            )
+                            == wanted_wt
+                        )
+                    if wanted_remote_cwd is not None:
+                        candidate_remote = workspace_identity.normalize_remote_cwd(
+                            candidate.remote_cwd or candidate.workspace_path or workspace.remote_cwd
+                        )
+                        return candidate_remote == wanted_remote_cwd
+                    return True
+
                 def compatible(candidate: ManagedSession | None) -> bool:
                     return bool(
                         candidate
                         and candidate.workspace_id == workspace.id
                         and candidate.session_kind == selected_kind
                         and self._can_assign_or_queue_to(candidate)
-                        and (
-                            wanted_wt is None
-                            or workspace_identity.resolve_path(
-                                candidate.workspace_path or workspace.path
-                            )
-                            == wanted_wt
-                        )
+                        and _matches_requested_dir(candidate)
                     )
 
                 def can_wake_archived(session: ManagedSession | None) -> bool:
@@ -195,14 +233,11 @@ class _TaskStartMixin(_WorkspaceManagerBase):
                         and session.workspace_id == workspace.id
                         and session.session_kind == selected_kind == SessionKind.CHAT
                         and session.role
-                        in {WorkspaceSessionRole.ORCHESTRATOR, WorkspaceSessionRole.WORKER}
-                        and (
-                            wanted_wt is None
-                            or workspace_identity.resolve_path(
-                                session.workspace_path or workspace.path
-                            )
-                            == wanted_wt
-                        )
+                        in {
+                            WorkspaceSessionRole.ORCHESTRATOR,
+                            WorkspaceSessionRole.WORKER,
+                        }
+                        and _matches_requested_dir(session)
                     )
 
                 if not payload.target_session_id:
@@ -242,27 +277,42 @@ class _TaskStartMixin(_WorkspaceManagerBase):
                             # session that failed the worktree or liveness check.
                             assert target is not None
                             payload = payload.model_copy(update={"target_session_id": target.id})
-                elif (
-                    target
-                    and wanted_wt
-                    and workspace_identity.resolve_path(target.workspace_path or workspace.path)
-                    != wanted_wt
-                ):
+                elif target and not _matches_requested_dir(target):
                     target = None
                 if target is None:
+                    effective_agent = payload.agent_type or task.agent_type
+                    effective_preset = (
+                        payload.env_preset
+                        if payload.env_preset is not None
+                        else (inherited_preset or task.env_preset)
+                    )
+                    effective_model = payload.model if payload.model is not None else task.model
+                    agent_env = dict(inherited_env)
+                    if effective_model:
+                        spec = get_spec(effective_agent)
+                        if spec.model_env_key:
+                            agent_env[spec.model_env_key] = effective_model.strip()
+                    is_remote = workspace.target == ExecutionTarget.REMOTE
+                    target_cwd = (
+                        None
+                        if is_remote
+                        else (wt_path if task.auto_worktree else (requested_cwd or workspace.path))
+                    )
+                    target_remote_cwd = requested_cwd if is_remote else None
                     task_agent = await self.ensure_workspace_agent(
                         workspace.id,
                         EnsureWorkspaceAgentRequest(
-                            agent_type=payload.agent_type or task.agent_type,
+                            agent_type=effective_agent,
                             session_kind=selected_kind,
                             role=WorkspaceSessionRole.ORCHESTRATOR,
                             target=workspace.target,
                             reuse_existing=False,
                             ephemeral=True,
                             caller_owned_ephemeral=True,
-                            cwd=wt_path if wanted_wt else workspace.path,
-                            env=inherited_env,
-                            env_preset=inherited_preset,
+                            cwd=target_cwd,
+                            remote_cwd=target_remote_cwd,
+                            env=agent_env,
+                            env_preset=effective_preset,
                         ),
                     )
                     created_ephemeral_session_id = task_agent.id
@@ -276,7 +326,10 @@ class _TaskStartMixin(_WorkspaceManagerBase):
                     # workspace mutation lock so delete_session cannot retire the chosen
                     # session after reference checks pass.
                     task = self.tasks[task_id]
-                    if task.status in (WorkspaceTaskStatus.QUEUED, WorkspaceTaskStatus.WORKING):
+                    if task.status in (
+                        WorkspaceTaskStatus.QUEUED,
+                        WorkspaceTaskStatus.WORKING,
+                    ):
                         return task
                     self._validate_start_admission_inputs(workspace, task, payload)
 
@@ -304,6 +357,16 @@ class _TaskStartMixin(_WorkspaceManagerBase):
                         )
                     if payload.agent_type:
                         base_update["agent_type"] = payload.agent_type
+                    if payload.model is not None:
+                        base_update["model"] = payload.model
+                    if payload.env_preset is not None:
+                        base_update["env_preset"] = payload.env_preset
+                    if payload.cwd is not None:
+                        base_update["cwd"] = (
+                            str(Path(payload.cwd).expanduser().resolve())
+                            if workspace.target == ExecutionTarget.LOCAL
+                            else payload.cwd
+                        )
                     if payload.related_task_id:
                         if payload.related_task_id not in self.tasks:
                             raise KeyError(payload.related_task_id)
@@ -425,7 +488,10 @@ class _TaskStartMixin(_WorkspaceManagerBase):
             target = self.sessions.get(payload.target_session_id)
             if not target or target.workspace_id != workspace.id:
                 raise KeyError(payload.target_session_id)
-            if target.role not in {WorkspaceSessionRole.ORCHESTRATOR, WorkspaceSessionRole.WORKER}:
+            if target.role not in {
+                WorkspaceSessionRole.ORCHESTRATOR,
+                WorkspaceSessionRole.WORKER,
+            }:
                 raise RuntimeError("Tasks can only be assigned to workspace agents")
             if target.session_kind != task.session_kind:
                 raise ValueError("The selected agent does not match the Task execution surface")

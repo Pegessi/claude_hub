@@ -2,6 +2,7 @@
 
 from ....models import GoalPacket
 from ....models.task_mailbox import TaskEvent
+from ... import workspace_identity
 from ...task_dependencies import validate_task_dependencies
 from ...task_graph import (
     make_task_consumer_key,
@@ -59,7 +60,10 @@ class _TaskCoreMixin(_WorkspaceManagerBase):
             session = self.sessions.get(payload.session_id)
             if not session or session.workspace_id != workspace_id:
                 raise KeyError(payload.session_id)
-            if session.role not in {WorkspaceSessionRole.ORCHESTRATOR, WorkspaceSessionRole.WORKER}:
+            if session.role not in {
+                WorkspaceSessionRole.ORCHESTRATOR,
+                WorkspaceSessionRole.WORKER,
+            }:
                 raise ValueError("Tasks can only be assigned to workspace agents")
             if "session_kind" not in payload.model_fields_set:
                 session_kind = session.session_kind
@@ -90,7 +94,11 @@ class _TaskCoreMixin(_WorkspaceManagerBase):
         )
         recipe = payload.recipe
         if recipe == WorkspaceTaskRecipe.SPEC_IMPLEMENT_REVIEW:
-            auto_worktree = True if payload.auto_worktree is None else bool(payload.auto_worktree)
+            auto_worktree = (
+                False
+                if payload.auto_worktree is None and payload.cwd is not None
+                else (True if payload.auto_worktree is None else bool(payload.auto_worktree))
+            )
             auto_push_remote = payload.auto_push_remote is True
         else:
             auto_worktree = (
@@ -99,6 +107,20 @@ class _TaskCoreMixin(_WorkspaceManagerBase):
             auto_push_remote = (
                 bool(payload.auto_push_remote) if payload.auto_push_remote is not None else False
             )
+        task_cwd: str | None = payload.cwd
+        if task_cwd is not None:
+            if auto_worktree:
+                raise ValueError("Cannot combine auto_worktree=True with an explicit task cwd")
+            workspace = self.workspaces[workspace_id]
+            if workspace.target == ExecutionTarget.LOCAL:
+                workspace_identity.reject_relative_local_path(task_cwd, field="cwd")
+                try:
+                    workspace_identity.validate_local_agent_cwd_for_workspace(
+                        workspace.path, task_cwd
+                    )
+                except workspace_identity.InvalidLocalAgentCwdError as exc:
+                    raise ValueError(str(exc)) from None
+                task_cwd = str(Path(task_cwd).expanduser().resolve())
         infowall_demand_id = (
             payload.infowall_demand_id.strip()
             if isinstance(payload.infowall_demand_id, str) and payload.infowall_demand_id.strip()
@@ -136,6 +158,9 @@ class _TaskCoreMixin(_WorkspaceManagerBase):
             goal_packet=goal_packet,
             review_profiles=payload.review_profiles,
             agent_type=payload.agent_type,
+            model=payload.model,
+            env_preset=payload.env_preset,
+            cwd=task_cwd,
             session_kind=session_kind,
             task_mode=payload.task_mode,
             recipe=recipe,

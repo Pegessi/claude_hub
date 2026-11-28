@@ -100,6 +100,7 @@ def cold_review_env(
         workspace_name: str | None = None,
         workspace_role: WorkspaceSessionRole | None = None,
         managed_session_id: str | None = None,
+        **_kwargs: Any,
     ) -> TerminalTab:
         tab_id = f"tab-{len(sent_messages)}"
         return TerminalTab(
@@ -153,6 +154,7 @@ def cold_review_env(
         "_ensure_session_ready_for_send",
         fake_ensure_session_ready,
     )
+    monkeypatch.setattr(workspace_manager, "_get_live_subagent_service", lambda: None)
 
     async def fake_current_user() -> User:
         return User(
@@ -243,7 +245,7 @@ def test_cold_restart_after_verdict_does_not_append_task_events(
     workspace_id = workspace["id"]
     parent = client.post(
         f"/api/workspaces/{workspace_id}/tasks",
-        json={"title": "Parent", "prompt": "Supervise child"},
+        json={"title": "Parent", "prompt": "Supervise child", "session_kind": "terminal"},
     ).json()
     parent_id = parent["id"]
     child = client.post(
@@ -252,6 +254,7 @@ def test_cold_restart_after_verdict_does_not_append_task_events(
             "title": "Child",
             "prompt": "Implement feature",
             "parent_task_id": parent_id,
+            "session_kind": "terminal",
         },
     ).json()
     child_id = child["id"]
@@ -312,7 +315,7 @@ def test_cold_restart_repairs_stale_reviewed_cycle_when_verdict_present(
     workspace_id = workspace["id"]
     parent = client.post(
         f"/api/workspaces/{workspace_id}/tasks",
-        json={"title": "Parent stale", "prompt": "Supervise"},
+        json={"title": "Parent stale", "prompt": "Supervise", "session_kind": "terminal"},
     ).json()
     parent_id = parent["id"]
     child = client.post(
@@ -321,6 +324,7 @@ def test_cold_restart_repairs_stale_reviewed_cycle_when_verdict_present(
             "title": "Child stale",
             "prompt": "Work",
             "parent_task_id": parent_id,
+            "session_kind": "terminal",
         },
     ).json()
     child_id = child["id"]
@@ -377,7 +381,7 @@ def test_cold_restart_skips_orphan_fallback_reaper_report_backfill(
     workspace_id = workspace["id"]
     parent = client.post(
         f"/api/workspaces/{workspace_id}/tasks",
-        json={"title": "Parent orphan", "prompt": "Supervise"},
+        json={"title": "Parent orphan", "prompt": "Supervise", "session_kind": "terminal"},
     ).json()
     parent_id = parent["id"]
     child = client.post(
@@ -386,6 +390,7 @@ def test_cold_restart_skips_orphan_fallback_reaper_report_backfill(
             "title": "Child orphan",
             "prompt": "Work",
             "parent_task_id": parent_id,
+            "session_kind": "terminal",
         },
     ).json()
     child_id = child["id"]

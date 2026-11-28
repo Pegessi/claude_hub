@@ -194,7 +194,7 @@ def test_agent_create_cli_forwards_session_kind(monkeypatch: pytest.MonkeyPatch)
     result = CliRunner().invoke(
         cli,
         [
-            "agent",
+            "session",
             "create",
             "ws",
             "--agent-type",
@@ -256,8 +256,9 @@ def test_task_run_cli_forwards_surface_to_agent_and_task(
     )
 
     assert result.exit_code == 0, result.output
-    assert captured["agent"]["session_kind"] == "chat"
+    assert "agent" not in captured
     assert captured["task"]["session_kind"] == "chat"
+    assert captured["task"]["env_preset"] == "none"
 
 
 def test_session_send_cli_generates_and_forwards_stable_call_id(

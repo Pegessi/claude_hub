@@ -47,13 +47,11 @@ _FORBIDDEN_REMOVED_LEGACY_SURFACE = (
     "## Agent Tree REST",
 )
 
-_TASK_CLI_SUBCOMMANDS = ("tree", "events", "wait", "ack", "followup", "start")
+_TASK_CLI_SUBCOMMANDS = ("list --tree", "events", "ack", "followup", "start")
 
 
 def _assert_readme_covers_task_cli_subcommands(text: str) -> None:
     """Primary task CLI subcommands: slash list or each subcommand named."""
-    if "tree/events/wait/ack/followup/start" in text:
-        return
     lowered = text.lower()
     missing = [sub for sub in _TASK_CLI_SUBCOMMANDS if sub not in lowered]
     assert not missing, f"missing task subcommands: {missing}"
@@ -91,9 +89,10 @@ def _assert_root_readme_task_first(text: str) -> None:
     assert "independent long-running agent" in text.lower()
     assert "not a mailbox consumer" in text.lower()
     assert text.count("claude-hub agent-tree spawn") == 0
-    assert "uv run claude-hub --json task tree" in text
+    assert "uv run claude-hub --json task list" in text
+    assert "--tree" in text
     assert "uv run claude-hub --json task events" in text
-    assert "uv run claude-hub --json task wait" in text
+    assert "--wait" in text
     assert "uv run claude-hub --json task ack" in text
     assert "uv run claude-hub --json task followup" in text
     assert "claude-hub task` primary" in text

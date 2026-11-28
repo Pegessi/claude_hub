@@ -102,10 +102,14 @@ async def assert_surfaces(client, monkeypatch, session, expected):
     # Exercise the real CLI formatters using actual API responses.
     cli_module = importlib.import_module("claude_hub.cli.main")
     api = SimpleNamespace(
-        get_board=lambda _, include_archived=False: board, list_tab_statuses=lambda: tabs
+        get_board=lambda _, include_archived=False: board,
+        list_tab_statuses=lambda: tabs,
+        get_session=lambda sid: (
+            {**row, "workspace_id": session.workspace_id} if sid == session.id else None
+        ),
     )
     monkeypatch.setattr(cli_module, "get_client", lambda _: nullcontext(api))
-    output = CliRunner().invoke(cli, ["--json", "agent", "status", session.workspace_id])
+    output = CliRunner().invoke(cli, ["--json", "session", "list", session.workspace_id])
     assert output.exit_code == 0, output.output
     assert json.loads(output.output)[0]["runtime_status"] == expected
     output = CliRunner().invoke(cli, ["--json", "tab", "status"])

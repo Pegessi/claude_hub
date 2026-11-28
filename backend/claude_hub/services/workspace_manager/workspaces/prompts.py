@@ -59,7 +59,12 @@ def build_resident_agent_prompt(
     if workspace.resident_agent_master_mode:
         task_graph_block = _build_task_graph_block(base_url, ws)
         return _build_resident_master_prompt(
-            workspace, base_url, session_id, directive_block, periodic_block, task_graph_block
+            workspace,
+            base_url,
+            session_id,
+            directive_block,
+            periodic_block,
+            task_graph_block,
         )
     return (
         "You are this workspace's RESIDENT self-driven maintenance agent. You wake up "
@@ -133,8 +138,8 @@ def _build_task_graph_block(base_url: str, workspace_id: str) -> str:
         "-H 'Content-Type: application/json' -d '{\"status\":\"done\"}'\n"
         'The legacy "origin":"resident" field is display metadata only. Creating a Task '
         "only records it; starting requires the explicit start/dispatch action allowed for the current role.\n"
-        "CLI equivalents: `claude-hub task tree|create|start|events|wait|ack|"
-        "followup|continue|accept|review`.\n"
+        "CLI equivalents: `claude-hub task list --tree|run|create|start|status|events [--wait]|ack|"
+        "followup|continue|accept`.\n"
     )
 
 

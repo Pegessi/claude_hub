@@ -46,7 +46,8 @@ def _running_task(client: TestClient, repo: Path) -> tuple[dict, dict, dict]:
     ).json()
     worker = client.post(f"/api/workspaces/{workspace['id']}/agent", json={}).json()
     task = client.post(
-        f"/api/workspaces/{workspace['id']}/tasks", json={"title": "Investigate", "prompt": "work"}
+        f"/api/workspaces/{workspace['id']}/tasks",
+        json={"title": "Investigate", "prompt": "work", "session_kind": "terminal"},
     ).json()
     client.post(
         f"/api/workspaces/tasks/{task['id']}/start", json={"target_session_id": worker["id"]}
@@ -212,7 +213,7 @@ def test_new_plan_is_announced_once_as_a_checkpoint(isolated_hub: Path) -> None:
         workspace_manager.configure_task_notifier(None)
     assert [notice.kind for notice in sent] == ["plan"]
     assert "Find why requests with images fail" in sent[0].text
-    assert f"task followup {workspace['id']} {task['id']}" in sent[0].text
+    assert f"task followup {task['id']}" in sent[0].text
 
 
 def _task(**changes: Any) -> WorkspaceTask:
@@ -459,7 +460,7 @@ def test_working_task_next_step_uses_followup_not_continue() -> None:
     notice = attention_notice(
         _task(status=WorkspaceTaskStatus.WORKING), TaskPhase.NEEDS_USER, "agent_needs_input"
     )
-    assert "claude-hub task followup ws-1 task-1" in notice.text
+    assert "claude-hub task followup task-1" in notice.text
     assert "task continue" not in notice.text
 
 
@@ -505,7 +506,9 @@ def test_reconciler_fails_a_task_whose_agent_stays_gone_and_continue_reassigns(
     spare = client.post(f"/api/workspaces/{workspace['id']}/agent", json={}).json()
     resumed = client.post(f"/api/workspaces/tasks/{task['id']}/continue", json={})
     assert resumed.status_code == 200, resumed.text
-    assert resumed.json()["session_id"] == spare["id"]
+    resumed_session_id = resumed.json()["session_id"]
+    assert resumed_session_id not in {worker["id"], spare["id"]}
+    assert workspace_manager.sessions[resumed_session_id].ephemeral is True
 
 
 def test_reconciler_waits_a_week_before_failing_an_initiator_task_without_its_chat(

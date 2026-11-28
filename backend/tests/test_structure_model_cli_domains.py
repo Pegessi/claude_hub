@@ -18,7 +18,6 @@ from claude_hub.cli.feishu_cards_impl import simple as simple_cards
 from claude_hub.cli.feishu_cards_impl import workspace as workspace_cards
 from claude_hub.cli.task_commands import creation as task_creation
 from claude_hub.cli.task_commands import execution as task_execution
-from claude_hub.cli.task_commands import feedback as task_feedback
 from claude_hub.cli.task_commands import lifecycle as task_lifecycle
 from claude_hub.cli.task_commands import observation as task_observation
 from claude_hub.cli.task_commands import read as task_read
@@ -172,11 +171,7 @@ SCHEMA_MODULE_CLASSES: Dict[str, Tuple[str, ...]] = {
 
 EXPECTED_TASK_COMMANDS = (
     "list",
-    "get",
     "status",
-    "report",
-    "review",
-    "brief",
     "create",
     "run",
     "start",
@@ -184,22 +179,15 @@ EXPECTED_TASK_COMMANDS = (
     "update",
     "accept",
     "cleanup",
-    "tree",
     "events",
-    "wait",
     "ack",
     "followup",
-    "send",
     "abort",
     "request-review",
     "delete",
-    "spawn",
-    "dispatch-decision",
-    "feedback",
     "register",
     "progress",
     "handoff",
-    "dispatch",
     "context",
 )
 
@@ -224,11 +212,11 @@ def test_task_facade_preserves_single_click_group_and_registration_order() -> No
     assert isinstance(task_facade.task, click.Group)
     assert tuple(task_facade.task.commands) == EXPECTED_TASK_COMMANDS
     assert task_facade.task_list is task_read.task_list
-    assert task_facade.task_brief is task_read.task_brief
+    assert task_facade.task_status is task_read.task_status
     assert task_facade.task_create is task_creation.task_create
+    assert task_facade.task_run is task_creation.task_run
     assert task_facade.task_start is task_lifecycle.task_start
-    assert task_facade.task_wait is task_observation.task_wait
-    assert task_facade.task_feedback_reap is task_feedback.task_feedback_reap
+    assert task_facade.task_events is task_observation.task_events
     assert task_facade.task_register is task_execution.task_register
     assert task_facade._find_task_board is task_read._find_task_board
     assert task_facade._latest_acceptance_report is task_read._latest_acceptance_report

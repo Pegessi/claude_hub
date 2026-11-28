@@ -32,7 +32,10 @@ def _excerpt(value: Any, limit: int = 500) -> str:
 def _next_step(task: WorkspaceTask, blockers: list[str]) -> str:
     if task.uncertain_call_ids:
         return "Inspect uncertain delivery before any explicit retry; do not resend blindly."
-    if task.latest_progress and task.latest_progress.state.value in {"needs_input", "blocked"}:
+    if task.latest_progress and task.latest_progress.state.value in {
+        "needs_input",
+        "blocked",
+    }:
         return "Inspect the latest initiator progress blocker/question before continuing."
     if task.status == WorkspaceTaskStatus.WORKING:
         return "Read the current task and reports; resume only the work assigned to your session."
@@ -70,12 +73,16 @@ def render_workspace_snapshot(
             reports[report.task_id] = report
     sessions = payload.get("sessions", [])
     ordered_tasks = sorted(
-        tasks.values(), key=lambda item: (_time_key(item.updated_at), item.id), reverse=True
+        tasks.values(),
+        key=lambda item: (_time_key(item.updated_at), item.id),
+        reverse=True,
     )
     ordered_tasks.sort(key=lambda item: item.status == WorkspaceTaskStatus.DONE)
     visible_tasks = ordered_tasks[:MAX_SNAPSHOT_TASKS]
     ordered_sessions = sorted(
-        sessions, key=lambda item: (item.get("updated_at", ""), item["id"]), reverse=True
+        sessions,
+        key=lambda item: (item.get("updated_at", ""), item["id"]),
+        reverse=True,
     )
     ordered_sessions.sort(
         key=lambda item: not bool(item.get("current_task_id") or item.get("task_id"))
@@ -162,7 +169,7 @@ def render_workspace_snapshot(
         lines.extend(
             [
                 f"- Next step (derived from lifecycle): {_next_step(task, blockers)}",
-                f"- Compact AI handoff brief: claude-hub task brief {task.id} --workspace-id {task.workspace_id}",
+                f"- Compact AI handoff brief: claude-hub task status {task.id} --brief --workspace-id {task.workspace_id}",
                 f"- Full contract: claude-hub --json task status {task.id} --workspace-id {task.workspace_id}",
             ]
         )

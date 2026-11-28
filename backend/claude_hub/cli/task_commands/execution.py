@@ -8,7 +8,7 @@ import click
 
 from claude_hub.cli import main as cli_main
 from claude_hub.cli.client import HubError
-from claude_hub.cli.commands.common import merge_payload
+from claude_hub.cli.commands.common import resolve_workspace_id
 from claude_hub.cli.output import emit
 from claude_hub.cli.task_commands.execution_support import (
     _action_summary,
@@ -26,18 +26,18 @@ from claude_hub.cli.task_commands.execution_support import (
     _source_reference,
     _staged_key_or_none,
     _staged_reporter_key_file,
-    _task_in_board,
 )
 from claude_hub.cli.task_commands.group import task
 from claude_hub.cli.task_commands.read import (
     _echo_call_id,
-    _find_task_board,
+    _fetch_task_dict,
     _resolve_call_id,
+    _resolve_ws_id,
 )
 
 
 @task.command("register")
-@click.argument("workspace_id")
+@click.argument("workspace_id", required=False, default=None)
 @click.option("--title", required=True, help="Independent Task goal title.")
 @click.option("--prompt", required=True, help="Task goal and acceptance context.")
 @click.option(
@@ -68,7 +68,7 @@ from claude_hub.cli.task_commands.read import (
 @click.pass_context
 def task_register(
     ctx: click.Context,
-    workspace_id: str,
+    workspace_id: Optional[str],
     title: str,
     prompt: str,
     reporter_key_file: Optional[Path],
@@ -87,8 +87,7 @@ def task_register(
 ) -> None:
     """Register initiator-managed work without dispatching a Workspace agent.
 
-    Run task context first and pass any execution reference explicitly;
-    retries must repeat the same values.
+    Pass --execution-* refs explicitly; ambient tab env is never inferred.
     """
     if reuse_reporter_key_file and reporter_key_file is None:
         raise click.UsageError("--reuse-reporter-key-file requires --reporter-key-file")
@@ -117,8 +116,9 @@ def task_register(
     staged: Path | None = None
     try:
         with cli_main.get_client(ctx) as client:
+            resolved_ws = resolve_workspace_id(client, workspace_id)
             try:
-                capabilities = client.get_task_capabilities(workspace_id)
+                capabilities = client.get_task_capabilities(resolved_ws)
             except HubError as exc:
                 raise click.ClickException("initiator_task_registration_unavailable") from exc
             controls = (
@@ -136,7 +136,7 @@ def task_register(
             reporter_key = _prepare_reporter_key(key_path, reuse_reporter_key_file)
             body["reporter_key"] = reporter_key
             body["request_key"] = _registration_request_key(reporter_key)
-            data = client.register_task(workspace_id, body)
+            data = client.register_task(resolved_ws, body)
     except HubError as exc:
         raise _settle_staged_key(
             _safe_task_operation_error("register", exc),
@@ -159,8 +159,8 @@ def task_register(
 
 
 @task.command("progress")
-@click.argument("workspace_id")
 @click.argument("task_id")
+@click.option("--workspace-id", default=None, help="Optional workspace id (skips lookup).")
 @click.option(
     "--reporter-key-file",
     default=None,
@@ -183,8 +183,18 @@ def task_register(
     ),
 )
 @click.option("--summary", required=True)
-@click.option("--expected-execution-epoch", required=True, type=click.IntRange(min=1))
-@click.option("--expected-progress-revision", required=True, type=click.IntRange(min=0))
+@click.option(
+    "--expected-execution-epoch",
+    default=None,
+    type=click.IntRange(min=1),
+    help="Expected CAS epoch (auto-read on fresh calls; required when retrying with --call-id).",
+)
+@click.option(
+    "--expected-progress-revision",
+    default=None,
+    type=click.IntRange(min=0),
+    help="Expected CAS revision (auto-read on fresh calls; required when retrying with --call-id).",
+)
 @click.option("--call-id", default=None, help="Stable retry id; a UUID is generated if omitted.")
 @click.option("--validation", default=None)
 @click.option("--risks", default=None)
@@ -193,13 +203,13 @@ def task_register(
 @click.pass_context
 def task_progress(
     ctx: click.Context,
-    workspace_id: str,
     task_id: str,
+    workspace_id: Optional[str],
     reporter_key_file: Optional[Path],
     state: str,
     summary: str,
-    expected_execution_epoch: int,
-    expected_progress_revision: int,
+    expected_execution_epoch: Optional[int],
+    expected_progress_revision: Optional[int],
     call_id: Optional[str],
     validation: Optional[str],
     risks: Optional[str],
@@ -212,9 +222,15 @@ def task_progress(
 ) -> None:
     """Record initiator progress; never dispatch or use managed-session reports.
 
-    Run task context first and pass any execution reference explicitly;
-    retries must repeat the same values.
+    Pass --execution-* refs explicitly; ambient tab env is never inferred.
     """
+    if call_id is not None and (
+        expected_execution_epoch is None or expected_progress_revision is None
+    ):
+        raise click.UsageError(
+            "Retries with --call-id must pass both --expected-execution-epoch and "
+            "--expected-progress-revision unchanged."
+        )
     if reporter_key_file is None:
         reporter_key_file = _default_reporter_key_file(task_id)
         if not reporter_key_file.exists():
@@ -224,19 +240,9 @@ def task_progress(
             )
     reporter_key = _read_reporter_key(reporter_key_file)
     resolved_call_id = _resolve_call_id(call_id)
+    auto_cas = expected_execution_epoch is None or expected_progress_revision is None
     _echo_call_id(resolved_call_id)
-    body: Dict[str, Any] = {
-        "call_id": resolved_call_id,
-        "expected_execution_epoch": expected_execution_epoch,
-        "expected_progress_revision": expected_progress_revision,
-        "state": state,
-        "summary": summary,
-        "artifact_refs": list(artifact_refs),
-    }
-    if validation is not None:
-        body["validation"] = validation
-    if risks is not None:
-        body["risks"] = risks
+
     execution_ref = _execution_reference(
         execution_provider,
         execution_session_id,
@@ -244,19 +250,52 @@ def task_progress(
         execution_turn_id,
         execution_run_epoch,
     )
-    if execution_ref is not None:
-        body["execution_ref"] = execution_ref
     try:
         with cli_main.get_client(ctx) as client:
-            data = client.record_task_progress(workspace_id, task_id, body, reporter_key)
+            if workspace_id is None or auto_cas:
+                try:
+                    resolved_ws, fetched = _fetch_task_dict(client, task_id, workspace_id)
+                except HubError as exc:
+                    raise _safe_task_operation_error("progress", exc) from exc
+                except click.ClickException as exc:
+                    raise click.ClickException("task_not_found") from exc
+                if expected_execution_epoch is None:
+                    expected_execution_epoch = int(fetched.get("execution_epoch", 1))
+                if expected_progress_revision is None:
+                    expected_progress_revision = int(fetched.get("progress_revision", 0))
+            else:
+                resolved_ws = workspace_id
+
+            if auto_cas:
+                click.echo(
+                    f"expected_execution_epoch={expected_execution_epoch} "
+                    f"expected_progress_revision={expected_progress_revision}",
+                    err=True,
+                )
+
+            body: Dict[str, Any] = {
+                "call_id": resolved_call_id,
+                "expected_execution_epoch": expected_execution_epoch,
+                "expected_progress_revision": expected_progress_revision,
+                "state": state,
+                "summary": summary,
+                "artifact_refs": list(artifact_refs),
+            }
+            if validation is not None:
+                body["validation"] = validation
+            if risks is not None:
+                body["risks"] = risks
+            if execution_ref is not None:
+                body["execution_ref"] = execution_ref
+            data = client.record_task_progress(resolved_ws, task_id, body, reporter_key)
     except HubError as exc:
         raise _safe_task_operation_error("progress", exc) from exc
     emit(_action_summary(data), cli_main.as_json(ctx))
 
 
 @task.command("handoff")
-@click.argument("workspace_id")
 @click.argument("task_id")
+@click.option("--workspace-id", default=None, help="Optional workspace id (skips lookup).")
 @click.option(
     "--execution-control",
     required=True,
@@ -271,8 +310,7 @@ def task_progress(
     default=None,
     help=(
         "New private credential file for an initiator handoff. Defaults to replacing "
-        "~/.claude_hub/reporter-keys/<task-id>.key after the handoff succeeds; another "
-        "file supersedes that default file, which is then removed."
+        "~/.claude_hub/reporter-keys/<task-id>.key after the handoff succeeds."
     ),
 )
 @click.option(
@@ -284,8 +322,8 @@ def task_progress(
 @click.pass_context
 def task_handoff(
     ctx: click.Context,
-    workspace_id: str,
     task_id: str,
+    workspace_id: Optional[str],
     execution_control: str,
     expected_execution_epoch: int,
     expected_progress_revision: int,
@@ -317,7 +355,6 @@ def task_handoff(
     }
     staged: Path | None = None
     if execution_control == "initiator" and new_reporter_key_file is None:
-        # The previous epoch's key stays usable until the handoff succeeds.
         _default_reporter_key_file(task_id)
         staged = new_reporter_key_file = _staged_reporter_key_file()
     elif new_reporter_key_file is not None:
@@ -337,7 +374,8 @@ def task_handoff(
         body["execution_ref"] = execution_ref
     try:
         with cli_main.get_client(ctx) as client:
-            data = client.handoff_task_execution(workspace_id, task_id, body)
+            resolved_ws = workspace_id or _resolve_ws_id(client, task_id, None)
+            data = client.handoff_task_execution(resolved_ws, task_id, body)
     except HubError as exc:
         raise _settle_staged_key(
             _safe_task_operation_error("handoff", exc),
@@ -362,41 +400,6 @@ def task_handoff(
     )
 
 
-@task.command("dispatch")
-@click.argument("task_id")
-@click.option(
-    "--agent-type",
-    type=click.Choice(["claude", "codex", "cursor", "terminal"]),
-    default=None,
-)
-@click.option("--target-session-id", default=None)
-@click.option("--clear-context/--no-clear-context", default=None)
-@click.option("--related-task-id", default=None)
-@click.pass_context
-def task_dispatch(
-    ctx: click.Context,
-    task_id: str,
-    agent_type: Optional[str],
-    target_session_id: Optional[str],
-    clear_context: Optional[bool],
-    related_task_id: Optional[str],
-) -> None:
-    """Explicitly start a workspace-controlled Task after any required handoff."""
-    body = merge_payload(
-        None,
-        agent_type=agent_type,
-        target_session_id=target_session_id,
-        clear_context=clear_context,
-        related_task_id=related_task_id,
-    )
-    try:
-        with cli_main.get_client(ctx) as client:
-            data = client.start_task(task_id, body)
-    except HubError as exc:
-        raise click.ClickException(str(exc)) from exc
-    emit(_action_summary({"task": data}), cli_main.as_json(ctx))
-
-
 def _tab_context_task_ids(observed: Any) -> list[str]:
     if not isinstance(observed, dict):
         return []
@@ -417,12 +420,7 @@ def task_context(
     task_id: Optional[str],
     tab_id: Optional[str],
 ) -> None:
-    """Read verified Task mode and capabilities; never create or dispatch.
-
-    Tab observation describes the existing native main turn, not this CLI
-    process or a child thread. Child IDs come from the caller/native tool,
-    never from TAB_ID.
-    """
+    """Read verified Task mode and capabilities from a main turn CLI call (not child agents)."""
     if workspace_id is None and task_id is None and tab_id is None:
         raise click.UsageError(
             "Pass --workspace-id/--task-id; no Chat tab is available as a lookup clue."
@@ -438,26 +436,18 @@ def task_context(
                     )
                 task_id = observed_ids[0]
             if task_id is not None:
-                if workspace_id is None:
-                    workspace_id, selected_task = _find_task_board(client, task_id)
-                else:
-                    selected_task = _task_in_board(client.get_board(workspace_id), task_id)
-                if workspace_id is None or selected_task is None:
+                try:
+                    resolved_ws, selected_task = _fetch_task_dict(client, task_id, workspace_id)
+                except click.ClickException as exc:
                     raise click.ClickException(
                         f"Task {task_id} not found in the selected Workspace."
-                    )
+                    ) from exc
+                workspace_id = resolved_ws
             else:
                 if workspace_id is None:
                     raise click.ClickException("Workspace is not unique; pass --workspace-id.")
                 client.get_board(workspace_id)
                 selected_task = None
-            if selected_task is not None and selected_task.get("workspace_id") not in {
-                None,
-                workspace_id,
-            }:
-                raise click.ClickException(
-                    "Task workspace identity did not match the server board."
-                )
             capabilities = client.get_task_capabilities(workspace_id)
     except HubError as exc:
         raise click.ClickException(str(exc)) from exc

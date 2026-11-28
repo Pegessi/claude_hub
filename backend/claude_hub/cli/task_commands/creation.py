@@ -1,6 +1,7 @@
-"""Task creation and combined create-and-run commands."""
+"""Task creation and 1-step isolated task run commands."""
 
-from typing import Any, Dict, Optional
+import uuid
+from typing import Any, Callable, Dict, Optional
 
 import click
 
@@ -10,115 +11,174 @@ from claude_hub.cli.commands.common import (
     merge_payload,
     parse_attachment_json,
     parse_json_object,
+    read_prompt_option,
+    resolve_task_cwd_for_cli,
+    resolve_workspace_id,
 )
 from claude_hub.cli.output import emit
-from claude_hub.cli.task_commands.execution_support import (
-    _reject_secret_task_fields,
-)
+from claude_hub.cli.task_commands.execution_support import _reject_secret_task_fields
 from claude_hub.cli.task_commands.group import task
 
+TASK_AGENT_TYPES = [
+    "claude",
+    "codex",
+    "traex",
+    "maso",
+    "cursor",
+    "antigravity",
+    "terminal",
+]
+TASK_MODES = ["direct", "reviewed", "autonomous", "subagent"]
+TASK_RECIPES = [
+    "standard",
+    "triage_diagnose",
+    "spec_implement_review",
+    "eval_and_report",
+]
+REVIEW_PROFILES = ["general", "code", "ui", "artifact", "delivery", "boundary"]
 
-@task.command("create")
-@click.argument("workspace_id")
-@click.option("--title", required=True, help="Task title.")
-@click.option("--prompt", required=True, help="Task prompt.")
-@click.option("--goal", default=None, help="Desired outcome (optional).")
-@click.option("--done-when", multiple=True, help="Acceptance criterion (repeatable).")
-@click.option("--out-of-scope", multiple=True, help="Excluded work (repeatable).")
-@click.option(
-    "--agent-type",
-    type=click.Choice(["claude", "codex", "cursor", "maso", "antigravity", "terminal"]),
-    default="codex",
-    help="Agent type.",
-)
-@click.option(
-    "--session-kind",
-    type=click.Choice(["terminal", "chat"]),
-    default=None,
-    help="Managed session surface (omitted to use backend default or bound-session surface).",
-)
-@click.option(
-    "--task-mode",
-    type=click.Choice(["direct", "reviewed", "autonomous", "subagent"]),
-    default="reviewed",
-    help="Task automation mode.",
-)
-@click.option(
-    "--recipe",
-    type=click.Choice(["standard", "triage_diagnose", "spec_implement_review", "eval_and_report"]),
-    default=None,
-    help="Standardized pipeline execution recipe.",
-)
-@click.option(
-    "--demand-id",
-    "demand_id",
-    default=None,
-    help="Linked InfoWall demand ID.",
-)
-@click.option(
-    "--auto-worktree/--no-auto-worktree",
-    default=None,
-    help="Automatically provision an isolated Git feature worktree on start.",
-)
-@click.option(
-    "--auto-push-remote/--no-auto-push-remote",
-    default=None,
-    help="Automatically push the feature branch to origin after review_passed.",
-)
-@click.option(
-    "--execution-complexity",
-    type=click.Choice(["auto", "simple", "complex"]),
-    default="auto",
-    help="Execution complexity hint.",
-)
-@click.option(
-    "--review-profile",
-    "review_profiles",
-    multiple=True,
-    type=click.Choice(["general", "code", "ui", "artifact", "delivery", "boundary"]),
-    help="Review profile (repeatable).",
-)
-@click.option("--related-task-id", default=None, help="Related task id.")
-@click.option(
-    "--parent-task-id",
-    default=None,
-    help="Parent Task id for an explicit Task Graph edge.",
-)
-@click.option(
-    "--depends-on",
-    multiple=True,
-    help="Prerequisite task id (repeatable; requires done).",
-)
-@click.option("--agent-tag", default=None, help="Optional agent label tag.")
-@click.option("--session-id", default=None, help="Target existing session id.")
-@click.option(
-    "--clear-context/--no-clear-context",
-    default=None,
-    help="Clear agent context before starting (omitted unless set).",
-)
-@click.option(
-    "--timeout-seconds",
-    type=int,
-    default=None,
-    help="Task timeout in seconds (omitted unless set).",
-)
-@click.option(
-    "--attachment-json",
-    "attachment_json",
-    multiple=True,
-    help="Attachment JSON object (repeatable).",
-)
-@click.option("--payload-json", default=None, help="Raw JSON object merged into the body.")
-@click.pass_context
-def task_create(
+
+def _task_spec_options(func: Callable[..., Any]) -> Callable[..., Any]:
+    """Shared contract and execution options for ``task create`` and ``task run``."""
+    options = (
+        click.argument("workspace_id", required=False, default=None),
+        click.option("--title", required=True, help="Task title."),
+        click.option("--prompt", default=None, help="Task prompt (optional when --goal is set)."),
+        click.option(
+            "--prompt-file",
+            default=None,
+            help="Read task prompt from FILE ('-' for stdin).",
+        ),
+        click.option("--goal", default=None, help="Desired outcome (creates GoalPacket)."),
+        click.option("--done-when", multiple=True, help="Acceptance criterion (repeatable)."),
+        click.option("--out-of-scope", multiple=True, help="Excluded work (repeatable)."),
+        click.option(
+            "--agent-type",
+            type=click.Choice(TASK_AGENT_TYPES),
+            default="codex",
+            show_default=True,
+            help="Agent provider.",
+        ),
+        click.option("--model", default=None, help="Explicit provider model ID."),
+        click.option(
+            "--env-preset",
+            default=None,
+            help="Env preset by id or name.",
+        ),
+        click.option(
+            "--cwd",
+            default=None,
+            help="Explicit agent working directory (mutually exclusive with --auto-worktree).",
+        ),
+        click.option(
+            "--readonly",
+            is_flag=True,
+            default=False,
+            help="Read-only investigation: sets triage_diagnose recipe, subagent mode, no worktree.",
+        ),
+        click.option(
+            "--session-kind",
+            type=click.Choice(["terminal", "chat"]),
+            default=None,
+            help="Managed session surface (default: chat locally, terminal for remote SSH).",
+        ),
+        click.option(
+            "--task-mode",
+            type=click.Choice(TASK_MODES),
+            default="reviewed",
+            show_default=True,
+            help="Task automation mode.",
+        ),
+        click.option(
+            "--recipe",
+            type=click.Choice(TASK_RECIPES),
+            default=None,
+            help="Standardized pipeline execution recipe.",
+        ),
+        click.option("--demand-id", "demand_id", default=None, help="Linked InfoWall demand ID."),
+        click.option(
+            "--auto-worktree/--no-auto-worktree",
+            default=None,
+            help="Automatically provision an isolated Git feature worktree on start.",
+        ),
+        click.option(
+            "--auto-push-remote/--no-auto-push-remote",
+            default=None,
+            help="Automatically push the feature branch to origin after review_passed.",
+        ),
+        click.option(
+            "--execution-complexity",
+            type=click.Choice(["auto", "simple", "complex"]),
+            default="auto",
+            help="Execution complexity hint.",
+        ),
+        click.option(
+            "--review-profile",
+            "review_profiles",
+            multiple=True,
+            type=click.Choice(REVIEW_PROFILES),
+            help="Review profile (repeatable).",
+        ),
+        click.option(
+            "--related-task-id",
+            default=None,
+            help="Related prior task id (auto-wakes its archived Chat session on start).",
+        ),
+        click.option(
+            "--parent-task-id",
+            default=None,
+            help="Parent Task id for an explicit Task Graph edge.",
+        ),
+        click.option(
+            "--depends-on",
+            multiple=True,
+            help="Prerequisite task id (repeatable; requires done).",
+        ),
+        click.option("--agent-tag", default=None, help="Optional agent label tag."),
+        click.option("--session-id", default=None, help="Bind an explicit existing session id."),
+        click.option(
+            "--clear-context/--no-clear-context",
+            default=None,
+            help="Clear agent context before starting.",
+        ),
+        click.option(
+            "--timeout-seconds",
+            type=int,
+            default=None,
+            help="Task timeout in seconds.",
+        ),
+        click.option(
+            "--request-key",
+            default=None,
+            help="Idempotency key for safe create retries.",
+        ),
+        click.option(
+            "--attachment-json",
+            "attachment_json",
+            multiple=True,
+            help="Attachment JSON object (repeatable).",
+        ),
+        click.option("--payload-json", default=None, help="Raw JSON object merged into the body."),
+    )
+    for opt in reversed(options):
+        func = opt(func)
+    return func
+
+
+def _build_task_create_body(
     ctx: click.Context,
-    workspace_id: str,
+    *,
     title: str,
-    prompt: str,
+    prompt: Optional[str],
+    prompt_file: Optional[str],
     goal: Optional[str],
     done_when: tuple[str, ...],
     out_of_scope: tuple[str, ...],
     agent_type: str,
+    model: Optional[str],
+    env_preset: Optional[str],
+    cwd: Optional[str],
+    readonly: bool,
     session_kind: Optional[str],
     task_mode: str,
     recipe: Optional[str],
@@ -134,27 +194,69 @@ def task_create(
     session_id: Optional[str],
     clear_context: Optional[bool],
     timeout_seconds: Optional[int],
+    request_key: Optional[str],
     attachment_json: tuple,
     payload_json: Optional[str],
-) -> None:
-    """Create a workspace-controlled Task record without starting it."""
-    effective_task_mode: Optional[str] = task_mode
-    if (
-        recipe == "triage_diagnose"
+    apply_default_preset: bool,
+) -> Dict[str, Any]:
+    raw_payload = parse_json_object(payload_json)
+    _reject_secret_task_fields(raw_payload)
+    if raw_payload.get("execution_control", "workspace") != "workspace":
+        raise click.ClickException(
+            "Workspace tasks use execution_control='workspace'; use `task register` for initiator work."
+        )
+
+    effective_prompt = raw_payload.get("prompt")
+    if prompt is not None or prompt_file is not None or effective_prompt is None:
+        effective_prompt = read_prompt_option(
+            prompt,
+            prompt_file,
+            fallback_goal=goal or raw_payload.get("goal"),
+            done_when=done_when,
+            out_of_scope=out_of_scope,
+        )
+
+    effective_recipe = recipe
+    effective_mode: Optional[str] = task_mode
+    effective_auto_wt = auto_worktree
+    if readonly:
+        if effective_recipe is None:
+            effective_recipe = "triage_diagnose"
+        if ctx.get_parameter_source("task_mode") == click.core.ParameterSource.DEFAULT:
+            effective_mode = "subagent"
+        if effective_auto_wt is None:
+            effective_auto_wt = False
+    elif (
+        effective_recipe == "triage_diagnose"
         and ctx.get_parameter_source("task_mode") == click.core.ParameterSource.DEFAULT
     ):
-        effective_task_mode = None
+        effective_mode = None
+
+    cleaned_cwd = cwd.strip() if cwd is not None else None
+    if cleaned_cwd and effective_auto_wt is True:
+        raise click.ClickException("Cannot combine --cwd with --auto-worktree.")
+
+    resolved_preset = env_preset
+    if resolved_preset is None and apply_default_preset:
+        settings = ctx.obj
+        resolved_preset = settings.env_preset_for_agent_type(agent_type) or getattr(
+            settings, "default_env_preset", None
+        )
+
     body = merge_payload(
         payload_json,
         title=title,
-        prompt=prompt,
+        prompt=effective_prompt,
         goal=goal,
         agent_type=agent_type,
+        model=model,
+        env_preset=resolved_preset,
+        cwd=cleaned_cwd or None,
         session_kind=session_kind,
-        task_mode=effective_task_mode,
-        recipe=recipe,
+        task_mode=effective_mode,
+        recipe=effective_recipe,
         infowall_demand_id=demand_id,
-        auto_worktree=auto_worktree,
+        auto_worktree=effective_auto_wt,
         auto_push_remote=auto_push_remote,
         execution_complexity=execution_complexity,
         review_profiles=list(review_profiles),
@@ -164,6 +266,7 @@ def task_create(
         session_id=session_id,
         clear_context=clear_context,
         timeout_seconds=timeout_seconds,
+        request_key=request_key,
     )
     if done_when:
         body["done_when"] = list(done_when)
@@ -173,177 +276,84 @@ def task_create(
         body["depends_on_task_ids"] = list(depends_on)
     if attachment_json:
         body["attachments"] = parse_attachment_json(attachment_json)
-    _reject_secret_task_fields(body)
-    if body.get("execution_control", "workspace") != "workspace":
-        raise click.ClickException(
-            "task create records workspace-controlled work; use task register for initiator work."
-        )
     body["execution_control"] = "workspace"
+    return body
+
+
+@task.command("create")
+@_task_spec_options
+@click.pass_context
+def task_create(
+    ctx: click.Context,
+    workspace_id: Optional[str],
+    **kwargs: Any,
+) -> None:
+    """Create a workspace-controlled Task record without starting it."""
+    body = _build_task_create_body(ctx, apply_default_preset=False, **kwargs)
     try:
         with cli_main.get_client(ctx) as client:
-            data = client.create_task(workspace_id, body)
+            resolved_ws = resolve_workspace_id(client, workspace_id)
+            if kwargs.get("cwd") is not None:
+                body["cwd"] = resolve_task_cwd_for_cli(
+                    client, kwargs["cwd"], workspace_id=resolved_ws
+                )
+            data = client.create_task(resolved_ws, body)
     except HubError as e:
         raise click.ClickException(str(e)) from e
     emit(data, cli_main.as_json(ctx))
 
 
 @task.command("run")
-@click.argument("workspace_id")
-@click.option("--title", required=True, help="Task title.")
-@click.option("--prompt", required=True, help="Task prompt.")
-@click.option(
-    "--agent-type",
-    type=click.Choice(["claude", "codex", "cursor", "maso", "antigravity", "terminal"]),
-    default="claude",
-    help="Agent type (default: claude).",
-)
-@click.option(
-    "--session-kind",
-    type=click.Choice(["terminal", "chat"]),
-    default="terminal",
-    show_default=True,
-    help="Managed session surface.",
-)
-@click.option(
-    "--task-mode",
-    type=click.Choice(["subagent", "reviewed", "autonomous"]),
-    default="subagent",
-    help="Task mode (default: subagent). Use subagent for simple tasks you judge "
-    "yourself; reviewed for complex tasks needing AI review; autonomous for "
-    "multi-iteration self-driving work.",
-)
-@click.option(
-    "--execution-complexity",
-    type=click.Choice(["auto", "simple", "complex"]),
-    default="auto",
-    help="Execution complexity hint.",
-)
-@click.option("--cwd", default=None, help="Agent working directory (defaults to workspace path).")
-@click.option(
-    "--env-preset",
-    default=None,
-    help="Env preset by id or name. Defaults to per-agent-type preset from config, "
-    "then global default_env_preset.",
-)
-@click.option("--env", "env_values", multiple=True, help="Environment variable KEY=VALUE.")
-@click.option(
-    "--clear-context/--no-clear-context",
-    default=None,
-    help="Clear agent context before starting.",
-)
-@click.option("--related-task-id", default=None, help="Related task id.")
-@click.option("--parent-task-id", default=None, help="Parent task id.")
-@click.option(
-    "--timeout-seconds",
-    type=int,
-    default=1800,
-    show_default=True,
-    help="Task timeout in seconds.",
-)
-@click.option(
-    "--attachment-json",
-    "attachment_json",
-    multiple=True,
-    help="Attachment JSON object (repeatable).",
-)
-@click.option("--payload-json", default=None, help="Raw JSON object merged into the body.")
+@_task_spec_options
 @click.pass_context
 def task_run(
     ctx: click.Context,
-    workspace_id: str,
-    title: str,
-    prompt: str,
-    agent_type: str,
-    session_kind: str,
-    task_mode: str,
-    execution_complexity: str,
-    cwd: Optional[str],
-    env_preset: Optional[str],
-    env_values: tuple,
-    clear_context: Optional[bool],
-    related_task_id: Optional[str],
-    parent_task_id: Optional[str],
-    timeout_seconds: int,
-    attachment_json: tuple,
-    payload_json: Optional[str],
+    workspace_id: Optional[str],
+    **kwargs: Any,
 ) -> None:
-    """Create and start a task in one step.
+    """Create and start a Task in one step on a fresh isolated session.
 
-    Ensures a compatible agent (reusing an idle one if available), creates the
-    task, and dispatches it. Defaults to subagent mode for agent-to-agent
-    delegation.
+    Provisions a dedicated per-task ephemeral Chat session (archived on done
+    with full history retained; woken automatically by future tasks passing
+    ``--related-task-id``). Pass ``--session-id`` only to target an explicit
+    existing session.
     """
-    from claude_hub.cli.commands.common import (
-        parse_kv_pairs,
-        resolve_cli_local_path,
-    )
+    body = _build_task_create_body(ctx, apply_default_preset=True, **kwargs)
+    if not body.get("request_key"):
+        body["request_key"] = f"task-run-{uuid.uuid4().hex}"
+    start_body: Dict[str, Any] = {}
+    if kwargs.get("session_id"):
+        start_body["target_session_id"] = kwargs["session_id"]
+    if kwargs.get("clear_context") is not None:
+        start_body["clear_context"] = kwargs["clear_context"]
+    if kwargs.get("related_task_id"):
+        start_body["related_task_id"] = kwargs["related_task_id"]
 
-    settings = ctx.obj
-    resolved_preset = (
-        env_preset
-        or settings.env_preset_for_agent_type(agent_type)
-        or getattr(settings, "default_env_preset", None)
-    )
-    resolved_cwd = resolve_cli_local_path(cwd) if cwd is not None else None
-
-    raw_payload = parse_json_object(payload_json)
-    _reject_secret_task_fields(raw_payload)
-    if raw_payload.get("execution_control", "workspace") != "workspace":
-        raise click.ClickException(
-            "task run only dispatches workspace-controlled work; use task register for initiator work."
-        )
+    created_task_id: Optional[str] = None
     try:
         with cli_main.get_client(ctx) as client:
-            # 1. Ensure an agent (reuse compatible idle orchestrator if available).
-            agent_body: Dict[str, Any] = {
-                "agent_type": agent_type,
-                "session_kind": session_kind,
-                "reuse_existing": True,
-                "role": "orchestrator",
-            }
-            if resolved_cwd is not None:
-                agent_body["cwd"] = resolved_cwd
-            if resolved_preset is not None:
-                agent_body["env_preset"] = resolved_preset
-            if env_values:
-                agent_body["env"] = parse_kv_pairs(env_values, "--env")
-            agent = client.ensure_agent(workspace_id, agent_body)
-            session_id = agent["id"]
-
-            # 2. Create the task assigned to that session.
-            task_body = merge_payload(
-                payload_json,
-                title=title,
-                prompt=prompt,
-                agent_type=agent_type,
-                session_kind=session_kind,
-                task_mode=task_mode,
-                execution_complexity=execution_complexity,
-                related_task_id=related_task_id,
-                parent_task_id=parent_task_id,
-                session_id=session_id,
-                clear_context=clear_context,
-                timeout_seconds=timeout_seconds,
-            )
-            if attachment_json:
-                task_body["attachments"] = parse_attachment_json(attachment_json)
-            task_body["execution_control"] = "workspace"
-            task = client.create_task(workspace_id, task_body)
-            task_id = task["id"]
-
-            # 3. Start the task.
-            start_body: Dict[str, Any] = {"target_session_id": session_id}
-            if clear_context is not None:
-                start_body["clear_context"] = clear_context
-            if related_task_id:
-                start_body["related_task_id"] = related_task_id
+            resolved_ws = resolve_workspace_id(client, workspace_id)
+            if kwargs.get("cwd") is not None:
+                body["cwd"] = resolve_task_cwd_for_cli(
+                    client, kwargs["cwd"], workspace_id=resolved_ws
+                )
+            created = client.create_task(resolved_ws, body)
+            task_id = str(created["id"])
+            created_task_id = task_id
             started = client.start_task(task_id, start_body)
     except HubError as e:
+        if created_task_id is not None:
+            raise click.ClickException(
+                f"Task {created_task_id} created (request_key={body['request_key']}) "
+                f"but start failed: {e}"
+            ) from e
         raise click.ClickException(str(e)) from e
 
     result = {
+        "workspace_id": resolved_ws,
         "task_id": task_id,
-        "session_id": session_id,
+        "session_id": started.get("session_id"),
+        "worktree_path": started.get("worktree_path"),
         "status": started.get("status"),
     }
     emit(result, cli_main.as_json(ctx))

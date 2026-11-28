@@ -3,7 +3,7 @@
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from claude_hub.api.routes.workspaces.bindings import WorkspaceRouteBindings
 from claude_hub.api.routes.workspaces.common import task_public_http
@@ -52,6 +52,9 @@ from claude_hub.services.workspace_manager._task_execution import (
 
 @dataclass(frozen=True)
 class WorkspaceExecutionEndpoints:
+    get_task: Callable[..., Any]
+    get_task_status: Callable[..., Any]
+    get_session: Callable[..., Any]
     update_task: Callable[..., Any]
     delete_task: Callable[..., Any]
     cleanup_task_session: Callable[..., Any]
@@ -81,6 +84,122 @@ def register_execution_routes(
 ) -> WorkspaceExecutionEndpoints:
     """Register execution routes in their historical order."""
 
+    @router.get("/tasks/{task_id}", response_model=WorkspaceTask)
+    async def get_task(
+        task_id: str,
+        current_user: User = Depends(get_current_user),
+    ) -> WorkspaceTask:
+        """Fetch a single workspace task by ID in O(1)."""
+        task = bindings.workspace_manager().tasks.get(task_id)
+        if task is None:
+            raise HTTPException(status_code=404, detail="Task not found")
+        return task
+
+    @router.get("/tasks/{task_id}/status")
+    async def get_task_status(
+        task_id: str,
+        reports_limit: int = Query(default=0, ge=0, le=200),
+        include_brief: bool = Query(default=False),
+        current_user: User = Depends(get_current_user),
+    ) -> dict[str, Any]:
+        """Return bounded O(1) task status, lifecycle, review summary, and optional reports/brief."""
+        wm = bindings.workspace_manager()
+        task = wm.tasks.get(task_id)
+        if task is None:
+            raise HTTPException(status_code=404, detail="Task not found")
+        lifecycle = wm.task_lifecycles([task]).get(task.id)
+        lifecycle_dict = lifecycle.model_dump(mode="json") if lifecycle is not None else None
+        task_dict = task.model_dump(mode="json")
+        if lifecycle_dict is not None:
+            task_dict = {
+                **task_dict,
+                "lifecycle": lifecycle_dict,
+                "phase": lifecycle_dict.get("phase"),
+                "phase_reason": lifecycle_dict.get("reason"),
+                "blocked_by": lifecycle_dict.get("blocked_by_task_id"),
+            }
+        all_reports = wm.reports_for_task(task.workspace_id, task.id)
+        report_dicts = [r.model_dump(mode="json") for r in all_reports]
+        latest = (
+            max(report_dicts, key=lambda r: str(r.get("created_at", ""))) if report_dicts else None
+        )
+        acceptance_candidates = [
+            r
+            for r in report_dicts
+            if isinstance(r.get("acceptance_check"), list) and r.get("acceptance_check")
+        ]
+        acceptance_report = (
+            max(acceptance_candidates, key=lambda r: str(r.get("created_at", "")))
+            if acceptance_candidates
+            else None
+        )
+        latest_acceptance = (
+            [
+                item
+                for item in (acceptance_report.get("acceptance_check") or [])
+                if isinstance(item, dict)
+            ]
+            if acceptance_report
+            else []
+        )
+        review_states = {
+            "review_started",
+            "review_passed",
+            "review_failed",
+            "review_needs_input",
+        }
+        review_reports = [r for r in report_dicts if r.get("state") in review_states]
+        latest_review = (
+            max(review_reports, key=lambda r: str(r.get("created_at", "")))
+            if review_reports
+            else None
+        )
+        newest_first = list(reversed(report_dicts))
+        returned_reports = newest_first[:reports_limit] if reports_limit > 0 else []
+        brief_markdown: str | None = None
+        if include_brief:
+            brief_payload = wm.get_task_brief(task.workspace_id, task.id)
+            brief_markdown = (
+                str(brief_payload.get("markdown") or "") if isinstance(brief_payload, dict) else ""
+            )
+        latest_msg = (
+            str(latest.get("message_zh") or latest.get("message_en") or latest.get("message") or "")
+            if latest
+            else ""
+        )
+        return {
+            "workspace_id": task.workspace_id,
+            "task": task_dict,
+            "lifecycle": lifecycle_dict,
+            "goal_packet": task_dict.get("goal_packet"),
+            "latest_report": latest,
+            "latest_report_message": latest_msg,
+            "latest_acceptance_report": acceptance_report,
+            "latest_acceptance_check": latest_acceptance,
+            "latest_review": latest_review,
+            "review_reports": review_reports,
+            "reports": returned_reports,
+            "reports_meta": {
+                "total": len(report_dicts),
+                "returned": len(returned_reports),
+                "truncated": len(report_dicts) > len(returned_reports),
+            },
+            "brief_markdown": brief_markdown,
+            "human_acceptance_requested_at": task_dict.get("human_acceptance_requested_at"),
+            "human_accepted_at": task_dict.get("human_accepted_at"),
+        }
+
+    @router.get("/sessions/{managed_session_id}", response_model=ManagedSessionPublic)
+    async def get_session(
+        managed_session_id: str,
+        current_user: User = Depends(get_current_user),
+    ) -> ManagedSessionPublic:
+        """Fetch a single managed session by ID in O(1)."""
+        session = bindings.workspace_manager().sessions.get(managed_session_id)
+        if session is None:
+            raise HTTPException(status_code=404, detail="Session not found")
+        return ManagedSessionPublic.from_managed_session(session)
+
     @router.patch("/tasks/{task_id}", response_model=WorkspaceTask)
     async def update_task(
         task_id: str,
@@ -88,18 +207,7 @@ def register_execution_routes(
         current_user: User = Depends(get_current_user),
     ) -> WorkspaceTask:
         """Update task metadata or status."""
-        if (
-            payload.title is None
-            and payload.prompt is None
-            and payload.status is None
-            and payload.goal_packet is None
-            and payload.task_mode is None
-            and payload.review_profiles is None
-            and payload.autonomy_policy is None
-            and payload.autonomous_run is None
-            and payload.depends_on_task_ids is None
-            and "agent_tag" not in payload.model_fields_set
-        ):
+        if not payload.model_fields_set:
             raise HTTPException(status_code=400, detail="No task update provided")
         try:
             return await bindings.workspace_manager().update_task(task_id, payload)
@@ -118,7 +226,11 @@ def register_execution_routes(
             bindings.workspace_manager().delete_task(task_id)
         except KeyError as e:
             raise HTTPException(status_code=404, detail="Task not found") from e
-        except (TaskHasDescendantsError, TaskHasDependentsError, TaskExecutionConflict) as e:
+        except (
+            TaskHasDescendantsError,
+            TaskHasDependentsError,
+            TaskExecutionConflict,
+        ) as e:
             raise HTTPException(status_code=409, detail=str(e)) from e
 
     @router.post("/tasks/{task_id}/cleanup", response_model=TaskCleanupResult)
@@ -264,7 +376,8 @@ def register_execution_routes(
             raise HTTPException(status_code=400, detail=str(e)) from e
 
     @router.post(
-        "/{workspace_id}/sessions/{managed_session_id}/archive", response_model=ManagedSessionPublic
+        "/{workspace_id}/sessions/{managed_session_id}/archive",
+        response_model=ManagedSessionPublic,
     )
     async def archive_session(
         workspace_id: str,
@@ -313,7 +426,10 @@ def register_execution_routes(
             session = bindings.workspace_manager().sessions.get(managed_session_id)
             if session is not None and session.session_kind == SessionKind.CHAT:
                 await bindings.workspace_manager().send_chat_session_message(
-                    managed_session_id, payload.message, payload.attachments, payload.call_id
+                    managed_session_id,
+                    payload.message,
+                    payload.attachments,
+                    payload.call_id,
                 )
             else:
                 await bindings.workspace_manager().send_session_message(
@@ -379,7 +495,9 @@ def register_execution_routes(
             raise HTTPException(status_code=400, detail=str(e)) from e
 
     @router.post(
-        "/sessions/{managed_session_id}/reports", response_model=AgentReport, status_code=201
+        "/sessions/{managed_session_id}/reports",
+        response_model=AgentReport,
+        status_code=201,
     )
     async def create_session_report(
         managed_session_id: str,
@@ -406,7 +524,8 @@ def register_execution_routes(
         return TaskExecutionCapabilities()
 
     @router.post(
-        "/{workspace_id}/tasks/{task_id}/progress", response_model=TaskExecutionMutationResult
+        "/{workspace_id}/tasks/{task_id}/progress",
+        response_model=TaskExecutionMutationResult,
     )
     async def task_progress(
         workspace_id: str,
@@ -417,7 +536,10 @@ def register_execution_routes(
     ) -> TaskExecutionMutationResult:
         try:
             return await bindings.workspace_manager().record_task_progress(
-                workspace_id, task_id, payload, request.headers.get("X-Task-Reporter-Key")
+                workspace_id,
+                task_id,
+                payload,
+                request.headers.get("X-Task-Reporter-Key"),
             )
         except (KeyError, ValueError, RuntimeError, TaskReporterForbidden) as exc:
             raise task_public_http(exc) from None
@@ -440,7 +562,8 @@ def register_execution_routes(
             raise task_public_http(exc) from None
 
     @router.post(
-        "/{workspace_id}/tasks/{task_id}/handoff", response_model=TaskExecutionMutationResult
+        "/{workspace_id}/tasks/{task_id}/handoff",
+        response_model=TaskExecutionMutationResult,
     )
     async def handoff_task_execution(
         workspace_id: str,
@@ -460,6 +583,9 @@ def register_execution_routes(
             raise HTTPException(status_code=400, detail="invalid_task_handoff") from None
 
     return WorkspaceExecutionEndpoints(
+        get_task=get_task,
+        get_task_status=get_task_status,
+        get_session=get_session,
         update_task=update_task,
         delete_task=delete_task,
         cleanup_task_session=cleanup_task_session,

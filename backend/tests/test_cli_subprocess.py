@@ -349,18 +349,18 @@ def test_json_parameter_error_is_machine_readable_without_http(tmp_path: Path) -
             tmp_path,
             base_url,
             "--json",
-            "task",
-            "report",
-            "task-1",
-            "--limit",
-            "0",
+            "session",
+            "create",
+            "ws1",
+            "--ephemeral",
+            "--reuse-existing",
         )
 
     assert result.returncode == 1
     assert result.stdout == ""
     assert json.loads(result.stderr) == {
         "ok": False,
-        "error": "--limit must be >= 1.",
+        "error": "Cannot combine --ephemeral with --reuse-existing.",
         "exit_code": 1,
     }
     assert requests == []
@@ -377,9 +377,11 @@ def test_json_network_timeout_is_machine_readable(tmp_path: Path) -> None:
             base_url,
             "--json",
             "task",
-            "wait",
-            "workspace-1",
+            "events",
             "task-1",
+            "--workspace-id",
+            "workspace-1",
+            "--wait",
             "--timeout-seconds",
             "0",
         )

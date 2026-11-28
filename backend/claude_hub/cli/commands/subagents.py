@@ -19,11 +19,17 @@ import click
 from claude_hub.cli import main as cli_main
 from claude_hub.cli.client import HubClient, HubError
 from claude_hub.cli.commands.common import resolve_cli_local_path
-from claude_hub.cli.commands.workspaces import agent
 from claude_hub.cli.output import emit, print_rows
 from claude_hub.models.subagent import SUBAGENT_ID_ENV
 
 PROVIDERS = ["claude", "codex", "traex", "cursor", "maso", "antigravity"]
+
+
+@click.group()
+def agent() -> None:
+    """Run one-call cross-provider subagents (no Workspace Task, board, or review)."""
+
+
 EXIT_FAILED = 1
 EXIT_TIMEOUT = 124
 EXIT_CANCELLED = 130
@@ -235,7 +241,7 @@ def _start(
         reason = str(exc) if isinstance(exc, HubError) else "interrupted again"
         _note(
             f"could not confirm the cancellation ({reason}). If call {call_id} started a "
-            "turn, find it with `claude-hub agent subagents` and stop it with "
+            "turn, find it with `claude-hub agent list` and stop it with "
             "`claude-hub agent cancel SUBAGENT_ID`."
         )
         click.get_current_context().exit(EXIT_CANCELLED)
@@ -520,7 +526,7 @@ def agent_result(
     _finish(result, json_output)
 
 
-@agent.command("subagents")
+@agent.command("list")
 @click.option(
     "--parent-tab-id",
     envvar="CLAUDE_HUB_TAB_ID",
@@ -530,7 +536,7 @@ def agent_result(
 @click.option("--all", "all_parents", is_flag=True, default=False, help="Any parent.")
 @click.option("--include-closed", is_flag=True, default=False, help="Include closed subagents.")
 @click.pass_context
-def agent_subagents(
+def agent_list(
     ctx: click.Context,
     parent_tab_id: Optional[str],
     all_parents: bool,

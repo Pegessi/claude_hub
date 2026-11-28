@@ -72,7 +72,7 @@ def test_board_reports_running_task_owned_by_its_agent(isolated_hub: Path) -> No
     worker = client.post(f"/api/workspaces/{workspace['id']}/agent", json={}).json()
     task = client.post(
         f"/api/workspaces/{workspace['id']}/tasks",
-        json={"title": "Run", "prompt": "work"},
+        json={"session_kind": "terminal", "title": "Run", "prompt": "work"},
     ).json()
     client.post(
         f"/api/workspaces/tasks/{task['id']}/start",
@@ -94,7 +94,12 @@ def test_prior_round_review_failure_does_not_mask_current_acceptance(
     worker = client.post(f"/api/workspaces/{workspace['id']}/agent", json={}).json()
     task = client.post(
         f"/api/workspaces/{workspace['id']}/tasks",
-        json={"title": "Second round", "prompt": "finish", "task_mode": "subagent"},
+        json={
+            "session_kind": "terminal",
+            "title": "Second round",
+            "prompt": "finish",
+            "task_mode": "subagent",
+        },
     ).json()
     client.post(
         f"/api/workspaces/tasks/{task['id']}/start",

@@ -77,15 +77,15 @@ acceptance evidence. Read the narrowest relevant source; expand only when needed
 Keep source separate from execution responsibility, and transfer responsibility explicitly.
 
 Main and linked Git worktrees share the same Hub Workspace (canonical Git
-common-dir). Agent execution cwd is separate. Workspace tasks and `agent create`
+common-dir). Agent execution cwd is separate. Workspace tasks and `session create`
 default to isolated, task-scoped ephemeral Chat sessions for local Chat-capable
 agents (never shared across tasks or queued behind busy agents) and reclaim owned
-ephemeral sessions automatically when done. Prefer `claude-hub task create` /
-`task start` or `claude-hub dot delegate`; if creating an explicit session from a
-feature worktree:
+ephemeral sessions automatically when done. Prefer `claude-hub task run` (or
+`task create` + `task start`) or `claude-hub dot delegate`; if creating an explicit
+session from a feature worktree:
 
 ```bash
-claude-hub agent create WORKSPACE_ID --agent-type claude --cwd . --env-preset NAME_OR_ID
+claude-hub session create [WORKSPACE_ID] --agent-type claude --cwd . --env-preset NAME_OR_ID
 ```
 
 `--env-preset` accepts any built-in preset or saved custom preset by name or id.

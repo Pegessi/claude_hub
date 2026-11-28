@@ -33,7 +33,7 @@ def test_native_guidance_uses_task_cli_without_implied_dispatch() -> None:
         "task register",
         "task progress",
         "task handoff",
-        "task dispatch",
+        "task start",
     ):
         assert command in HUB_RUNTIME_GUIDANCE
     assert "creates an initiator-controlled record without dispatch" in HUB_RUNTIME_GUIDANCE
@@ -110,11 +110,10 @@ def test_optional_tracker_preserves_owner_and_reporting_authority() -> None:
 
 def test_concise_guidance_retains_feedback_and_schedule_boundaries() -> None:
     for command in (
-        "feedback context",
-        "feedback sources",
-        "feedback capture --help",
-        "feedback status",
-        "feedback configure",
+        "lessons context",
+        "lessons sources",
+        "lessons capture --help",
+        "lessons config",
         "lessons get",
         "schedule create --kind hub_task --help",
         "tab message",

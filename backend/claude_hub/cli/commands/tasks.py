@@ -1,8 +1,8 @@
-"""Backward-compatible facade for the ``task`` command group."""
+"""Facade for the ``task`` command group."""
 
 # ruff: noqa: F401
 
-# Imports register Click commands in their established public help order.
+# Imports register Click commands in their public help order.
 # isort: off
 from claude_hub.cli.task_commands.group import task
 from claude_hub.cli.task_commands.read import (
@@ -12,7 +12,6 @@ from claude_hub.cli.task_commands.read import (
     REVIEW_COLUMNS,
     REVIEW_STATES,
     TASK_COLUMNS,
-    TASK_DETAIL_FIELDS,
     TASK_EVENT_COLUMNS,
     TASK_STATUS_FIELDS,
     TASK_TREE_COLUMNS,
@@ -20,6 +19,7 @@ from claude_hub.cli.task_commands.read import (
     _echo_call_id,
     _emit_task_events,
     _emit_task_tree,
+    _fetch_task_dict,
     _find_task_board,
     _latest_acceptance_report,
     _latest_report,
@@ -28,11 +28,7 @@ from claude_hub.cli.task_commands.read import (
     _resolve_call_id,
     _resolve_ws_id,
     _task_status_payload,
-    task_brief,
-    task_get,
     task_list,
-    task_report,
-    task_review,
     task_status,
 )
 from claude_hub.cli.task_commands.execution_support import (
@@ -70,20 +66,13 @@ from claude_hub.cli.task_commands.observation import (
     task_abort,
     task_ack,
     task_delete,
-    task_dispatch_decision,
     task_events,
     task_followup,
     task_request_review,
-    task_send,
-    task_spawn,
-    task_tree,
-    task_wait,
 )
-from claude_hub.cli.task_commands.feedback import task_feedback, task_feedback_reap
 from claude_hub.cli.task_commands.execution import (
     _tab_context_task_ids,
     task_context,
-    task_dispatch,
     task_handoff,
     task_progress,
     task_register,

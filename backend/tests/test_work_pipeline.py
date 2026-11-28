@@ -771,7 +771,6 @@ async def test_dot_delegate_maso_model_recipe_and_cli(
             "spec_implement_review",
             "--demand-id",
             "dem-cli-1",
-            "--ephemeral",
             "--confirm",
         ],
     )
@@ -782,7 +781,7 @@ async def test_dot_delegate_maso_model_recipe_and_cli(
     assert delegate_body["model"] == "gemini-example-model-1dd583607df6_reasoning_high"
     assert delegate_body["recipe"] == "spec_implement_review"
     assert delegate_body["demand_id"] == "dem-cli-1"
-    assert delegate_body["ephemeral"] is True
+    assert "ephemeral" not in delegate_body
 
     res_task = runner.invoke(
         cli,
@@ -1468,7 +1467,9 @@ async def test_dot_delegate_concurrent_done_and_push_immutable_sha_fences(
     dot_service = DotService(dot_store)
     reset_dot_service(dot_service)
     try:
-        with pytest.raises(DelegateNotStarted, match="changed to done before start"):
+        with pytest.raises(
+            DelegateNotStarted, match="changed to done before start|Done tasks cannot be started"
+        ):
             await dot_service.delegate(
                 workspace_id=ws.id,
                 title="Concurrent done task",

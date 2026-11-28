@@ -265,7 +265,7 @@ def build_remote_profiles_card(profiles: Any, *, limit: int = 12) -> Dict[str, A
 def build_action_catalog_card() -> Dict[str, Any]:
     """Build a display-only catalog of card actions and suggested CLI commands."""
     rows = [
-        ("`focus`", "`claude-hub task get <task_id> [--workspace-id <ws_id>]`"),
+        ("`focus`", "`claude-hub task status <task_id> [--workspace-id <ws_id>]`"),
         (
             "`terminal`",
             "`claude-hub feishu build-card --kind terminal --tab-id <tab_id>`",
@@ -277,7 +277,7 @@ def build_action_catalog_card() -> Dict[str, Any]:
         ),
         (
             "`reject`",
-            "`claude-hub task send <ws_id> <task_id> --message '<feedback>'` when task_id is present",
+            "`claude-hub task followup <task_id> [--workspace-id <ws_id>] --message '<feedback>'` when task_id is present",
         ),
     ]
     elements = [_row(action, command) for action, command in rows]

@@ -1,18 +1,27 @@
 """Task lifecycle mutation commands."""
 
-from typing import List, Optional
+from typing import Optional
 
 import click
 
 from claude_hub.cli import main as cli_main
 from claude_hub.cli.client import HubError
-from claude_hub.cli.commands.common import merge_payload, parse_attachment_json
+from claude_hub.cli.commands.common import (
+    merge_payload,
+    parse_attachment_json,
+    resolve_task_cwd_for_cli,
+)
 from claude_hub.cli.output import emit
+from claude_hub.cli.task_commands.creation import (
+    REVIEW_PROFILES,
+    TASK_AGENT_TYPES,
+    TASK_MODES,
+)
 from claude_hub.cli.task_commands.execution_support import (
     _reject_task_execution_fields,
 )
 from claude_hub.cli.task_commands.group import task
-from claude_hub.cli.task_commands.read import _find_task_board
+from claude_hub.cli.task_commands.read import _fetch_task_dict
 from claude_hub.models.schemas import WorkspaceTaskStatus
 
 
@@ -20,38 +29,52 @@ from claude_hub.models.schemas import WorkspaceTaskStatus
 @click.argument("task_id")
 @click.option(
     "--agent-type",
-    type=click.Choice(["claude", "codex", "cursor", "terminal"]),
+    type=click.Choice(TASK_AGENT_TYPES),
     default=None,
-    help="Override the agent type.",
+    help="Override the agent provider.",
 )
-@click.option("--target-session-id", default=None, help="Target a specific session.")
+@click.option("--model", default=None, help="Override provider model ID.")
+@click.option("--env-preset", default=None, help="Override env preset by id or name.")
+@click.option("--cwd", default=None, help="Override agent working directory.")
+@click.option("--target-session-id", default=None, help="Target a specific existing session.")
 @click.option(
     "--clear-context/--no-clear-context",
     default=None,
     help="Clear agent context before starting (omitted unless set).",
 )
-@click.option("--related-task-id", default=None, help="Related task id.")
+@click.option(
+    "--related-task-id",
+    default=None,
+    help="Related prior task id (wakes its archived Chat session when compatible).",
+)
 @click.option("--payload-json", default=None, help="Raw JSON object merged into the body.")
 @click.pass_context
 def task_start(
     ctx: click.Context,
     task_id: str,
     agent_type: Optional[str],
+    model: Optional[str],
+    env_preset: Optional[str],
+    cwd: Optional[str],
     target_session_id: Optional[str],
     clear_context: Optional[bool],
     related_task_id: Optional[str],
     payload_json: Optional[str],
 ) -> None:
-    """Compatibility alias for explicit execution; prefer task dispatch."""
+    """Start (dispatch) a workspace-controlled Task."""
     body = merge_payload(
         payload_json,
         agent_type=agent_type,
+        model=model,
+        env_preset=env_preset,
         target_session_id=target_session_id,
         clear_context=clear_context,
         related_task_id=related_task_id,
     )
     try:
         with cli_main.get_client(ctx) as client:
+            if cwd is not None:
+                body["cwd"] = resolve_task_cwd_for_cli(client, cwd, task_id=task_id)
             data = client.start_task(task_id, body)
     except HubError as e:
         raise click.ClickException(str(e)) from e
@@ -76,7 +99,7 @@ def task_continue(
     attachment_json: tuple,
     payload_json: Optional[str],
 ) -> None:
-    """Continue a task from review with its original agent."""
+    """Continue a task from review or failed with its agent."""
     body = merge_payload(payload_json, message=message)
     if attachment_json:
         body["attachments"] = parse_attachment_json(attachment_json)
@@ -94,6 +117,9 @@ def task_continue(
 @click.argument("task_id")
 @click.option("--title", default=None, help="Task title.")
 @click.option("--prompt", default=None, help="Task prompt.")
+@click.option("--goal", default=None, help="Desired outcome (updates GoalPacket).")
+@click.option("--done-when", multiple=True, help="Replace acceptance criteria (repeatable).")
+@click.option("--out-of-scope", multiple=True, help="Replace out-of-scope items (repeatable).")
 @click.option(
     "--status",
     type=click.Choice(["todo", "queued", "working", "review", "done", "failed"]),
@@ -101,8 +127,22 @@ def task_continue(
     help="Task status.",
 )
 @click.option(
+    "--agent-type",
+    type=click.Choice(TASK_AGENT_TYPES),
+    default=None,
+    help="Agent provider (todo tasks only).",
+)
+@click.option("--model", default=None, help="Provider model ID (todo tasks only).")
+@click.option("--env-preset", default=None, help="Env preset (todo tasks only).")
+@click.option("--cwd", default=None, help="Agent working directory (todo tasks only).")
+@click.option(
+    "--auto-worktree/--no-auto-worktree",
+    default=None,
+    help="Auto-worktree preference (todo tasks only).",
+)
+@click.option(
     "--task-mode",
-    type=click.Choice(["direct", "reviewed", "autonomous", "subagent"]),
+    type=click.Choice(TASK_MODES),
     default=None,
     help="Task automation mode.",
 )
@@ -122,7 +162,7 @@ def task_continue(
     "--review-profile",
     "review_profiles",
     multiple=True,
-    type=click.Choice(["general", "code", "ui", "artifact", "delivery", "boundary"]),
+    type=click.Choice(REVIEW_PROFILES),
     help="Review profile list (repeatable).",
 )
 @click.option("--related-task-id", default=None, help="Related task id.")
@@ -158,7 +198,15 @@ def task_update(
     task_id: str,
     title: Optional[str],
     prompt: Optional[str],
+    goal: Optional[str],
+    done_when: tuple[str, ...],
+    out_of_scope: tuple[str, ...],
     status: Optional[str],
+    agent_type: Optional[str],
+    model: Optional[str],
+    env_preset: Optional[str],
+    cwd: Optional[str],
+    auto_worktree: Optional[bool],
     task_mode: Optional[str],
     session_kind: Optional[str],
     execution_complexity: Optional[str],
@@ -173,14 +221,19 @@ def task_update(
     removed_attachment_ids: tuple,
     payload_json: Optional[str],
 ) -> None:
-    """Update task metadata or status."""
+    """Update task contract, execution config, metadata, or status."""
     if depends_on and clear_dependencies:
         raise click.UsageError("--depends-on and --clear-dependencies are mutually exclusive")
     body = merge_payload(
         payload_json,
         title=title,
         prompt=prompt,
+        goal=goal,
         status=status,
+        agent_type=agent_type,
+        model=model,
+        env_preset=env_preset,
+        auto_worktree=auto_worktree,
         task_mode=task_mode,
         session_kind=session_kind,
         execution_complexity=execution_complexity,
@@ -189,6 +242,10 @@ def task_update(
         session_id=session_id,
         clear_context=clear_context,
     )
+    if done_when:
+        body["done_when"] = list(done_when)
+    if out_of_scope:
+        body["out_of_scope"] = list(out_of_scope)
     if depends_on or clear_dependencies:
         body["depends_on_task_ids"] = list(depends_on)
     if review_profiles:
@@ -200,6 +257,8 @@ def task_update(
     _reject_task_execution_fields(body)
     try:
         with cli_main.get_client(ctx) as client:
+            if cwd is not None:
+                body["cwd"] = resolve_task_cwd_for_cli(client, cwd, task_id=task_id)
             data = client.update_task(task_id, body)
     except HubError as e:
         raise click.ClickException(str(e)) from e
@@ -211,14 +270,14 @@ def task_update(
 @click.option(
     "--workspace-id",
     default=None,
-    help="Workspace to look in (skips the cross-workspace scan).",
+    help="Optional workspace id assertion.",
 )
 @click.option("--message", default=None, help="Optional acceptance note (recorded as a report).")
 @click.option(
     "--cleanup-session",
     is_flag=True,
     default=False,
-    help="After marking done, run safe task cleanup for caller-owned ephemeral sessions.",
+    help="After marking done, permanently delete a caller-owned ephemeral session.",
 )
 @click.pass_context
 def task_accept(
@@ -228,18 +287,10 @@ def task_accept(
     message: Optional[str],
     cleanup_session: bool,
 ) -> None:
-    """Human-accept a task in review and mark it done."""
+    """Human-accept a task in review or failed and mark it done."""
     try:
         with cli_main.get_client(ctx) as client:
-            if workspace_id is not None:
-                board = client.get_board(workspace_id)
-                tasks: List[dict] = board.get("tasks", []) if isinstance(board, dict) else []
-                match = next((t for t in tasks if t.get("id") == task_id), None)
-            else:
-                _, match = _find_task_board(client, task_id)
-            if match is None:
-                where = f" in workspace {workspace_id}" if workspace_id else ""
-                raise click.ClickException(f"Task {task_id} not found{where}.")
+            _, match = _fetch_task_dict(client, task_id, workspace_id)
             status = match.get("status")
             if status not in (
                 WorkspaceTaskStatus.REVIEW.value,
@@ -288,7 +339,7 @@ def task_accept(
 @click.argument("task_id")
 @click.pass_context
 def task_cleanup(ctx: click.Context, task_id: str) -> None:
-    """Safely delete a caller-owned ephemeral session after a terminal task."""
+    """Permanently delete a caller-owned ephemeral session after a terminal task."""
     try:
         with cli_main.get_client(ctx) as client:
             data = client.cleanup_task(task_id)

@@ -56,7 +56,7 @@ class EnsureWorkspaceAgentRequest(BaseModel):
         default=False,
         description=(
             "Explicit CLI provenance: True only when the caller owns a task-scoped "
-            "ephemeral session (--ephemeral on claude-hub agent create). Internal "
+            "ephemeral session (--ephemeral on claude-hub session create). Internal "
             "review/dispatch/resident paths must leave this False."
         ),
     )
@@ -124,6 +124,17 @@ class StartTaskRequest(BaseModel):
     target_session_id: Optional[str] = None
     clear_context: Optional[bool] = None
     related_task_id: Optional[str] = None
+    model: Optional[str] = None
+    env_preset: Optional[str] = None
+    cwd: Optional[str] = None
+
+    @field_validator("model", "env_preset", "cwd")
+    @classmethod
+    def _normalize_optional_start_strings(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        cleaned = value.strip()
+        return cleaned or None
 
 
 class ContinueTaskRequest(BaseModel):

@@ -230,7 +230,12 @@ def test_normal_persistence_payload_excludes_legacy_agent_tree_keys(
     workspace_id = workspace.json()["id"]
     task = client.post(
         f"/api/workspaces/{workspace_id}/tasks",
-        json={"title": "solo", "prompt": "work", "agent_type": "claude"},
+        json={
+            "title": "solo",
+            "prompt": "work",
+            "agent_type": "claude",
+            "session_kind": "terminal",
+        },
     )
     assert task.status_code == 201, task.text
     task_id = task.json()["id"]

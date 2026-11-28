@@ -130,7 +130,7 @@ def render_inline_lessons_block(
         footer_parts = []
         if workspace_id:
             footer_parts.append(
-                f"Provenance: claude-hub lessons get {workspace_id} <id> "
+                f"Provenance: claude-hub lessons get <id> --workspace-id {workspace_id} "
                 f"(GET /api/workspaces/{workspace_id}/lessons/<id>)."
             )
         footer_parts.append("Cite violated or verified lesson IDs in findings/risks.")
@@ -143,7 +143,7 @@ def render_inline_lessons_block(
         footer_parts = []
         if workspace_id:
             footer_parts.append(
-                f"Provenance: claude-hub lessons get {workspace_id} <id> "
+                f"Provenance: claude-hub lessons get <id> --workspace-id {workspace_id} "
                 f"(GET /api/workspaces/{workspace_id}/lessons/<id>)."
             )
         footer_parts.append("List applied lesson IDs (or 'none') in report risks.")

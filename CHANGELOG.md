@@ -7,6 +7,30 @@
 
 ## Released
 
+### refactor(cli,workspaces): streamline CLI command surface, O(1) lookups, and per-task session config
+
+- Reduce top-level CLI groups from 19 to 13 by removing UI-only `filesystem`
+  (`fs`), `clipboard`, `system`, and `terminal` groups and consolidating
+  `feedback` into `lessons` (`context | list | get | create | delete | sources |
+  capture | reap | config`) and `patrol` into `dot patrol [--run]`.
+- Separate cross-provider Subagents (`agent run | send | result | list | cancel |
+  close`) from Workspace-managed sessions (`session create | list | status |
+  logs | send | report | archive | unarchive | delete`), and add Chat transcript
+  support (including archived sessions) to `session logs` and `tab logs` plus
+  `tab list --archived` / `tab archive` / `tab unarchive`.
+- Consolidate `workspace` (`list | ensure | status [--full] | update | delete |
+  attachment-get`) and `task` (`task run` 1-step isolated task launcher without
+  shared-pool reuse; unified O(1) `task status [--reports N | --brief]`;
+  `task list [--all-workspaces] [--tree] [--root]`; `<task_id>`-first `events
+  [--wait]`, `ack`, `followup`, `handoff`, and `progress` with fresh-call CAS
+  auto-read and fail-closed `--call-id` retry guards), plus read-only unambiguous
+  `cwd` workspace resolution across commands.
+- Persist `model`, `env_preset`, and `cwd` on `WorkspaceTask` / `StartTaskRequest`
+  so `start_task` and `DotService.delegate` share one per-task ephemeral session
+  provisioning path, and add O(1) `GET /api/workspaces/tasks/{id}`,
+  `GET /api/workspaces/tasks/{id}/status`, and `GET /api/workspaces/sessions/{id}`
+  routes.
+
 ### feat(subagents): unify default subagent priority in Settings and simplify Cross-Review & Slim
 
 - Move subagent provider/model/effort priority configuration to global

@@ -1,4 +1,4 @@
-"""``workspace`` and ``agent`` command groups."""
+"""``workspace`` command group."""
 
 from __future__ import annotations
 
@@ -12,14 +12,10 @@ from claude_hub.cli.client import HubError
 from claude_hub.cli.commands.common import (
     lifecycle_group_help,
     merge_payload,
-    parse_json_object,
-    parse_kv_pairs,
-    redact_session_env_payload,
     resolve_cli_local_path,
+    resolve_workspace_id,
 )
 from claude_hub.cli.output import emit, print_rows
-from claude_hub.models import AgentType, SessionKind
-from claude_hub.models.schemas import validate_workspace_session_surface
 
 WORKSPACE_COLUMNS = ["id", "name", "path", "default_branch"]
 TASK_COLUMNS = ["id", "title", "status", "agent_type", "task_mode"]
@@ -34,28 +30,6 @@ SESSION_STATUS_COLUMNS = [
     "tab_id",
     "last_activity_at",
 ]
-DOCUMENT_COLUMNS = ["source", "label", "path", "task_id", "updated_at"]
-
-
-def _resolve_agent_session_flags(
-    ephemeral: Optional[bool], reuse_existing: Optional[bool]
-) -> tuple[bool, bool]:
-    """Resolve tri-state lifetime/reuse flags into ``(ephemeral, reuse_existing)``.
-
-    Bare ``agent create`` is isolated and task-scoped: ephemeral, never reusing
-    another session. Explicit ``--reuse-existing`` targets a compatible idle
-    persistent session and therefore implies ``--persistent`` unless an explicit
-    ``--ephemeral`` makes the combination invalid.
-    """
-    if ephemeral is True and reuse_existing is True:
-        raise click.ClickException("Cannot combine --ephemeral with --reuse-existing.")
-    if ephemeral is not None:
-        effective_ephemeral = ephemeral
-    elif reuse_existing is True:
-        effective_ephemeral = False
-    else:
-        effective_ephemeral = True
-    return effective_ephemeral, reuse_existing is True
 
 
 def _items(board: Any, key: str) -> List[dict]:
@@ -98,7 +72,7 @@ def _workspace_label(workspace: Any, fallback_id: str) -> str:
 
 def _workspace_summary(workspace_id: str, board: Any) -> Dict[str, Any]:
     """Derive a typed, scrape-free summary from the workspace board."""
-    workspace = board.get("workspace", {}) if isinstance(board, dict) else {}
+    workspace_obj = board.get("workspace", {}) if isinstance(board, dict) else {}
     tasks = _items(board, "tasks")
     sessions = _items(board, "sessions")
     documents = _items(board, "markdown_documents")
@@ -138,25 +112,26 @@ def _workspace_summary(workspace_id: str, board: Any) -> Dict[str, Any]:
         for session in active_sessions[:10]
     ]
     return {
-        "workspace": workspace,
+        "workspace": workspace_obj,
         "task_counts": _counts(tasks, "status"),
         "session_counts": _counts(sessions, "runtime_status"),
         "active_tasks": task_rows,
         "active_sessions": session_rows,
         "latest_reports": list(reports.values()),
         "markdown_document_count": len(documents),
+        "markdown_documents": documents,
         "snapshot_path": board.get("snapshot_path") if isinstance(board, dict) else None,
     }
 
 
 def _print_workspace_summary(workspace_id: str, summary: Dict[str, Any]) -> None:
-    workspace = summary.get("workspace", {})
-    click.echo(f"Workspace: {_workspace_label(workspace, workspace_id)} ({workspace_id})")
-    if isinstance(workspace, dict):
-        if workspace.get("path"):
-            click.echo(f"path: {workspace.get('path')}")
-        if workspace.get("default_branch"):
-            click.echo(f"default_branch: {workspace.get('default_branch')}")
+    workspace_obj = summary.get("workspace", {})
+    click.echo(f"Workspace: {_workspace_label(workspace_obj, workspace_id)} ({workspace_id})")
+    if isinstance(workspace_obj, dict):
+        if workspace_obj.get("path"):
+            click.echo(f"path: {workspace_obj.get('path')}")
+        if workspace_obj.get("default_branch"):
+            click.echo(f"default_branch: {workspace_obj.get('default_branch')}")
     click.echo(f"task_counts: {summary.get('task_counts', {})}")
     click.echo(f"session_counts: {summary.get('session_counts', {})}")
     click.echo(f"markdown_documents: {summary.get('markdown_document_count', 0)}")
@@ -165,7 +140,14 @@ def _print_workspace_summary(workspace_id: str, summary: Dict[str, Any]) -> None
     click.echo("\nActive tasks:")
     print_rows(
         summary.get("active_tasks", []),
-        ["id", "title", "status", "session_id", "latest_report_state", "latest_report_message"],
+        [
+            "id",
+            "title",
+            "status",
+            "session_id",
+            "latest_report_state",
+            "latest_report_message",
+        ],
     )
     click.echo("\nActive sessions:")
     print_rows(summary.get("active_sessions", []), SESSION_STATUS_COLUMNS)
@@ -191,68 +173,6 @@ def workspace_list(ctx: click.Context) -> None:
         print_rows(data or [], WORKSPACE_COLUMNS)
 
 
-@workspace.command("create")
-@click.option("--name", required=True, help="Workspace name.")
-@click.option("--path", required=True, help="Local repository path.")
-@click.option("--default-branch", default="main", help="Default git branch.")
-@click.option("--session-prefix", default=None, help="Prefix for managed session names.")
-@click.option(
-    "--target",
-    type=click.Choice(["local", "remote"]),
-    default="local",
-    help="Execution target.",
-)
-@click.option("--remote-profile-id", default=None, help="Remote profile for remote workspaces.")
-@click.option("--remote-cwd", default=None, help="Remote working directory.")
-@click.option(
-    "--remote-reconnect/--no-remote-reconnect",
-    default=None,
-    help="Reconnect remote sessions automatically.",
-)
-@click.option(
-    "--allow-duplicate",
-    is_flag=True,
-    default=False,
-    help="Allow creating a workspace when the repo identity already exists.",
-)
-@click.pass_context
-def workspace_create(
-    ctx: click.Context,
-    name: str,
-    path: str,
-    default_branch: str,
-    session_prefix: str,
-    target: str,
-    remote_profile_id: str,
-    remote_cwd: str,
-    remote_reconnect: bool,
-    allow_duplicate: bool,
-) -> None:
-    """Create a workspace (refuses duplicate repo identity unless --allow-duplicate)."""
-    body: Dict[str, Any] = {
-        "name": name,
-        "path": resolve_cli_local_path(path),
-        "default_branch": default_branch,
-        "target": target,
-    }
-    if session_prefix is not None:
-        body["session_prefix"] = session_prefix
-    if remote_profile_id is not None:
-        body["remote_profile_id"] = remote_profile_id
-    if remote_cwd is not None:
-        body["remote_cwd"] = remote_cwd
-    if remote_reconnect is not None:
-        body["remote_reconnect"] = remote_reconnect
-    if allow_duplicate:
-        body["allow_duplicate"] = True
-    try:
-        with cli_main.get_client(ctx) as client:
-            data = client.create_workspace(body)
-    except HubError as e:
-        raise click.ClickException(str(e)) from e
-    emit(data, cli_main.as_json(ctx))
-
-
 @workspace.command("ensure")
 @click.option(
     "--name",
@@ -260,7 +180,12 @@ def workspace_create(
     required=False,
     help="Workspace name when creating (defaults to canonical primary repo basename).",
 )
-@click.option("--path", required=True, help="Local repository path or worktree.")
+@click.option(
+    "--path",
+    default=".",
+    show_default=True,
+    help="Local repository path or linked worktree.",
+)
 @click.option("--default-branch", default="main", help="Default git branch.")
 @click.option("--session-prefix", default=None, help="Prefix for managed session names.")
 @click.option(
@@ -294,11 +219,11 @@ def workspace_ensure(
     name: Optional[str],
     path: str,
     default_branch: str,
-    session_prefix: str,
+    session_prefix: Optional[str],
     target: str,
-    remote_profile_id: str,
-    remote_cwd: str,
-    remote_reconnect: bool,
+    remote_profile_id: Optional[str],
+    remote_cwd: Optional[str],
+    remote_reconnect: Optional[bool],
     create_if_missing: bool,
     allow_duplicate: bool,
 ) -> None:
@@ -329,8 +254,63 @@ def workspace_ensure(
     emit(data, cli_main.as_json(ctx))
 
 
+@workspace.command("status")
+@click.argument("workspace_id", required=False, default=None)
+@click.option(
+    "--full",
+    is_flag=True,
+    default=False,
+    help="Show the full workspace board (all tasks, sessions, reports, and lifecycles).",
+)
+@click.option(
+    "--include-archived",
+    is_flag=True,
+    default=False,
+    help="Include archived sessions in the board.",
+)
+@click.pass_context
+def workspace_status(
+    ctx: click.Context,
+    workspace_id: Optional[str],
+    full: bool,
+    include_archived: bool,
+) -> None:
+    """Show concise workspace status (or full board with --full).
+
+    Defaults to the workspace matching the current directory when WORKSPACE_ID
+    is omitted.
+    """
+    try:
+        with cli_main.get_client(ctx) as client:
+            resolved_id = resolve_workspace_id(client, workspace_id)
+            board = client.get_board(resolved_id, include_archived=include_archived)
+    except HubError as e:
+        raise click.ClickException(str(e)) from e
+
+    if full:
+        if cli_main.as_json(ctx):
+            emit(board, True)
+            return
+        ws = board.get("workspace", {}) if isinstance(board, dict) else {}
+        click.echo(f"Workspace: {ws.get('name', '')} ({ws.get('id', resolved_id)})")
+        click.echo("\nTasks:")
+        print_rows(board.get("tasks", []) if isinstance(board, dict) else [], TASK_COLUMNS)
+        click.echo("\nSessions:")
+        print_rows(
+            board.get("sessions", []) if isinstance(board, dict) else [],
+            SESSION_COLUMNS,
+        )
+        return
+
+    summary = _workspace_summary(resolved_id, board)
+    if cli_main.as_json(ctx):
+        emit(summary, True)
+    else:
+        _print_workspace_summary(resolved_id, summary)
+
+
 @workspace.command("update")
-@click.argument("workspace_id")
+@click.argument("workspace_id", required=False, default=None)
 @click.option("--name", default=None, help="Workspace name.")
 @click.option("--path", default=None, help="Local repository path.")
 @click.option("--default-branch", default=None, help="Default git branch.")
@@ -344,13 +324,13 @@ def workspace_ensure(
 @click.pass_context
 def workspace_update(
     ctx: click.Context,
-    workspace_id: str,
-    name: str,
-    path: str,
-    default_branch: str,
-    remote_cwd: str,
-    remote_reconnect: bool,
-    payload_json: str,
+    workspace_id: Optional[str],
+    name: Optional[str],
+    path: Optional[str],
+    default_branch: Optional[str],
+    remote_cwd: Optional[str],
+    remote_reconnect: Optional[bool],
+    payload_json: Optional[str],
 ) -> None:
     """Update editable workspace fields."""
     body = merge_payload(
@@ -363,122 +343,27 @@ def workspace_update(
     )
     try:
         with cli_main.get_client(ctx) as client:
-            data = client.update_workspace(workspace_id, body)
+            resolved_id = resolve_workspace_id(client, workspace_id)
+            data = client.update_workspace(resolved_id, body)
     except HubError as e:
         raise click.ClickException(str(e)) from e
     emit(data, cli_main.as_json(ctx))
 
 
-@workspace.command("board")
+@workspace.command("delete")
 @click.argument("workspace_id")
 @click.pass_context
-def workspace_board(ctx: click.Context, workspace_id: str) -> None:
-    """Show the board (tasks + sessions) for a workspace.
-
-    Also available as ``workspace status``.
-    """
+def workspace_delete(ctx: click.Context, workspace_id: str) -> None:
+    """Delete a workspace record."""
     try:
         with cli_main.get_client(ctx) as client:
-            board = client.get_board(workspace_id)
+            client.delete_workspace(workspace_id)
     except HubError as e:
         raise click.ClickException(str(e)) from e
-
     if cli_main.as_json(ctx):
-        emit(board, True)
-        return
-
-    ws = board.get("workspace", {}) if isinstance(board, dict) else {}
-    click.echo(f"Workspace: {ws.get('name', '')} ({ws.get('id', workspace_id)})")
-    click.echo("\nTasks:")
-    print_rows(board.get("tasks", []), TASK_COLUMNS)
-    click.echo("\nSessions:")
-    print_rows(board.get("sessions", []), SESSION_COLUMNS)
-
-
-# Register the board command under the alias ``status`` as well.
-workspace.add_command(workspace_board, name="status")
-
-
-@workspace.command("summary")
-@click.argument("workspace_id")
-@click.pass_context
-def workspace_summary(ctx: click.Context, workspace_id: str) -> None:
-    """Show a concise typed summary of backend workspace state."""
-    try:
-        with cli_main.get_client(ctx) as client:
-            board = client.get_board(workspace_id)
-    except HubError as e:
-        raise click.ClickException(str(e)) from e
-    summary = _workspace_summary(workspace_id, board)
-    if cli_main.as_json(ctx):
-        emit(summary, True)
+        emit({"ok": True, "workspace_id": workspace_id}, True)
     else:
-        _print_workspace_summary(workspace_id, summary)
-
-
-@workspace.command("docs")
-@click.argument("workspace_id")
-@click.pass_context
-def workspace_docs(ctx: click.Context, workspace_id: str) -> None:
-    """List board-discoverable Markdown documents and the snapshot path."""
-    try:
-        with cli_main.get_client(ctx) as client:
-            board = client.get_board(workspace_id)
-    except HubError as e:
-        raise click.ClickException(str(e)) from e
-    documents = _items(board, "markdown_documents")
-    payload = {
-        "workspace_id": workspace_id,
-        "snapshot_path": board.get("snapshot_path") if isinstance(board, dict) else None,
-        "markdown_documents": documents,
-    }
-    if cli_main.as_json(ctx):
-        emit(payload, True)
-        return
-    click.echo(f"Workspace: {workspace_id}")
-    click.echo(f"snapshot: {payload['snapshot_path'] or '(none)'}")
-    click.echo("\nMarkdown documents:")
-    print_rows(documents, DOCUMENT_COLUMNS)
-
-
-@workspace.command("dispatch")
-@click.argument("workspace_id")
-@click.pass_context
-def workspace_dispatch(ctx: click.Context, workspace_id: str) -> None:
-    """Manually dispatch queued tasks for a workspace."""
-    try:
-        with cli_main.get_client(ctx) as client:
-            client.dispatch_workspace(workspace_id)
-    except HubError as e:
-        raise click.ClickException(str(e)) from e
-    if cli_main.as_json(ctx):
-        emit({"ok": True}, True)
-    else:
-        click.echo("dispatched")
-
-
-@workspace.command("artifact-preview")
-@click.argument("workspace_id")
-@click.option("--path", "artifact_path", required=True, help="Artifact path to preview.")
-@click.option("--report-id", default=None, help="Optional report id for relative artifacts.")
-@click.pass_context
-def workspace_artifact_preview(
-    ctx: click.Context,
-    workspace_id: str,
-    artifact_path: str,
-    report_id: str,
-) -> None:
-    """Preview a workspace artifact."""
-    try:
-        with cli_main.get_client(ctx) as client:
-            data = client.preview_workspace_artifact(
-                workspace_id,
-                artifact_path,
-                report_id=report_id,
-            )
-    except HubError as e:
-        raise click.ClickException(str(e)) from e
-    emit(data, cli_main.as_json(ctx))
+        click.echo(f"deleted {workspace_id}")
 
 
 @workspace.command("attachment-get")
@@ -488,7 +373,7 @@ def workspace_artifact_preview(
 def workspace_attachment_get(
     ctx: click.Context,
     attachment_id: str,
-    output_path: str,
+    output_path: Optional[str],
 ) -> None:
     """Download a persisted task attachment."""
     try:
@@ -506,239 +391,3 @@ def workspace_attachment_get(
             click.echo(output_path)
         return
     click.echo(response.text)
-
-
-@click.group(
-    help=lifecycle_group_help(
-        "Manage workspace agent sessions.\n\n"
-        "For one-call help from another provider (no Task, board or review), use\n"
-        "`agent run --provider X --prompt-file -`; it prints the final answer."
-    )
-)
-def agent() -> None:
-    pass
-
-
-@agent.command("list")
-@click.argument("workspace_id")
-@click.pass_context
-def agent_list(ctx: click.Context, workspace_id: str) -> None:
-    """List managed agent sessions for a workspace."""
-    try:
-        with cli_main.get_client(ctx) as client:
-            board = client.get_board(workspace_id)
-    except HubError as e:
-        raise click.ClickException(str(e)) from e
-    sessions: List[dict] = board.get("sessions", []) if isinstance(board, dict) else []
-    if cli_main.as_json(ctx):
-        emit(sessions, True)
-    else:
-        print_rows(sessions, SESSION_COLUMNS)
-
-
-@agent.command("status")
-@click.argument("workspace_id")
-@click.option("--role", default=None, help="Client-side filter on session role.")
-@click.pass_context
-def agent_status(ctx: click.Context, workspace_id: str, role: Optional[str]) -> None:
-    """Show managed agent/session runtime state for a workspace."""
-    try:
-        with cli_main.get_client(ctx) as client:
-            board = client.get_board(workspace_id)
-    except HubError as e:
-        raise click.ClickException(str(e)) from e
-    sessions = _items(board, "sessions")
-    if role is not None:
-        sessions = [s for s in sessions if s.get("role") == role]
-    rows = [
-        {
-            "id": session.get("id"),
-            "role": session.get("role"),
-            "agent_type": session.get("agent_type"),
-            "status": session.get("status"),
-            "runtime_status": session.get("runtime_status"),
-            "current_task_id": session.get("current_task_id"),
-            "tab_id": session.get("tab_id"),
-            "last_activity_at": session.get("last_activity_at"),
-        }
-        for session in sessions
-    ]
-    if cli_main.as_json(ctx):
-        emit(rows, True)
-    else:
-        print_rows(rows, SESSION_STATUS_COLUMNS)
-
-
-def _chat_capable(agent_type: str) -> bool:
-    try:
-        validate_workspace_session_surface(AgentType(agent_type), SessionKind.CHAT)
-    except ValueError:
-        return False
-    return True
-
-
-def _workspace_is_remote(ctx: click.Context, workspace_id: str) -> Optional[bool]:
-    """Return the workspace target, or ``None`` when it cannot be resolved."""
-    try:
-        with cli_main.get_client(ctx) as client:
-            workspaces = client.list_workspaces()
-    except HubError:
-        return None
-    for workspace in workspaces if isinstance(workspaces, list) else []:
-        if isinstance(workspace, dict) and workspace_id in (
-            workspace.get("id"),
-            workspace.get("name"),
-        ):
-            return workspace.get("target") == "remote"
-    return None
-
-
-def _default_agent_session_kind(
-    ctx: click.Context, workspace_id: str, agent_type: str, *, remote: bool
-) -> str:
-    """Local Chat-capable agents default to a headless Chat; the rest keep Terminal.
-
-    Chat avoids a tmux/ttyd runtime per helper agent. It needs a local target
-    and a Chat-capable provider, so explicit remote options, remote workspaces
-    and unresolved lookups fall back to the server default (terminal).
-    """
-    if remote or not _chat_capable(agent_type):
-        return "terminal"
-    if _workspace_is_remote(ctx, workspace_id) is not False:
-        return "terminal"
-    return "chat"
-
-
-@agent.command("create")
-@click.argument("workspace_id")
-@click.option("--agent-type", default="codex", help="Agent type to run.")
-@click.option(
-    "--session-kind",
-    type=click.Choice(["terminal", "chat"]),
-    default=None,
-    help=(
-        "Managed session surface. Default: chat for a local, Chat-capable agent "
-        "whether or not the call runs inside a Hub agent; remote SSH and "
-        "terminal-only agent types stay on terminal."
-    ),
-)
-@click.option("--title", default=None, help="Optional session title.")
-@click.option(
-    "--role",
-    type=click.Choice(["worker", "orchestrator", "reviewer", "dispatcher"]),
-    default="orchestrator",
-    help="Session role.",
-)
-@click.option(
-    "--reuse-existing/--no-reuse-existing",
-    default=None,
-    help=(
-        "Reuse a compatible idle persistent session. Off by default: the default "
-        "ephemeral session is provisioned fresh per task and never shared."
-    ),
-)
-@click.option("--cwd", default=None, help="Session working directory override.")
-@click.option(
-    "--solo-mode/--no-solo-mode",
-    default=True,
-    help="Run the agent in solo mode (default on).",
-)
-@click.option(
-    "--target",
-    type=click.Choice(["local", "remote"]),
-    default=None,
-    help="Execution target override.",
-)
-@click.option("--remote-profile-id", default=None, help="Remote profile for remote agents.")
-@click.option("--remote-cwd", default=None, help="Remote working directory.")
-@click.option(
-    "--remote-reconnect/--no-remote-reconnect",
-    default=None,
-    help="Reconnect remote sessions automatically.",
-)
-@click.option("--env", "env_values", multiple=True, help="Environment variable KEY=VALUE.")
-@click.option(
-    "--env-preset",
-    default=None,
-    help="Any built-in or saved custom env preset, selected by id or name.",
-)
-@click.option(
-    "--ephemeral/--persistent",
-    default=None,
-    help=(
-        "Session lifetime. Default: --ephemeral, an isolated task-scoped session "
-        "reclaimed by task cleanup. Pass --persistent for a durable session."
-    ),
-)
-@click.option("--payload-json", default=None, help="Raw JSON object merged into the body.")
-@click.pass_context
-def agent_create(
-    ctx: click.Context,
-    workspace_id: str,
-    agent_type: str,
-    session_kind: Optional[str],
-    title: str,
-    role: str,
-    reuse_existing: Optional[bool],
-    cwd: str,
-    solo_mode: bool,
-    target: str,
-    remote_profile_id: str,
-    remote_cwd: str,
-    remote_reconnect: bool,
-    env_values: tuple,
-    env_preset: str,
-    ephemeral: Optional[bool],
-    payload_json: str,
-) -> None:
-    """Create an isolated, task-scoped agent session (ephemeral Chat by default)."""
-    effective_ephemeral, effective_reuse = _resolve_agent_session_flags(ephemeral, reuse_existing)
-    raw_payload = parse_json_object(payload_json)
-    if session_kind is None and "session_kind" not in raw_payload:
-        remote_fields = ("remote_profile_id", "remote_cwd", "remote_reconnect")
-        session_kind = _default_agent_session_kind(
-            ctx,
-            workspace_id,
-            agent_type,
-            remote=bool(
-                (target or raw_payload.get("target")) == "remote"
-                or remote_profile_id
-                or remote_cwd
-                or remote_reconnect is not None
-                or any(raw_payload.get(field) is not None for field in remote_fields)
-            ),
-        )
-    settings = ctx.obj
-    resolved_preset = (
-        env_preset
-        or settings.env_preset_for_agent_type(agent_type)
-        or getattr(settings, "default_env_preset", None)
-    )
-    resolved_cwd = resolve_cli_local_path(cwd) if cwd is not None else None
-    body: Dict[str, Any] = merge_payload(
-        payload_json,
-        agent_type=agent_type,
-        session_kind=session_kind,
-        role=role,
-        reuse_existing=effective_reuse,
-        cwd=resolved_cwd,
-        solo_mode=solo_mode,
-        target=target,
-        remote_profile_id=remote_profile_id,
-        remote_cwd=remote_cwd,
-        remote_reconnect=remote_reconnect,
-        ephemeral=effective_ephemeral,
-        caller_owned_ephemeral=effective_ephemeral,
-        env_preset=resolved_preset,
-    )
-    if title is not None:
-        body["title"] = title
-    if env_values:
-        body["env"] = parse_kv_pairs(env_values, "--env")
-    try:
-        with cli_main.get_client(ctx) as client:
-            data = client.ensure_agent(workspace_id, body)
-    except HubError as e:
-        raise click.ClickException(str(e)) from e
-    data = redact_session_env_payload(data)
-    emit(data, cli_main.as_json(ctx))

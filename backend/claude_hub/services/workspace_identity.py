@@ -248,7 +248,7 @@ def validate_local_agent_cwd_for_workspace(
             raise InvalidLocalAgentCwdError(
                 "Local agent cwd must be inside the workspace Git repository "
                 f"({ws_identity.primary_worktree}). From a feature worktree run "
-                "agent create with --cwd ."
+                "session create with --cwd ."
             )
         if cwd_identity.common_dir != ws_identity.common_dir:
             raise InvalidLocalAgentCwdError(

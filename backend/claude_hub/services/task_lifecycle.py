@@ -152,7 +152,12 @@ def _derive(
             task.completed_at or task.updated_at,
         )
     if status == WorkspaceTaskStatus.FAILED:
-        return TaskPhase.FAILED, "failed", TaskOwner(kind=TaskOwnerKind.NONE), task.failed_at
+        return (
+            TaskPhase.FAILED,
+            "failed",
+            TaskOwner(kind=TaskOwnerKind.NONE),
+            task.failed_at,
+        )
     liveness = task.liveness
     if (
         liveness
@@ -273,8 +278,18 @@ def _derive_review(
     if task.review_requested_at and task.review_completed_at is None:
         reviewer = _session_owner(task.review_session_id, facts.reviewer_session)
         if reviewer.kind != TaskOwnerKind.NONE and reviewer.state == TaskOwnerState.GONE:
-            return TaskPhase.ORPHANED, "reviewer_gone", reviewer, task.review_requested_at
-        return TaskPhase.REVIEWING, "ai_review_in_progress", reviewer, task.review_requested_at
+            return (
+                TaskPhase.ORPHANED,
+                "reviewer_gone",
+                reviewer,
+                task.review_requested_at,
+            )
+        return (
+            TaskPhase.REVIEWING,
+            "ai_review_in_progress",
+            reviewer,
+            task.review_requested_at,
+        )
     verdict_at = task.review_completed_at
     verdict = facts.latest_review_state
     # Only a final pass or a review skip requests acceptance, so these win over
@@ -287,7 +302,12 @@ def _derive_review(
             task.human_acceptance_requested_at,
         )
     if task.review_skipped_at:
-        return TaskPhase.AWAITING_ACCEPTANCE, "review_skipped", worker, task.review_skipped_at
+        return (
+            TaskPhase.AWAITING_ACCEPTANCE,
+            "review_skipped",
+            worker,
+            task.review_skipped_at,
+        )
     if verdict == AgentReportState.REVIEW_NEEDS_INPUT:
         return TaskPhase.NEEDS_USER, "reviewer_needs_input", worker, verdict_at
     if verdict == AgentReportState.REVIEW_FAILED:
@@ -307,7 +327,12 @@ def _derive_review(
 # ---------------------------------------------------------------------------
 
 NOTIFY_PHASES = frozenset(
-    {TaskPhase.NEEDS_USER, TaskPhase.AWAITING_ACCEPTANCE, TaskPhase.ORPHANED, TaskPhase.FAILED}
+    {
+        TaskPhase.NEEDS_USER,
+        TaskPhase.AWAITING_ACCEPTANCE,
+        TaskPhase.ORPHANED,
+        TaskPhase.FAILED,
+    }
 )
 
 REASON_TEXT = {
@@ -393,7 +418,7 @@ NOTICE_REASON_TEXT = {
 # Next steps differ by board status: `task continue` only reopens review or
 # failed Tasks; a working Task is steered with a follow-up message.
 NEXT_STEP_TEXT = {
-    "working": "回覆或調整方向：`claude-hub task followup {ws} {id} --message ...`，或在飛書直接回覆 dot。",
+    "working": "回覆或調整方向：`claude-hub task followup {id} --message ...`，或在飛書直接回覆 dot。",
     "review": "回覆或要求修改：`claude-hub task continue {id} --message ...`；驗收：`claude-hub task accept {id}`。",
     "failed": "重試：`claude-hub task continue {id} --message ...`。",
     "queued": "可在看板重新派發，或關閉 `claude-hub task abort {id} --reason ...`。",
@@ -435,7 +460,10 @@ def notice_reason_text(reason: str) -> str:
 def attention_notice(
     task: WorkspaceTask, phase: TaskPhase, reason: str, detail: str = ""
 ) -> TaskNotice:
-    lines = [f"**{notice_reason_text(reason)}**", f"Task `{task.id}`（{task.status.value}）"]
+    lines = [
+        f"**{notice_reason_text(reason)}**",
+        f"Task `{task.id}`（{task.status.value}）",
+    ]
     step = (
         ORPHANED_STEP_TEXT
         if phase == TaskPhase.ORPHANED
@@ -486,7 +514,7 @@ def plan_notice(task: WorkspaceTask) -> Optional[TaskNotice]:
     lines += [
         "",
         "方向不對可隨時調整："
-        f"`claude-hub task followup {task.workspace_id} {task.id} --message ...`，或在飛書回覆 dot。",
+        f"`claude-hub task followup {task.id} --message ...`，或在飛書回覆 dot。",
     ]
     return TaskNotice(kind="plan", title=f"計劃：{_clip(task.title, 50)}", text="\n".join(lines))
 

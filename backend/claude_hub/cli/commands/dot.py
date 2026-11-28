@@ -1,8 +1,4 @@
-"""``dot`` command group — Dot's memory, focus, work and delegation.
-
-Dot (the persistent personal agent) runs these from its own Chat; people can
-use them too. Everything goes through ``/api/dot``.
-"""
+"""``dot`` command group — Dot's memory, focus, work, patrol, and delegation."""
 
 from __future__ import annotations
 
@@ -15,6 +11,7 @@ import click
 
 from claude_hub.cli import main as cli_main
 from claude_hub.cli.client import HubError
+from claude_hub.cli.commands.common import resolve_workspace_id
 from claude_hub.cli.output import emit, print_rows, truncate
 
 CARD_KINDS = ["user", "work", "knowledge", "concept"]
@@ -30,10 +27,12 @@ def _call(
     *,
     json: Any = None,
     params: Optional[Dict[str, Any]] = None,
+    timeout: Optional[float] = None,
 ) -> Any:
     try:
         with cli_main.get_client(ctx) as client:
-            return client.request(method, f"/api/dot{path}", json=json, params=params)
+            full_path = path if path.startswith("/api/") else f"/api/dot{path}"
+            return client.request(method, full_path, json=json, params=params, timeout=timeout)
     except HubError as e:
         raise click.ClickException(str(e)) from e
 
@@ -48,7 +47,7 @@ def _rows(ctx: click.Context, data: Any, columns: List[str]) -> None:
 
 @click.group()
 def dot() -> None:
-    """Dot: persistent personal agent memory, focus and delegation."""
+    """Dot: persistent personal agent memory, focus, patrol, and delegation."""
 
 
 @dot.command("setup")
@@ -94,7 +93,7 @@ def dot_health(ctx: click.Context) -> None:
     "--enable/--disable",
     "enabled",
     default=None,
-    help="Turn Dot's daily demand digest on or off (default: off).",
+    help="Turn Dot's daily demand digest on or off.",
 )
 @click.option(
     "--daily/--no-daily",
@@ -103,31 +102,71 @@ def dot_health(ctx: click.Context) -> None:
     help="Enable or disable daily InfoWall & MR status digest.",
 )
 @click.option("--daily-slot", multiple=True, help="Replace daily slots (HH:MM); repeat for each.")
+@click.option("--workspace-id", default=None, help="Bind demand radar workspace id.")
 @click.option(
     "--realtime/--no-realtime",
     "realtime_enabled",
     default=None,
     help="Enable or disable Feishu WebSocket event dispatch independently of patrol.",
 )
+@click.option("--run", "run_now", is_flag=True, help="Run the demand digest immediately.")
+@click.option(
+    "--channel",
+    type=click.Choice(["all", "daily"]),
+    default="all",
+    show_default=True,
+    help="Channel for --run.",
+)
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    help="With --run, preview deterministic findings without model or notification writes.",
+)
+@click.option(
+    "--notify/--no-notify",
+    default=True,
+    show_default=True,
+    help="With --run, control Feishu notification delivery.",
+)
 @click.pass_context
 def dot_patrol(
     ctx: click.Context,
     enabled: Optional[bool],
-    realtime_enabled: Optional[bool],
     daily_enabled: Optional[bool],
     daily_slot: Tuple[str, ...],
+    workspace_id: Optional[str],
+    realtime_enabled: Optional[bool],
+    run_now: bool,
+    channel: str,
+    dry_run: bool,
+    notify: bool,
 ) -> None:
-    """Show or toggle Dot's daily digest and realtime Feishu events."""
+    """Show, configure, or run Dot's demand radar and realtime Feishu events."""
     changes: Dict[str, Any] = {}
     for name, value in (
         ("enabled", enabled),
         ("realtime_enabled", realtime_enabled),
         ("daily_enabled", daily_enabled),
+        ("workspace_id", workspace_id),
     ):
         if value is not None:
             changes[name] = value
     if daily_slot:
         changes["daily_slots"] = list(daily_slot)
+
+    if run_now:
+        if changes:
+            raise click.UsageError("Pass --run separately from patrol configuration options.")
+        data = _call(
+            ctx,
+            "POST",
+            "/api/patrol/run",
+            json={"channel": channel, "dry_run": dry_run, "notify": notify},
+            timeout=12500.0,
+        )
+        emit(data, cli_main.as_json(ctx))
+        return
+
     if realtime_enabled is not None and len(changes) > 1:
         raise click.UsageError(
             "Use --realtime/--no-realtime separately from scheduled patrol options."
@@ -174,7 +213,6 @@ def dot_identity(
 ) -> None:
     """Show or change Dot's name and avatar."""
     data = None
-    # The picture goes first: the server checks it, so a bad one changes nothing.
     if avatar_image:
         file_path = Path(avatar_image).expanduser()
         try:
@@ -234,67 +272,55 @@ def dot_notify(
 # ── scouting ────────────────────────────────────────────────────────────
 
 
-@dot.group("scout", invoke_without_command=True)
-@click.pass_context
-def dot_scout(ctx: click.Context) -> None:
-    """Proactive interest radar and the DeepSeek->strong-model scout funnel."""
-    if ctx.invoked_subcommand is None:
-        # Default to the read-only profile view so a bare `dot scout` is safe.
-        emit(_call(ctx, "GET", "/scout/profile"), cli_main.as_json(ctx))
-
-
-@dot_scout.command("profile")
-@click.pass_context
-def dot_scout_profile(ctx: click.Context) -> None:
-    """Refresh and show the evolving interest radar (no model call, no notify)."""
-    emit(_call(ctx, "GET", "/scout/profile"), cli_main.as_json(ctx))
-
-
-@dot_scout.command("run")
+@dot.command("scout")
+@click.option("--run", "run_funnel", is_flag=True, help="Run the two-stage scout funnel.")
 @click.option(
     "--dry-run/--no-dry-run",
     default=True,
     show_default=True,
-    help="Dry run never sends a Feishu notice; use --no-dry-run to allow Speak-Bar pushes.",
+    help="With --run, dry-run never sends a Feishu notice; --no-dry-run allows Speak-Bar pushes.",
 )
 @click.pass_context
-def dot_scout_run(ctx: click.Context, dry_run: bool) -> None:
-    """Run the two-stage scout funnel. Dry-run is the safe default."""
-    emit(_call(ctx, "POST", "/scout/run", json={"dry_run": dry_run}), cli_main.as_json(ctx))
+def dot_scout(ctx: click.Context, run_funnel: bool, dry_run: bool) -> None:
+    """Show the interest radar profile, or run the scout funnel with --run."""
+    if run_funnel:
+        emit(
+            _call(ctx, "POST", "/scout/run", json={"dry_run": dry_run}),
+            cli_main.as_json(ctx),
+        )
+    else:
+        emit(_call(ctx, "GET", "/scout/profile"), cli_main.as_json(ctx))
 
 
 # ── memory ──────────────────────────────────────────────────────────────
 
 
-@dot.command("recall")
-@click.argument("query")
-@click.option("--kind", type=click.Choice(CARD_KINDS), default=None)
-@click.option("--limit", type=int, default=8, show_default=True)
-@click.option("--archived", is_flag=True, help="Include archived cards.")
-@click.pass_context
-def dot_recall(
-    ctx: click.Context, query: str, kind: Optional[str], limit: int, archived: bool
-) -> None:
-    """Search memory cards."""
-    params: Dict[str, Any] = {"q": query, "limit": limit, "include_archived": archived}
-    if kind:
-        params["kind"] = kind
-    _rows(
-        ctx,
-        _call(ctx, "GET", "/recall", params=params),
-        ["id", "kind", "title", "summary"],
-    )
-
-
 @dot.command("cards")
+@click.argument("query", required=False, default=None)
 @click.option("--kind", type=click.Choice(CARD_KINDS), default=None)
+@click.option("--limit", type=int, default=8, show_default=True, help="Limit when QUERY is set.")
 @click.option("--archived", is_flag=True, help="Include archived cards.")
 @click.pass_context
-def dot_cards(ctx: click.Context, kind: Optional[str], archived: bool) -> None:
-    """List memory cards (newest first)."""
+def dot_cards(
+    ctx: click.Context,
+    query: Optional[str],
+    kind: Optional[str],
+    limit: int,
+    archived: bool,
+) -> None:
+    """List memory cards (newest first), or search them when QUERY is given."""
     params: Dict[str, Any] = {"include_archived": archived}
     if kind:
         params["kind"] = kind
+    if query:
+        params["q"] = query
+        params["limit"] = limit
+        _rows(
+            ctx,
+            _call(ctx, "GET", "/recall", params=params),
+            ["id", "kind", "title", "summary"],
+        )
+        return
     _rows(
         ctx,
         _call(ctx, "GET", "/cards", params=params),
@@ -558,7 +584,12 @@ def dot_unwatch(ctx: click.Context, task_id: str) -> None:
 
 
 @dot.command("delegate")
-@click.option("--workspace", "workspace_id", required=True, help="Workspace id.")
+@click.option(
+    "--workspace",
+    "workspace_id",
+    default=None,
+    help="Workspace id (defaults to unambiguous cwd match).",
+)
 @click.option("--title", required=True)
 @click.option("--goal", required=True, help="What outcome is wanted, and why.")
 @click.option(
@@ -575,18 +606,18 @@ def dot_unwatch(ctx: click.Context, task_id: str) -> None:
 @click.option("--agent", "agent_type", type=click.Choice(AGENT_TYPES), default="codex")
 @click.option("--mode", "task_mode", type=click.Choice(TASK_MODES), default=None)
 @click.option(
-    "--model", default=None, help="Explicit provider model ID for a dedicated Chat session."
+    "--model",
+    default=None,
+    help="Explicit provider model ID for the isolated Chat session.",
 )
 @click.option("--env-preset", "env_preset", default=None, help="Provider env preset name or id.")
 @click.option(
-    "--recipe", type=click.Choice(RECIPES), default=None, help="Standardized pipeline recipe."
+    "--recipe",
+    type=click.Choice(RECIPES),
+    default=None,
+    help="Standardized pipeline recipe.",
 )
 @click.option("--demand-id", "demand_id", default=None, help="Linked InfoWall demand ID.")
-@click.option(
-    "--ephemeral/--no-ephemeral",
-    default=None,
-    help="Provision a dedicated task-scoped ephemeral session.",
-)
 @click.option("--no-start", is_flag=True, help="Register only; do not dispatch.")
 @click.option("--request-key", default=None, help="Idempotency key for safe retries.")
 @click.option(
@@ -599,7 +630,7 @@ def dot_unwatch(ctx: click.Context, task_id: str) -> None:
     "--session",
     "session_id",
     default=None,
-    help="Run it in this existing agent session (e.g. one set to a model the user chose).",
+    help="Run in an explicit existing agent session.",
 )
 @click.option(
     "--readonly/--writable",
@@ -616,7 +647,7 @@ def dot_unwatch(ctx: click.Context, task_id: str) -> None:
 @click.pass_context
 def dot_delegate(
     ctx: click.Context,
-    workspace_id: str,
+    workspace_id: Optional[str],
     title: str,
     goal: str,
     done_when: Tuple[str, ...],
@@ -630,7 +661,6 @@ def dot_delegate(
     env_preset: Optional[str],
     recipe: Optional[str],
     demand_id: Optional[str],
-    ephemeral: Optional[bool],
     no_start: bool,
     request_key: Optional[str],
     stall_hours: Optional[float],
@@ -639,45 +669,45 @@ def dot_delegate(
     why: str,
     confirm: bool,
 ) -> None:
-    """Hand a job to a Hub Task with a full brief. Dot is woken when it ends.
+    """Hand a job to a Hub Task with a full brief. Dot is woken when it ends."""
+    try:
+        with cli_main.get_client(ctx) as client:
+            resolved_ws = resolve_workspace_id(client, workspace_id)
+            body: Dict[str, Any] = {
+                "workspace_id": resolved_ws,
+                "title": title,
+                "goal": goal,
+                "done_when": list(done_when),
+                "output": output,
+                "context": context,
+                "out_of_scope": out_of_scope,
+                "constraints": constraints,
+                "agent_type": agent_type,
+                "readonly": readonly,
+                "why": why,
+                "start": not no_start,
+                "confirm": confirm,
+            }
+            if task_mode:
+                body["task_mode"] = task_mode
+            if model:
+                body["model"] = model
+            if env_preset:
+                body["env_preset"] = env_preset
+            if recipe:
+                body["recipe"] = recipe
+            if demand_id:
+                body["demand_id"] = demand_id
+            if request_key:
+                body["request_key"] = request_key
+            if stall_hours is not None:
+                body["stall_hours"] = stall_hours
+            if session_id:
+                body["session_id"] = session_id
+            result = client.request("POST", "/api/dot/delegate", json=body)
+    except HubError as e:
+        raise click.ClickException(str(e)) from e
 
-    The Hub checks the brief first. Warnings hold the task (exit code 1); fix
-    the brief, or send again with --confirm.
-    """
-    body: Dict[str, Any] = {
-        "workspace_id": workspace_id,
-        "title": title,
-        "goal": goal,
-        "done_when": list(done_when),
-        "output": output,
-        "context": context,
-        "out_of_scope": out_of_scope,
-        "constraints": constraints,
-        "agent_type": agent_type,
-        "readonly": readonly,
-        "why": why,
-        "start": not no_start,
-        "confirm": confirm,
-    }
-    if task_mode:
-        body["task_mode"] = task_mode
-    if model:
-        body["model"] = model
-    if env_preset:
-        body["env_preset"] = env_preset
-    if recipe:
-        body["recipe"] = recipe
-    if demand_id:
-        body["demand_id"] = demand_id
-    if ephemeral is not None:
-        body["ephemeral"] = ephemeral
-    if request_key:
-        body["request_key"] = request_key
-    if stall_hours is not None:
-        body["stall_hours"] = stall_hours
-    if session_id:
-        body["session_id"] = session_id
-    result = _call(ctx, "POST", "/delegate", json=body)
     if cli_main.as_json(ctx):
         emit(result, True)
     else:

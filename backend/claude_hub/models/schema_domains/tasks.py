@@ -66,6 +66,9 @@ class WorkspaceTaskCreate(BaseModel):
     goal_packet: Optional[GoalPacket] = None
     review_profiles: List[ReviewProfile] = Field(default_factory=list)
     autonomy_policy: Optional[AutonomyPolicy] = None
+    model: Optional[str] = None
+    env_preset: Optional[str] = None
+    cwd: Optional[str] = None
     session_id: Optional[str] = None
     clear_context: Optional[bool] = None
     timeout_seconds: Optional[int] = None
@@ -74,6 +77,14 @@ class WorkspaceTaskCreate(BaseModel):
     # Explicit execution prerequisites, separate from supervision/session affinity.
     depends_on_task_ids: List[str] = Field(default_factory=list)
     agent_tag: Optional[str] = None
+
+    @field_validator("model", "env_preset", "cwd")
+    @classmethod
+    def _normalize_optional_task_strings(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        cleaned = value.strip()
+        return cleaned or None
 
     @field_validator("request_key")
     @classmethod
@@ -116,6 +127,8 @@ class WorkspaceTaskCreate(BaseModel):
         ):
             self.session_kind = SessionKind.CHAT
         validate_workspace_session_surface(self.agent_type, self.session_kind)
+        if self.auto_worktree is True and self.cwd is not None:
+            raise ValueError("Cannot combine auto_worktree=True with an explicit task cwd")
         return self
 
 
@@ -164,6 +177,10 @@ class WorkspaceTaskUpdate(BaseModel):
     removed_attachment_ids: Optional[List[str]] = None
     related_task_id: Optional[str] = None
     clear_context: Optional[bool] = None
+    agent_type: Optional[AgentType] = None
+    model: Optional[str] = None
+    env_preset: Optional[str] = None
+    cwd: Optional[str] = None
     session_id: Optional[str] = None
     parent_task_id: Optional[str] = None
     # Explicit execution prerequisites, separate from supervision/session affinity.
@@ -213,6 +230,9 @@ class WorkspaceTask(BaseModel):
     goal_packet: Optional[GoalPacket] = None
     review_profiles: List[ReviewProfile] = Field(default_factory=list)
     agent_type: AgentType
+    model: Optional[str] = None
+    env_preset: Optional[str] = None
+    cwd: Optional[str] = None
     session_kind: SessionKind = SessionKind.TERMINAL
     task_mode: WorkspaceTaskMode = WorkspaceTaskMode.REVIEWED
     recipe: WorkspaceTaskRecipe = WorkspaceTaskRecipe.STANDARD

@@ -179,7 +179,6 @@ class DotWorkService(DotSessionService, ABC):
         from ...maso_discovery import discover_maso_service
         from ...work_pipeline import (
             _resolve_canonical_git_repo_root,
-            provision_task_worktree,
             read_infowall_demand_summary,
         )
         from ...workspace_manager._task_execution import TaskExecutionConflict
@@ -258,7 +257,9 @@ class DotWorkService(DotSessionService, ABC):
             try:
                 await _resolve_canonical_git_repo_root(ws_obj.path)
             except RuntimeError:
-                from claude_hub.services.work_pipeline import is_confirmed_non_git_directory
+                from claude_hub.services.work_pipeline import (
+                    is_confirmed_non_git_directory,
+                )
 
                 if not await is_confirmed_non_git_directory(ws_obj.path):
                     raise
@@ -377,6 +378,10 @@ class DotWorkService(DotSessionService, ABC):
                 fields["infowall_demand_id"] = cleaned_demand_id
             if session_kind is not None:
                 fields["session_kind"] = session_kind
+            if model:
+                fields["model"] = model
+            if env_preset:
+                fields["env_preset"] = env_preset
             if auto_worktree:
                 # Dot's fast lane isolates work but never pushes on its own.
                 fields["auto_worktree"] = True
@@ -427,94 +432,49 @@ class DotWorkService(DotSessionService, ABC):
             )
             try:
                 if start and task.status.value == "todo":
-                    created_ephemeral_session_id: str | None = None
                     try:
                         target_session_id = session_id or getattr(task, "session_id", None)
-                        # Defensive hasattr: test doubles without agent provisioning
-                        # keep the plain start_task fallback instead of crashing.
-                        can_provision_chat = hasattr(workspace_manager, "ensure_workspace_agent")
-                        default_local_chat = (
-                            bool(use_ephemeral)
-                            and session_kind == SessionKind.CHAT
-                            and ws_obj is not None
-                            and getattr(ws_obj, "target", None) == ExecutionTarget.LOCAL
-                        )
                         if (
                             not target_session_id
-                            and can_provision_chat
-                            and (
-                                model
-                                or env_preset
-                                or ephemeral is not None
-                                or AgentType(agent_type) == AgentType.MASO
-                                or default_local_chat
-                            )
+                            and ephemeral is False
+                            and hasattr(workspace_manager, "ensure_workspace_agent")
                         ):
-                            provisioned_wt_path: str | None = None
-                            if (
-                                ws_obj is not None
-                                and getattr(task, "auto_worktree", False)
-                                and not getattr(task, "worktree_path", None)
-                            ):
-                                wt_path, _wt_branch = await provision_task_worktree(ws_obj, task)
-                                live_after_wt = getattr(workspace_manager, "tasks", {}).get(task.id)
-                                if live_after_wt is not None:
-                                    if live_after_wt.status.value != "todo":
-                                        raise RuntimeError(
-                                            f"Task {task.id} changed to {live_after_wt.status.value} before start"
-                                        )
-                                    task = live_after_wt
-                                if getattr(task, "auto_worktree", False):
-                                    provisioned_wt_path = wt_path
-                            agent_env: dict[str, str] = {}
                             parsed_agent = AgentType(agent_type)
+                            agent_env: dict[str, str] = {}
                             if parsed_agent == AgentType.MASO:
-                                base_url, _models, _default = await discover_maso_service(agent_env)
+                                (
+                                    base_url,
+                                    _models,
+                                    _default,
+                                ) = await discover_maso_service(agent_env)
                                 agent_env["MASO_BASE_URL"] = base_url
                             if model:
                                 spec = get_spec(parsed_agent)
                                 if spec.model_env_key:
                                     agent_env[spec.model_env_key] = model.strip()
-                            # Outer scope already defaulted local Chat to ephemeral;
-                            # here the explicit-trigger paths (model/preset/maso)
-                            # get the same default when nothing was requested.
-                            use_ephemeral = True if use_ephemeral is None else bool(use_ephemeral)
-                            live_before_agent = getattr(workspace_manager, "tasks", {}).get(task.id)
-                            if live_before_agent is not None:
-                                if live_before_agent.status.value != "todo":
-                                    raise RuntimeError(
-                                        f"Task {task.id} changed to {live_before_agent.status.value} before start"
-                                    )
-                                task = live_before_agent
-                            target_cwd = (
-                                provisioned_wt_path
-                                if getattr(task, "auto_worktree", False) and provisioned_wt_path
-                                else getattr(task, "worktree_path", None)
-                                or (ws_obj.path if ws_obj is not None else None)
-                            )
-                            created_session = await workspace_manager.ensure_workspace_agent(
+                            reused_session = await workspace_manager.ensure_workspace_agent(
                                 workspace_id,
                                 EnsureWorkspaceAgentRequest(
                                     agent_type=parsed_agent,
                                     session_kind=session_kind or SessionKind.CHAT,
                                     role=WorkspaceSessionRole.ORCHESTRATOR,
-                                    reuse_existing=not use_ephemeral,
-                                    ephemeral=use_ephemeral,
-                                    caller_owned_ephemeral=use_ephemeral,
-                                    cwd=target_cwd,
+                                    reuse_existing=True,
+                                    ephemeral=False,
+                                    caller_owned_ephemeral=False,
+                                    cwd=ws_obj.path if ws_obj is not None else None,
                                     env=agent_env,
                                     env_preset=env_preset,
                                 ),
                             )
-                            if use_ephemeral:
-                                created_ephemeral_session_id = created_session.id
-                            target_session_id = created_session.id
+                            target_session_id = reused_session.id
 
                         task = await workspace_manager.start_task(
                             task.id,
                             StartTaskRequest(
                                 agent_type=AgentType(agent_type),
                                 target_session_id=target_session_id,
+                                model=model,
+                                env_preset=env_preset,
                             ),
                         )
                     except TaskExecutionConflict:
@@ -523,28 +483,6 @@ class DotWorkService(DotSessionService, ABC):
                         raise DelegateNotStarted(
                             f"Task {task.id} was created but did not start: {exc}"
                         ) from exc
-                    finally:
-                        if created_ephemeral_session_id is not None:
-                            live_task = getattr(workspace_manager, "tasks", {}).get(task.id)
-                            live_session_id = (
-                                getattr(live_task, "session_id", None)
-                                if live_task is not None
-                                else getattr(task, "session_id", None)
-                            )
-                            if live_session_id != created_ephemeral_session_id:
-                                if hasattr(workspace_manager, "_best_effort_delete_session"):
-                                    await asyncio.shield(
-                                        workspace_manager._best_effort_delete_session(
-                                            created_ephemeral_session_id
-                                        )
-                                    )
-                                elif hasattr(workspace_manager, "delete_session"):
-                                    with contextlib.suppress(Exception):
-                                        await asyncio.shield(
-                                            workspace_manager.delete_session(
-                                                created_ephemeral_session_id
-                                            )
-                                        )
                     # Outside the "did not start" net: it did start, whatever this write does.
                     if not replay:
                         item = self.store.upsert_work(task.id, status=task.status.value)
@@ -937,7 +875,10 @@ class DotWorkService(DotSessionService, ABC):
                 value = getattr(final_review, attr, None)
                 if value:
                     lines += ["", f"### {label}", _clip_text(str(value))]
-            lines += ["", "Only the user can authorize acceptance; do not accept automatically."]
+            lines += [
+                "",
+                "Only the user can authorize acceptance; do not accept automatically.",
+            ]
         card = Card(
             id=str(item.get("result_card") or ""),
             kind="work",

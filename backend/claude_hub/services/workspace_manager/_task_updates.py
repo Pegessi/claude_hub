@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from typing import Literal
 
 from claude_hub.models import GoalPacket
+from claude_hub.models.schemas import validate_workspace_session_surface
+from claude_hub.services import workspace_identity
 from claude_hub.services.task_transitions import apply_task_update
 
 from ..local_storage import read_document
@@ -57,6 +59,10 @@ class _TaskUpdatesMixin(_WorkspaceManagerBase):
                 payload.auto_worktree is not None,
                 payload.auto_push_remote is not None,
                 "agent_tag" in payload.model_fields_set,
+                payload.agent_type is not None,
+                "model" in payload.model_fields_set,
+                "env_preset" in payload.model_fields_set,
+                "cwd" in payload.model_fields_set,
             ]
         )
 
@@ -135,33 +141,45 @@ class _TaskUpdatesMixin(_WorkspaceManagerBase):
                 update["session_id"] = payload.session_id
             else:
                 update["session_id"] = None
-        if payload.session_kind is not None:
-            if payload.session_kind == SessionKind.CHAT or task.agent_type in {
-                AgentType.MASO,
-                AgentType.ANTIGRAVITY,
-            }:
-                EnsureWorkspaceAgentRequest(
-                    agent_type=task.agent_type, session_kind=payload.session_kind
-                )
-            update["session_kind"] = payload.session_kind
+        effective_agent_type = payload.agent_type or task.agent_type
+        if payload.agent_type is not None:
+            update["agent_type"] = payload.agent_type
         selected_session_id = update.get("session_id", task.session_id)
         selected_session = self.sessions.get(selected_session_id) if selected_session_id else None
-        if selected_session is not None and (
-            payload.session_kind is not None or payload.session_id is not None
+        if payload.session_kind is not None:
+            update["session_kind"] = payload.session_kind
+        elif payload.session_id and selected_session is not None:
+            update["session_kind"] = selected_session.session_kind
+        elif (
+            selected_session is None
+            and payload.agent_type is not None
+            and effective_agent_type in {AgentType.MASO, AgentType.ANTIGRAVITY}
         ):
-            if payload.session_kind is None and payload.session_id:
-                update["session_kind"] = selected_session.session_kind
-            elif selected_session.session_kind != update.get("session_kind", task.session_kind):
+            update["session_kind"] = SessionKind.CHAT
+        if selected_session is not None and (
+            payload.session_kind is not None
+            or payload.session_id is not None
+            or payload.agent_type is not None
+        ):
+            if (
+                payload.agent_type is not None
+                and selected_session.agent_type != effective_agent_type
+            ):
+                raise ValueError("The selected agent does not match the Task provider")
+            if selected_session.session_kind != update.get("session_kind", task.session_kind):
                 raise ValueError("The selected agent does not match the Task execution surface")
         if "agent_tag" in payload.model_fields_set:
             update["agent_tag"] = payload.agent_tag
         if "infowall_demand_id" in payload.model_fields_set:
             update["infowall_demand_id"] = (payload.infowall_demand_id or "").strip() or None
+        planned_cwd = (
+            ((payload.cwd or "").strip() or None) if "cwd" in payload.model_fields_set else task.cwd
+        )
         if payload.recipe is not None:
             update["recipe"] = payload.recipe
             if payload.recipe == WorkspaceTaskRecipe.SPEC_IMPLEMENT_REVIEW:
                 if payload.auto_worktree is None:
-                    update["auto_worktree"] = True
+                    update["auto_worktree"] = False if planned_cwd is not None else True
                 if payload.auto_push_remote is None:
                     update["auto_push_remote"] = bool(task.auto_push_remote)
             elif payload.recipe == WorkspaceTaskRecipe.TRIAGE_DIAGNOSE:
@@ -171,8 +189,8 @@ class _TaskUpdatesMixin(_WorkspaceManagerBase):
                     update["autonomous_run"] = None
                 if (
                     payload.session_kind is None
-                    and not (payload.session_id or task.session_id)
-                    and task.agent_type
+                    and not selected_session_id
+                    and effective_agent_type
                     in {
                         AgentType.CLAUDE,
                         AgentType.CODEX,
@@ -182,10 +200,40 @@ class _TaskUpdatesMixin(_WorkspaceManagerBase):
                     }
                 ):
                     update["session_kind"] = SessionKind.CHAT
+        if (
+            payload.agent_type is not None
+            or payload.session_kind is not None
+            or "session_kind" in update
+        ):
+            validate_workspace_session_surface(
+                effective_agent_type, update.get("session_kind", task.session_kind)
+            )
         if payload.auto_worktree is not None:
             update["auto_worktree"] = payload.auto_worktree
         if payload.auto_push_remote is not None:
             update["auto_push_remote"] = payload.auto_push_remote
+        if "model" in payload.model_fields_set:
+            update["model"] = (payload.model or "").strip() or None
+        if "env_preset" in payload.model_fields_set:
+            update["env_preset"] = (payload.env_preset or "").strip() or None
+        if "cwd" in payload.model_fields_set:
+            next_cwd = (payload.cwd or "").strip() or None
+            if next_cwd is not None:
+                workspace = self.workspaces.get(task.workspace_id)
+                if workspace is not None and workspace.target == ExecutionTarget.LOCAL:
+                    workspace_identity.reject_relative_local_path(next_cwd, field="cwd")
+                    try:
+                        workspace_identity.validate_local_agent_cwd_for_workspace(
+                            workspace.path, next_cwd
+                        )
+                    except workspace_identity.InvalidLocalAgentCwdError as exc:
+                        raise ValueError(str(exc)) from None
+                    next_cwd = str(Path(next_cwd).expanduser().resolve())
+            update["cwd"] = next_cwd
+        effective_auto_wt = update.get("auto_worktree", task.auto_worktree)
+        effective_cwd = update.get("cwd", task.cwd)
+        if effective_auto_wt and effective_cwd:
+            raise ValueError("Cannot combine auto_worktree=True with an explicit task cwd")
         contract_fields_touched = bool(
             {"goal", "done_when", "out_of_scope"} & payload.model_fields_set
         )
@@ -411,7 +459,10 @@ class _TaskUpdatesMixin(_WorkspaceManagerBase):
                             w_sess is not None
                             and w_sess.ephemeral
                             and w_sess.role
-                            in {WorkspaceSessionRole.ORCHESTRATOR, WorkspaceSessionRole.WORKER}
+                            in {
+                                WorkspaceSessionRole.ORCHESTRATOR,
+                                WorkspaceSessionRole.WORKER,
+                            }
                             and self.workspaces[current.workspace_id].resident_agent_session_id
                             != w_sess.id
                             and not any(
@@ -422,7 +473,11 @@ class _TaskUpdatesMixin(_WorkspaceManagerBase):
                                 for other in self.tasks.values()
                             )
                         ):
-                            worker_incarnation = (w_sess.id, w_sess.tab_id, w_sess.created_at)
+                            worker_incarnation = (
+                                w_sess.id,
+                                w_sess.tab_id,
+                                w_sess.created_at,
+                            )
                     if current.review_session_id:
                         r_sess = self.sessions.get(current.review_session_id)
                         cutoff_at = (
@@ -440,7 +495,11 @@ class _TaskUpdatesMixin(_WorkspaceManagerBase):
                             and r_sess.current_task_id in {None, current.id}
                             and (cutoff_at is None or r_sess.created_at <= cutoff_at)
                         ):
-                            reviewer_incarnation = (r_sess.id, r_sess.tab_id, r_sess.created_at)
+                            reviewer_incarnation = (
+                                r_sess.id,
+                                r_sess.tab_id,
+                                r_sess.created_at,
+                            )
                     self._release_task_session(current)
                     reviewer_tabs = await self._cleanup_reviewer_for_terminal_task(
                         current, updated_at=now, delete_tabs=False
@@ -535,7 +594,9 @@ class _TaskUpdatesMixin(_WorkspaceManagerBase):
                         now=now,
                     )
                 if current.infowall_demand_id:
-                    from claude_hub.services.work_pipeline import sync_task_progress_to_infowall
+                    from claude_hub.services.work_pipeline import (
+                        sync_task_progress_to_infowall,
+                    )
 
                     summary_text = self._task_record_final_summary(
                         [

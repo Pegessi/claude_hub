@@ -375,7 +375,7 @@ list and odd numbers are skipped, not fatal.
 
 ## Interfaces
 
-- CLI: `claude-hub dot status|recall|remember|forget|show|focus|work|delegate|review|lessons|watch|unwatch|inbox|identity|rotate|health|setup`
+- CLI: `claude-hub dot status|cards|remember|forget|show|focus|work|delegate|review|lessons|patrol|scout|watch|unwatch|inbox|identity|rotate|health|setup`
 - REST: `/api/dot/*`
 - UI: Dot button in the header opens the Dot Chat; the Dot panel shows focus,
   work, lessons, memory and health. On phones the button sits in the tab bar and the panel is a

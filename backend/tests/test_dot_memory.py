@@ -230,7 +230,7 @@ def test_session_pack_has_role_tools_profile_and_concepts(store: DotStore) -> No
     store.save_card(_card("knowledge", "Not in session pack", "detail"))
     pack = build_session_pack(store)
     assert "You are Dot" in pack
-    assert "claude-hub dot recall" in pack
+    assert "claude-hub dot show|remember|forget|cards|" in pack
     assert "Prefers simple words" in pack and "Clean mind" in pack
     assert "Not in session pack" not in pack
 

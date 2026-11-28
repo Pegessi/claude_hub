@@ -3124,9 +3124,9 @@ def test_cli_schedule_enable_disable_and_run(monkeypatch: MonkeyPatch) -> None:
     _patch_get_client(monkeypatch, handler)
     runner = CliRunner()
 
-    result = runner.invoke(cli, ["schedule", "enable", "st-1"])
+    result = runner.invoke(cli, ["schedule", "update", "st-1", "--enabled"])
     assert result.exit_code == 0, result.output
-    result = runner.invoke(cli, ["schedule", "disable", "st-1"])
+    result = runner.invoke(cli, ["schedule", "update", "st-1", "--disabled"])
     assert result.exit_code == 0, result.output
     result = runner.invoke(cli, ["schedule", "run", "st-1"])
     assert result.exit_code == 0, result.output

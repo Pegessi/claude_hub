@@ -18,7 +18,7 @@ resident agents, sending follow-up instructions, and reviewing progress reports.
 - Dispatch tasks to a specific agent or let the workspace choose the available agent.
 - Use the Task Graph / TaskMailbox ([docs/TASK_GRAPH.md](docs/TASK_GRAPH.md)) so
   parent Tasks wait/ACK subtree events on `task:<task_id>` cursors
-  (`claude-hub task tree/events/wait/ack/followup/start`). Worker and reviewer
+  (`claude-hub task list --tree / events [--wait] / ack / followup / start / run`). Worker and reviewer
   agents are ordinary Task session assignments; the optional Resident is an
   independent long-running agent (not a mailbox consumer).
 - Track task state across Todo, Queued, Working, Review, and Done columns.
@@ -180,32 +180,35 @@ Common commands (add `--json` to any for machine-readable output):
 
 ```bash
 uv run claude-hub workspace list
-uv run claude-hub workspace create --name demo --path /path/to/repo
-uv run claude-hub workspace board <WORKSPACE_ID>            # alias: status
-uv run claude-hub workspace summary <WORKSPACE_ID>          # typed board summary
-uv run claude-hub workspace docs <WORKSPACE_ID>             # Markdown docs + snapshot path
-uv run claude-hub task list <WORKSPACE_ID>
-uv run claude-hub task create <WORKSPACE_ID> --title "Fix bug" --prompt "..."
-uv run claude-hub task status <TASK_ID> --workspace-id <WORKSPACE_ID>
+uv run claude-hub workspace ensure --name demo --path /path/to/repo
+uv run claude-hub workspace status [WORKSPACE_ID]           # concise typed summary (cwd auto-match)
+uv run claude-hub workspace status [WORKSPACE_ID] --full    # full board + task lifecycles
+uv run claude-hub task list [WORKSPACE_ID]
+uv run claude-hub task run [WORKSPACE_ID] --title "Fix bug" --goal "..." --done-when "pytest green"
+uv run claude-hub task create [WORKSPACE_ID] --title "Fix bug" --prompt "..."
+uv run claude-hub task status <TASK_ID>                     # O(1) status; --reports N / --brief
 uv run claude-hub task start <TASK_ID>
-uv run claude-hub task send <WORKSPACE_ID> <TASK_ID> --message "also add a test"
+uv run claude-hub task followup <TASK_ID> --message "also add a test"
 uv run claude-hub task continue <TASK_ID> --message "keep going"
 uv run claude-hub task abort <TASK_ID> --reason "superseded"
-uv run claude-hub agent list <WORKSPACE_ID>
-uv run claude-hub agent status <WORKSPACE_ID>
-uv run claude-hub agent create <WORKSPACE_ID> --agent-type claude
+uv run claude-hub session list [WORKSPACE_ID]
+uv run claude-hub session create [WORKSPACE_ID] --agent-type claude --cwd .
 uv run claude-hub session status <SESSION_ID>
+uv run claude-hub session logs <SESSION_ID> --lines 100
 uv run claude-hub session send <SESSION_ID> --message "continue"
 uv run claude-hub session report <SESSION_ID> --state working --message "..."
-uv run claude-hub lessons list <WORKSPACE_ID> --query terminal
-uv run claude-hub lessons get <WORKSPACE_ID> <LESSON_ID>
+uv run claude-hub agent run --provider codex --solo --prompt "Review HEAD"
+uv run claude-hub agent list
+uv run claude-hub lessons context [WORKSPACE_ID] --query "terminal"
+uv run claude-hub lessons list [WORKSPACE_ID] --query terminal
+uv run claude-hub lessons get <LESSON_ID>
 uv run claude-hub quota                                     # Codex/MASO remaining quota
 uv run claude-hub quota --refresh                           # bypass the cached reading
-uv run claude-hub --json task tree <WORKSPACE_ID> [<PARENT_TASK_ID>]
-uv run claude-hub --json task events <WORKSPACE_ID> <TASK_ID> --subtree --since-sequence 0
-uv run claude-hub --json task wait <WORKSPACE_ID> <TASK_ID> --subtree --since-sequence 0
-uv run claude-hub --json task ack <WORKSPACE_ID> <TASK_ID> <SEQUENCE>
-uv run claude-hub --json task followup <WORKSPACE_ID> <TASK_ID> --message "..."
+uv run claude-hub --json task list [WORKSPACE_ID] --tree [--root <PARENT_TASK_ID>]
+uv run claude-hub --json task events <TASK_ID> --subtree --since-sequence 0
+uv run claude-hub --json task events <TASK_ID> --wait --subtree --since-sequence 0
+uv run claude-hub --json task ack <TASK_ID> <SEQUENCE>
+uv run claude-hub --json task followup <TASK_ID> --message "..."
 ```
 
 Loopback requests bypass auth, so a local backend needs no token; commands exit

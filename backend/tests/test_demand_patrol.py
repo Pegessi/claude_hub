@@ -417,17 +417,17 @@ async def test_rest_status_partial_config_run_and_auth(
 @pytest.mark.parametrize(
     "args,method,path,payload",
     [
-        (["patrol", "status"], "GET", "/api/patrol/status", None),
+        (["dot", "patrol"], "GET", "/api/dot/patrol", None),
         (
-            ["patrol", "run", "--channel", "daily", "--dry-run", "--no-notify"],
+            ["dot", "patrol", "--run", "--channel", "daily", "--dry-run", "--no-notify"],
             "POST",
             "/api/patrol/run",
             {"channel": "daily", "dry_run": True, "notify": False},
         ),
         (
             [
+                "dot",
                 "patrol",
-                "config",
                 "--enable",
                 "--daily",
                 "--daily-slot",
@@ -437,8 +437,8 @@ async def test_rest_status_partial_config_run_and_auth(
                 "--workspace-id",
                 "ws-patrol",
             ],
-            "PUT",
-            "/api/patrol/config",
+            "PATCH",
+            "/api/dot/patrol",
             {
                 "enabled": True,
                 "daily_enabled": True,
@@ -446,7 +446,6 @@ async def test_rest_status_partial_config_run_and_auth(
                 "workspace_id": "ws-patrol",
             },
         ),
-        (["dot", "patrol"], "GET", "/api/dot/patrol", None),
         (
             ["dot", "patrol", "--realtime"],
             "PATCH",

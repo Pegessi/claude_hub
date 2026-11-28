@@ -1,7 +1,8 @@
-"""CLI groups for non-workspace REST APIs and the generic API escape hatch."""
+"""CLI groups for standalone tabs, quota, remote profiles, auth, and raw API."""
 
 from __future__ import annotations
 
+import json
 import uuid
 from typing import Any, Dict, Optional, TextIO
 
@@ -10,6 +11,7 @@ import click
 from claude_hub.cli import main as cli_main
 from claude_hub.cli.client import HubError
 from claude_hub.cli.commands.common import (
+    fetch_chat_stream_tail_lines,
     merge_payload,
     parse_json_object,
     parse_kv_pairs,
@@ -68,7 +70,13 @@ def auth_login_url(ctx: click.Context) -> None:
             response = client.auth_login_response()
     except HubError as e:
         raise click.ClickException(str(e)) from e
-    emit({"status_code": response.status_code, "location": response.headers.get("location")}, True)
+    emit(
+        {
+            "status_code": response.status_code,
+            "location": response.headers.get("location"),
+        },
+        True,
+    )
 
 
 @auth.command("callback")
@@ -82,24 +90,13 @@ def auth_callback(ctx: click.Context, code: str, state: str) -> None:
             response = client.auth_callback_response(code, state)
     except HubError as e:
         raise click.ClickException(str(e)) from e
-    emit({"status_code": response.status_code, "location": response.headers.get("location")}, True)
-
-
-@click.group()
-def system() -> None:
-    """Use system endpoints."""
-
-
-@system.command("network-access")
-@click.pass_context
-def system_network_access(ctx: click.Context) -> None:
-    """Show local network addresses suitable for browser access."""
-    try:
-        with cli_main.get_client(ctx) as client:
-            data = client.get_network_access()
-    except HubError as e:
-        raise click.ClickException(str(e)) from e
-    emit(data, cli_main.as_json(ctx))
+    emit(
+        {
+            "status_code": response.status_code,
+            "location": response.headers.get("location"),
+        },
+        True,
+    )
 
 
 QUOTA_LIMIT_COLUMNS = ["scope", "label", "state", "used", "remaining", "resets_at"]
@@ -117,7 +114,6 @@ def _quota_limit_rows(provider: Dict[str, Any]) -> list[Dict[str, Any]]:
                 "scope": limit.get("scope", ""),
                 "label": limit.get("label", ""),
                 "state": limit.get("state", ""),
-                # A percentage is absent whenever the provider withheld it.
                 "used": "-" if limit.get("used_percent") is None else limit["used_percent"],
                 "remaining": (
                     "-" if limit.get("remaining_percent") is None else limit["remaining_percent"]
@@ -131,7 +127,6 @@ def _quota_limit_rows(provider: Dict[str, Any]) -> list[Dict[str, Any]]:
 def _echo_provider_quota(provider: Dict[str, Any]) -> None:
     """Print one provider's heading, notes and limit table."""
     details = [
-        # Booleans render JSON-style so the text and --json views agree.
         f"{key}={str(provider[key]).lower() if isinstance(provider[key], bool) else provider[key]}"
         for key in ("plan", "credit_balance", "enforcing", "as_of")
         if provider.get(key) is not None
@@ -174,19 +169,29 @@ def quota(ctx: click.Context, refresh: bool) -> None:
 
 @click.group()
 def tab() -> None:
-    """Manage terminal tabs."""
+    """Manage standalone interactive Chat and Terminal tabs."""
 
 
 TAB_COLUMNS = ["id", "name", "session_kind", "agent_type", "target", "cwd", "is_active"]
+TAB_AGENT_TYPES = [
+    "claude",
+    "codex",
+    "traex",
+    "maso",
+    "cursor",
+    "antigravity",
+    "terminal",
+]
 
 
 @tab.command("list")
+@click.option("--archived", is_flag=True, default=False, help="List archived tabs instead.")
 @click.pass_context
-def tab_list(ctx: click.Context) -> None:
-    """List terminal tabs."""
+def tab_list(ctx: click.Context, archived: bool) -> None:
+    """List standalone Chat and Terminal tabs."""
     try:
         with cli_main.get_client(ctx) as client:
-            data = client.list_tabs()
+            data = client.list_archived_tabs() if archived else client.list_tabs()
     except HubError as e:
         raise click.ClickException(str(e)) from e
     if cli_main.as_json(ctx):
@@ -198,7 +203,7 @@ def tab_list(ctx: click.Context) -> None:
 @tab.command("status")
 @click.pass_context
 def tab_status(ctx: click.Context) -> None:
-    """List best-effort terminal agent statuses."""
+    """List best-effort tab runtime statuses."""
     try:
         with cli_main.get_client(ctx) as client:
             data = client.list_tab_statuses()
@@ -250,7 +255,7 @@ def _tab_body(
 @click.option("--solo-mode/--no-solo-mode", default=False, help="Run in agent solo mode.")
 @click.option(
     "--agent-type",
-    type=click.Choice(["claude", "codex", "traex", "cursor", "antigravity", "terminal"]),
+    type=click.Choice(TAB_AGENT_TYPES),
     default="claude",
     help="Agent type.",
 )
@@ -275,19 +280,19 @@ def _tab_body(
 def tab_create(
     ctx: click.Context,
     name: str,
-    shell: str,
-    cwd: str,
+    shell: Optional[str],
+    cwd: Optional[str],
     solo_mode: bool,
     agent_type: str,
     session_kind: str,
     target: str,
-    remote_profile_id: str,
-    remote_cwd: str,
-    remote_reconnect: bool,
+    remote_profile_id: Optional[str],
+    remote_cwd: Optional[str],
+    remote_reconnect: Optional[bool],
     env_values: tuple,
-    payload_json: str,
+    payload_json: Optional[str],
 ) -> None:
-    """Create a terminal tab."""
+    """Create a standalone Chat or Terminal tab."""
     body = _tab_body(
         payload_json,
         name=name,
@@ -323,6 +328,73 @@ def tab_get(ctx: click.Context, tab_id: str) -> None:
     emit(data, cli_main.as_json(ctx))
 
 
+@tab.command("logs")
+@click.argument("tab_id")
+@click.option(
+    "-n",
+    "--lines",
+    type=int,
+    default=100,
+    show_default=True,
+    help="Trailing lines to show.",
+)
+@click.pass_context
+def tab_logs(ctx: click.Context, tab_id: str, lines: int) -> None:
+    """Show captured terminal output or Chat conversation history for a tab."""
+    if lines < 1:
+        raise click.ClickException("--lines must be >= 1.")
+    try:
+        with cli_main.get_client(ctx) as client:
+            tab_info: Optional[Dict[str, Any]] = None
+            try:
+                fetched = client.get_tab(tab_id)
+                if isinstance(fetched, dict):
+                    tab_info = fetched
+            except HubError as e:
+                if e.status != 404:
+                    raise
+                archived = client.list_archived_tabs()
+                if isinstance(archived, list):
+                    tab_info = next(
+                        (
+                            item
+                            for item in archived
+                            if isinstance(item, dict) and item.get("id") == tab_id
+                        ),
+                        None,
+                    )
+            kind = str((tab_info or {}).get("session_kind") or "terminal")
+            if kind == "chat":
+                managed_sid = (tab_info or {}).get("managed_session_id")
+
+                def _fetch_stream(params: Dict[str, Any]) -> Any:
+                    if isinstance(managed_sid, str) and managed_sid:
+                        return client.get_session_stream_events(managed_sid, params=params)
+                    return client.get_tab_stream_events(tab_id, params=params)
+
+                tail = "\n".join(
+                    fetch_chat_stream_tail_lines(
+                        _fetch_stream,
+                        lines=lines,
+                        persisted_only=bool((tab_info or {}).get("archived")),
+                    )
+                )
+            else:
+                data = client.get_terminal_history(tab_id, lines=max(lines, 100))
+                history = data.get("history", "") if isinstance(data, dict) else ""
+                tail = "\n".join(history.splitlines()[-lines:])
+    except HubError as e:
+        raise click.ClickException(str(e)) from e
+
+    if cli_main.as_json(ctx):
+        emit(
+            {"tab_id": tab_id, "session_kind": kind, "lines": lines, "history": tail},
+            True,
+        )
+    else:
+        click.echo(tail)
+
+
 @tab.command("message")
 @click.argument("tab_id")
 @click.option("--message", default=None, help="Text to enqueue as an ordinary user turn.")
@@ -343,11 +415,7 @@ def tab_message(
     call_id: Optional[str],
     source_tab_id: Optional[str],
 ) -> None:
-    """Durably enqueue text. A receipt is not model completion.
-
-    Reuse the printed call_id and identical text when retrying a failed request.
-    Delivery waits for the target's current turn and Goal ownership to clear.
-    """
+    """Durably enqueue text. A receipt is not model completion."""
     if (message is None) == (message_file is None):
         raise click.UsageError("Provide exactly one of --message or --message-file.")
     if message_file is not None:
@@ -367,7 +435,6 @@ def tab_message(
     body: Dict[str, Any] = {"message": message, "call_id": effective_call_id}
     if source_tab_id is not None:
         body["source_tab_id"] = source_tab_id
-    # Emit before creating a client: even transport failure must preserve retry identity.
     click.echo(f"call_id={effective_call_id}", err=True)
     try:
         with cli_main.get_client(ctx) as client:
@@ -413,7 +480,7 @@ def tab_message_cancel(ctx: click.Context, tab_id: str, message_id: str) -> None
 @click.option("--solo-mode/--no-solo-mode", default=None, help="Run in agent solo mode.")
 @click.option(
     "--agent-type",
-    type=click.Choice(["claude", "codex", "traex", "cursor", "antigravity", "terminal"]),
+    type=click.Choice(TAB_AGENT_TYPES),
     default=None,
     help="Agent type.",
 )
@@ -432,19 +499,19 @@ def tab_message_cancel(ctx: click.Context, tab_id: str, message_id: str) -> None
 def tab_update(
     ctx: click.Context,
     tab_id: str,
-    name: str,
-    shell: str,
-    cwd: str,
+    name: Optional[str],
+    shell: Optional[str],
+    cwd: Optional[str],
     solo_mode: Optional[bool],
-    agent_type: str,
-    target: str,
-    remote_profile_id: str,
-    remote_cwd: str,
+    agent_type: Optional[str],
+    target: Optional[str],
+    remote_profile_id: Optional[str],
+    remote_cwd: Optional[str],
     remote_reconnect: Optional[bool],
     env_values: tuple,
-    payload_json: str,
+    payload_json: Optional[str],
 ) -> None:
-    """Update a terminal tab."""
+    """Update a standalone tab."""
     body = _tab_body(
         payload_json,
         name=name,
@@ -466,192 +533,52 @@ def tab_update(
     emit(data, cli_main.as_json(ctx))
 
 
+@tab.command("archive")
+@click.argument("tab_id")
+@click.pass_context
+def tab_archive(ctx: click.Context, tab_id: str) -> None:
+    """Archive a standalone tab: stop its runtime while preserving history."""
+    try:
+        with cli_main.get_client(ctx) as client:
+            data = client.archive_tab(tab_id)
+    except HubError as e:
+        raise click.ClickException(str(e)) from e
+    if cli_main.as_json(ctx):
+        emit(data, True)
+    else:
+        click.echo(f"archived {tab_id}")
+
+
+@tab.command("unarchive")
+@click.argument("tab_id")
+@click.pass_context
+def tab_unarchive(ctx: click.Context, tab_id: str) -> None:
+    """Restore an archived standalone tab and best-effort restart its runtime."""
+    try:
+        with cli_main.get_client(ctx) as client:
+            data = client.unarchive_tab(tab_id)
+    except HubError as e:
+        raise click.ClickException(str(e)) from e
+    if cli_main.as_json(ctx):
+        emit(data, True)
+    else:
+        click.echo(f"unarchived {tab_id}")
+
+
 @tab.command("delete")
 @click.argument("tab_id")
 @click.pass_context
 def tab_delete(ctx: click.Context, tab_id: str) -> None:
-    """Delete a terminal tab."""
+    """Permanently delete a standalone tab."""
     try:
         with cli_main.get_client(ctx) as client:
             client.delete_tab(tab_id)
     except HubError as e:
         raise click.ClickException(str(e)) from e
-    click.echo(f"deleted {tab_id}")
-
-
-@tab.command("duplicate")
-@click.argument("tab_id")
-@click.pass_context
-def tab_duplicate(ctx: click.Context, tab_id: str) -> None:
-    """Duplicate a terminal tab."""
-    try:
-        with cli_main.get_client(ctx) as client:
-            data = client.duplicate_tab(tab_id)
-    except HubError as e:
-        raise click.ClickException(str(e)) from e
-    emit(data, cli_main.as_json(ctx))
-
-
-@tab.command("order")
-@click.argument("tab_ids", nargs=-1, required=True)
-@click.pass_context
-def tab_order(ctx: click.Context, tab_ids: tuple) -> None:
-    """Set terminal tab order."""
-    try:
-        with cli_main.get_client(ctx) as client:
-            data = client.update_tab_order(list(tab_ids))
-    except HubError as e:
-        raise click.ClickException(str(e)) from e
-    emit(data, cli_main.as_json(ctx))
-
-
-@click.group(name="filesystem")
-def filesystem() -> None:
-    """Browse local filesystem endpoints."""
-
-
-@filesystem.command("list")
-@click.option("--path", default=None, help="Directory path.")
-@click.pass_context
-def filesystem_list(ctx: click.Context, path: str) -> None:
-    """List a local directory."""
-    try:
-        with cli_main.get_client(ctx) as client:
-            data = client.list_directory(path)
-    except HubError as e:
-        raise click.ClickException(str(e)) from e
-    emit(data, cli_main.as_json(ctx))
-
-
-@filesystem.command("home")
-@click.pass_context
-def filesystem_home(ctx: click.Context) -> None:
-    """Print the server user's home directory."""
-    try:
-        with cli_main.get_client(ctx) as client:
-            data = client.get_home_directory()
-    except HubError as e:
-        raise click.ClickException(str(e)) from e
-    emit(data, cli_main.as_json(ctx))
-
-
-@click.group()
-def remote() -> None:
-    """Use remote profile and remote filesystem endpoints."""
-
-
-@remote.command("profiles")
-@click.pass_context
-def remote_profiles(ctx: click.Context) -> None:
-    """List configured/discovered remote profiles."""
-    try:
-        with cli_main.get_client(ctx) as client:
-            data = client.list_remote_profiles()
-    except HubError as e:
-        raise click.ClickException(str(e)) from e
-    emit(data, cli_main.as_json(ctx))
-
-
-@remote.command("list")
-@click.option("--profile-id", required=True, help="Remote profile id.")
-@click.option("--path", default=None, help="Remote directory path.")
-@click.pass_context
-def remote_list(ctx: click.Context, profile_id: str, path: str) -> None:
-    """List a remote directory."""
-    try:
-        with cli_main.get_client(ctx) as client:
-            data = client.list_remote_directory(profile_id, path)
-    except HubError as e:
-        raise click.ClickException(str(e)) from e
-    emit(data, cli_main.as_json(ctx))
-
-
-@click.group()
-def clipboard() -> None:
-    """Use clipboard endpoints."""
-
-
-@clipboard.command("image")
-@click.argument("path", type=click.Path(exists=True, dir_okay=False))
-@click.option("--content-type", default=None, help="Image content type override.")
-@click.pass_context
-def clipboard_image(ctx: click.Context, path: str, content_type: str) -> None:
-    """Upload an image and set the macOS clipboard."""
-    try:
-        with cli_main.get_client(ctx) as client:
-            data = client.upload_clipboard_image(path, content_type=content_type)
-    except HubError as e:
-        raise click.ClickException(str(e)) from e
-    emit(data, cli_main.as_json(ctx))
-
-
-@click.group()
-def terminal() -> None:
-    """Use terminal endpoints."""
-
-
-@terminal.command("history")
-@click.argument("tab_id")
-@click.option("--lines", type=int, default=100, help="History lines.")
-@click.pass_context
-def terminal_history(ctx: click.Context, tab_id: str, lines: int) -> None:
-    """Fetch captured terminal history."""
-    try:
-        with cli_main.get_client(ctx) as client:
-            data = client.get_terminal_history(tab_id, lines=lines)
-    except HubError as e:
-        raise click.ClickException(str(e)) from e
-    emit(data, cli_main.as_json(ctx))
-
-
-@terminal.command("proxy-url")
-@click.argument("tab_id")
-@click.option("--iframe", is_flag=True, default=False, help="Print the iframe redirect URL.")
-def terminal_proxy_url(tab_id: str, iframe: bool) -> None:
-    """Print the terminal proxy URL path."""
-    if iframe:
-        click.echo(f"/api/terminal/proxy-iframe/{tab_id}")
+    if cli_main.as_json(ctx):
+        emit({"ok": True, "tab_id": tab_id}, True)
     else:
-        click.echo(f"/api/terminal/proxy/{tab_id}/")
-
-
-@click.group()
-def api() -> None:
-    """Use generic API escape hatch commands."""
-
-
-@api.command("raw")
-@click.argument(
-    "method",
-    type=click.Choice(["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"], case_sensitive=False),
-)
-@click.argument("path")
-@click.option("--query", "query_values", multiple=True, help="Query parameter KEY=VALUE.")
-@click.option("--payload-json", default=None, help="JSON request body.")
-@click.pass_context
-def api_raw(
-    ctx: click.Context,
-    method: str,
-    path: str,
-    query_values: tuple,
-    payload_json: str,
-) -> None:
-    """Call an arbitrary REST endpoint and print the decoded response."""
-    if not path.startswith("/"):
-        path = f"/{path}"
-    params = parse_query_pairs(query_values) if query_values else None
-    body = merge_payload(payload_json) if payload_json is not None else None
-    try:
-        with cli_main.get_client(ctx) as client:
-            data = client.request(method.upper(), path, json=body, params=params)
-    except HubError as e:
-        raise click.ClickException(str(e)) from e
-    emit(data, True if cli_main.as_json(ctx) else isinstance(data, (dict, list)))
-
-
-# Short alias for `filesystem`; registered as a hidden command on the root
-# group (see _MachineReadableGroup.hidden_aliases in cli/main.py).
-fs = filesystem
+        click.echo(f"deleted {tab_id}")
 
 
 @tab.group("question")
@@ -674,10 +601,12 @@ def tab_question_list(ctx: click.Context, tab_id: str) -> None:
 @click.option("--call-id", required=True)
 @click.pass_context
 def tab_question_answer(
-    ctx: click.Context, tab_id: str, question_ref: str, answers_file: TextIO, call_id: str
+    ctx: click.Context,
+    tab_id: str,
+    question_ref: str,
+    answers_file: TextIO,
+    call_id: str,
 ) -> None:
-    import json
-
     selected = json.load(answers_file)
     with cli_main.get_client(ctx) as client:
         emit(
@@ -688,3 +617,68 @@ def tab_question_answer(
             ),
             True,
         )
+
+
+@click.group()
+def remote() -> None:
+    """Inspect remote SSH profiles and remote directories."""
+
+
+@remote.command("profiles")
+@click.pass_context
+def remote_profiles(ctx: click.Context) -> None:
+    """List configured/discovered remote profiles."""
+    try:
+        with cli_main.get_client(ctx) as client:
+            data = client.list_remote_profiles()
+    except HubError as e:
+        raise click.ClickException(str(e)) from e
+    emit(data, cli_main.as_json(ctx))
+
+
+@remote.command("list")
+@click.option("--profile-id", required=True, help="Remote profile id.")
+@click.option("--path", default=None, help="Remote directory path.")
+@click.pass_context
+def remote_list(ctx: click.Context, profile_id: str, path: Optional[str]) -> None:
+    """List a remote directory."""
+    try:
+        with cli_main.get_client(ctx) as client:
+            data = client.list_remote_directory(profile_id, path)
+    except HubError as e:
+        raise click.ClickException(str(e)) from e
+    emit(data, cli_main.as_json(ctx))
+
+
+@click.group()
+def api() -> None:
+    """Generic REST API escape hatch."""
+
+
+@api.command("raw")
+@click.argument(
+    "method",
+    type=click.Choice(["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"], case_sensitive=False),
+)
+@click.argument("path")
+@click.option("--query", "query_values", multiple=True, help="Query parameter KEY=VALUE.")
+@click.option("--payload-json", default=None, help="JSON request body.")
+@click.pass_context
+def api_raw(
+    ctx: click.Context,
+    method: str,
+    path: str,
+    query_values: tuple,
+    payload_json: Optional[str],
+) -> None:
+    """Call an arbitrary REST endpoint and print the decoded response."""
+    if not path.startswith("/"):
+        path = f"/{path}"
+    params = parse_query_pairs(query_values) if query_values else None
+    body = merge_payload(payload_json) if payload_json is not None else None
+    try:
+        with cli_main.get_client(ctx) as client:
+            data = client.request(method.upper(), path, json=body, params=params)
+    except HubError as e:
+        raise click.ClickException(str(e)) from e
+    emit(data, True if cli_main.as_json(ctx) else isinstance(data, (dict, list)))

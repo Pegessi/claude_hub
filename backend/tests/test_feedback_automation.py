@@ -698,7 +698,7 @@ def test_feedback_cli_capture_uses_tab_environment(monkeypatch: pytest.MonkeyPat
 
     from claude_hub.cli import main as cli_main
     from claude_hub.cli.client import HubClient
-    from claude_hub.cli.commands.feedback import feedback
+    from claude_hub.cli.commands.lessons import lessons
 
     requests = []
 
@@ -713,7 +713,7 @@ def test_feedback_cli_capture_uses_tab_environment(monkeypatch: pytest.MonkeyPat
         lambda ctx: HubClient("http://test", transport=httpx.MockTransport(handle)),
     )
     result = CliRunner().invoke(
-        feedback,
+        lessons,
         [
             "capture",
             "ws",

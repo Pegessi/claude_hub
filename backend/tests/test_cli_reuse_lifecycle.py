@@ -118,10 +118,10 @@ def test_cli_group_help_renders_lifecycle_recipe(args: list[str], summary: str) 
     _assert_lifecycle_help(result.output)
 
 
-def test_agent_group_help_renders_seatless_ephemeral_recipe() -> None:
-    """The agent group advertises isolated ephemeral Chat sessions, not a resident pool."""
+def test_session_group_help_renders_seatless_ephemeral_recipe() -> None:
+    """The session group advertises isolated ephemeral Chat sessions, not a resident pool."""
     runner = CliRunner()
-    result = runner.invoke(cli, ["agent", "--help"])
+    result = runner.invoke(cli, ["session", "--help"])
     assert result.exit_code == 0, result.output
     assert "Manage workspace agent sessions." in result.output
     normalized = _normalize_help_text(result.output)
@@ -131,8 +131,8 @@ def test_agent_group_help_renders_seatless_ephemeral_recipe() -> None:
     assert "best-effort reuse" not in normalized
 
 
-@pytest.mark.parametrize("args", [["--help"], ["agent", "--help"]])
-def test_cli_root_and_agent_help_include_feature_worktree_cwd_and_generic_preset(
+@pytest.mark.parametrize("args", [["--help"], ["session", "--help"]])
+def test_cli_root_and_session_help_include_feature_worktree_cwd_and_generic_preset(
     args: list[str],
 ) -> None:
     runner = CliRunner()
@@ -176,7 +176,7 @@ def test_agent_create_defaults_to_isolated_ephemeral_chat(
     bodies: list[dict] = []
     patch_get_client(monkeypatch, _local_workspaces_handler(bodies))
     runner = CliRunner()
-    result = runner.invoke(cli, ["agent", "create", "ws1", "--agent-type", "claude"])
+    result = runner.invoke(cli, ["session", "create", "ws1", "--agent-type", "claude"])
     assert result.exit_code == 0, result.output
     body = bodies[0]
     assert body["ephemeral"] is True
@@ -190,7 +190,7 @@ def test_agent_create_ephemeral_conflicts_with_reuse(monkeypatch: pytest.MonkeyP
     runner = CliRunner()
     result = runner.invoke(
         cli,
-        ["agent", "create", "ws1", "--ephemeral", "--reuse-existing"],
+        ["session", "create", "ws1", "--ephemeral", "--reuse-existing"],
     )
     assert result.exit_code != 0
     assert "Cannot combine" in result.output
@@ -212,7 +212,7 @@ def test_agent_create_ephemeral_sets_caller_owned_provenance(
 
     patch_get_client(monkeypatch, handler)
     runner = CliRunner()
-    result = runner.invoke(cli, ["--json", "agent", "create", "ws1", "--ephemeral"])
+    result = runner.invoke(cli, ["--json", "session", "create", "ws1", "--ephemeral"])
     assert result.exit_code == 0, result.output
     assert bodies[0]["ephemeral"] is True
     assert bodies[0]["caller_owned_ephemeral"] is True
@@ -228,7 +228,7 @@ def test_agent_create_persistent_leaves_caller_owned_false(
     runner = CliRunner()
     result = runner.invoke(
         cli,
-        ["agent", "create", "ws1", "--agent-type", "claude", "--persistent"],
+        ["session", "create", "ws1", "--agent-type", "claude", "--persistent"],
     )
     assert result.exit_code == 0, result.output
     assert bodies[0]["ephemeral"] is False
@@ -243,7 +243,7 @@ def test_agent_create_reuse_existing_implies_persistent(
     bodies: list[dict] = []
     patch_get_client(monkeypatch, _local_workspaces_handler(bodies))
     runner = CliRunner()
-    result = runner.invoke(cli, ["agent", "create", "ws1", "--reuse-existing"])
+    result = runner.invoke(cli, ["session", "create", "ws1", "--reuse-existing"])
     assert result.exit_code == 0, result.output
     assert bodies[0]["reuse_existing"] is True
     assert bodies[0]["ephemeral"] is False
@@ -258,7 +258,7 @@ def test_agent_create_persistent_reuse_existing_uses_persistent_reuse_path(
     runner = CliRunner()
     result = runner.invoke(
         cli,
-        ["agent", "create", "ws1", "--persistent", "--reuse-existing"],
+        ["session", "create", "ws1", "--persistent", "--reuse-existing"],
     )
     assert result.exit_code == 0, result.output
     assert bodies[0]["reuse_existing"] is True
@@ -272,7 +272,7 @@ def test_agent_create_no_reuse_existing_keeps_ephemeral_default(
     bodies: list[dict] = []
     patch_get_client(monkeypatch, _local_workspaces_handler(bodies))
     runner = CliRunner()
-    result = runner.invoke(cli, ["agent", "create", "ws1", "--no-reuse-existing"])
+    result = runner.invoke(cli, ["session", "create", "ws1", "--no-reuse-existing"])
     assert result.exit_code == 0, result.output
     assert bodies[0]["reuse_existing"] is False
     assert bodies[0]["ephemeral"] is True
@@ -306,7 +306,7 @@ def _agent_create_session_kind(
         return httpx.Response(200, json={"id": "s1"})
 
     patch_get_client(monkeypatch, handler)
-    result = CliRunner().invoke(cli, ["agent", "create", "ws1", *args])
+    result = CliRunner().invoke(cli, ["session", "create", "ws1", *args])
     assert result.exit_code == 0, result.output
     return bodies[0].get("session_kind"), requests
 
@@ -463,7 +463,7 @@ def test_cli_workspace_create_resolves_relative_path_in_request_body(
     patch_get_client(monkeypatch, handler)
     monkeypatch.chdir(tmp_path)
     runner = CliRunner()
-    result = runner.invoke(cli, ["workspace", "create", "--name", "A", "--path", "repo"])
+    result = runner.invoke(cli, ["workspace", "ensure", "--name", "A", "--path", "repo"])
     assert result.exit_code == 0, result.output
     assert bodies[0]["path"] == str(repo.resolve())
     assert Path(bodies[0]["path"]).is_absolute()
@@ -506,7 +506,7 @@ def test_cli_agent_create_resolves_relative_cwd_and_preserves_remote_cwd(
     result = runner.invoke(
         cli,
         [
-            "agent",
+            "session",
             "create",
             "ws1",
             "--agent-type",
@@ -536,7 +536,7 @@ def test_cli_agent_create_omits_cwd_when_unset(
 
     patch_get_client(monkeypatch, handler)
     runner = CliRunner()
-    result = runner.invoke(cli, ["agent", "create", "ws1", "--agent-type", "claude"])
+    result = runner.invoke(cli, ["session", "create", "ws1", "--agent-type", "claude"])
     assert result.exit_code == 0, result.output
     assert "cwd" not in bodies[0]
 
@@ -2850,7 +2850,7 @@ def test_agent_create_redacts_env_in_text_output(monkeypatch: pytest.MonkeyPatch
 
     patch_get_client(monkeypatch, handler)
     runner = CliRunner()
-    result = runner.invoke(cli, ["agent", "create", "ws1", "--agent-type", "claude"])
+    result = runner.invoke(cli, ["session", "create", "ws1", "--agent-type", "claude"])
     assert result.exit_code == 0, result.output
     assert "secret" not in result.output
     assert "[redacted]" in result.output
@@ -2956,7 +2956,7 @@ async def test_agent_create_env_preset_redacts_api_and_cli_json(
             cli,
             [
                 "--json",
-                "agent",
+                "session",
                 "create",
                 ws.id,
                 "--env-preset",
@@ -2972,7 +2972,7 @@ async def test_agent_create_env_preset_redacts_api_and_cli_json(
         result_text = runner.invoke(
             cli,
             [
-                "agent",
+                "session",
                 "create",
                 ws.id,
                 "--env-preset",

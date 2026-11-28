@@ -130,7 +130,7 @@ def action_to_cli_command(decision: Dict[str, Any]) -> Optional[str]:
 
     if action == "focus" and task_id:
         suffix = f" --workspace-id {workspace_id}" if workspace_id else ""
-        return f"claude-hub task get {task_id}{suffix}"
+        return f"claude-hub task status {task_id}{suffix}"
     if action == "terminal" and tab_id:
         return f"claude-hub feishu build-card --kind terminal --tab-id {tab_id}"
     if action == "send" and session_id:
@@ -140,5 +140,6 @@ def action_to_cli_command(decision: Dict[str, Any]) -> Optional[str]:
         suffix = f" --workspace-id {workspace_id}" if workspace_id else ""
         return f"claude-hub task accept {task_id}{suffix}"
     if action == "reject" and task_id:
-        return f"claude-hub task send {workspace_id or '<workspace_id>'} {task_id} --message '<feedback>'"
+        suffix = f" --workspace-id {workspace_id}" if workspace_id else ""
+        return f"claude-hub task followup {task_id}{suffix} --message '<feedback>'"
     return None

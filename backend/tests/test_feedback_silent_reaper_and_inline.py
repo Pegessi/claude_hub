@@ -522,7 +522,7 @@ def test_bilingual_cjk_bigrams_inline_top3_budget_and_zero_when_irrelevant(
     assert "Do:" in worker_block
     assert "Avoid:" in worker_block
     assert "When:" in worker_block
-    assert f"claude-hub lessons get {ws_id} <id>" in worker_block
+    assert f"claude-hub lessons get <id> --workspace-id {ws_id}" in worker_block
 
     review_block = render_inline_lessons_block(matched, workspace_id=ws_id, role="review")
     assert len(review_block) <= INLINE_LESSONS_MAX_CHARS
@@ -717,8 +717,8 @@ def test_cli_lessons_create_auto_derives_summary_and_persists_without_evidence(
     assert res_missing.exit_code != 0
     assert "--summary is required" in res_missing.output
 
-    # 4. `claude-hub lessons summarize` works cleanly with silent reaper response (task_id=null).
-    res_sum = runner.invoke(cli, ["--json", "lessons", "summarize", ws["id"]])
+    # 4. `claude-hub lessons reap` works cleanly with silent reaper response (task_id=null).
+    res_sum = runner.invoke(cli, ["--json", "lessons", "reap", ws["id"]])
     assert res_sum.exit_code == 0, res_sum.output
     summary_data = json.loads(res_sum.output)
     assert summary_data["task_id"] is None

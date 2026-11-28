@@ -32,7 +32,10 @@ from claude_hub.services.agent_stream.maso_http import MasoServiceUnavailable
 from claude_hub.services.agent_stream.providers.spec import all_specs
 from claude_hub.services.agent_stream.tailer import fence_session_stream
 from claude_hub.services.cross_reviewer import _advertised_model_ids
-from claude_hub.services.demand_patrol.commands import CommandError, extract_cli_error_detail
+from claude_hub.services.demand_patrol.commands import (
+    CommandError,
+    extract_cli_error_detail,
+)
 from claude_hub.services.demand_patrol.models import DEFAULT_PATROL_WORKSPACE_ID
 from claude_hub.services.feishu_realtime_events import (
     get_feishu_realtime_event_router,
@@ -718,7 +721,7 @@ def _find_retained_patrol_session(workspace_id: str, title: str) -> ManagedSessi
             and existing.workspace_id == workspace_id
             and not existing.archived
             and existing.session_kind == SessionKind.CHAT
-            and existing.role == WorkspaceSessionRole.WORKER
+            and existing.role in {WorkspaceSessionRole.ORCHESTRATOR, WorkspaceSessionRole.WORKER}
             and existing.caller_owned_ephemeral
             and existing.title == title
         ):

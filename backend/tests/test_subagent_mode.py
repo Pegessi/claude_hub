@@ -115,7 +115,12 @@ def test_subagent_completion_skips_ai_review(isolated_hub: Path) -> None:
     worker = client.post(f"/api/workspaces/{workspace['id']}/agent", json={}).json()
     task = client.post(
         f"/api/workspaces/{workspace['id']}/tasks",
-        json={"title": "Skip review", "prompt": "finish", "task_mode": "subagent"},
+        json={
+            "title": "Skip review",
+            "prompt": "finish",
+            "task_mode": "subagent",
+            "session_kind": "terminal",
+        },
     ).json()
     client.post(
         f"/api/workspaces/tasks/{task['id']}/start",
@@ -142,7 +147,13 @@ async def test_subagent_session_death_marks_failed(isolated_hub: Path) -> None:
     worker = client.post(f"/api/workspaces/{workspace['id']}/agent", json={}).json()
     task = client.post(
         f"/api/workspaces/{workspace['id']}/tasks",
-        json={"title": "Die", "prompt": "work", "task_mode": "subagent", "timeout_seconds": 30},
+        json={
+            "title": "Die",
+            "prompt": "work",
+            "task_mode": "subagent",
+            "timeout_seconds": 30,
+            "session_kind": "terminal",
+        },
     ).json()
     client.post(
         f"/api/workspaces/tasks/{task['id']}/start",
@@ -169,7 +180,12 @@ async def test_reviewed_session_death_does_not_mark_failed(isolated_hub: Path) -
     worker = client.post(f"/api/workspaces/{workspace['id']}/agent", json={}).json()
     task = client.post(
         f"/api/workspaces/{workspace['id']}/tasks",
-        json={"title": "Reviewed", "prompt": "work", "task_mode": "reviewed"},
+        json={
+            "title": "Reviewed",
+            "prompt": "work",
+            "task_mode": "reviewed",
+            "session_kind": "terminal",
+        },
     ).json()
     client.post(
         f"/api/workspaces/tasks/{task['id']}/start",
@@ -195,7 +211,13 @@ async def test_subagent_timeout_marks_failed(isolated_hub: Path) -> None:
     worker = client.post(f"/api/workspaces/{workspace['id']}/agent", json={}).json()
     task = client.post(
         f"/api/workspaces/{workspace['id']}/tasks",
-        json={"title": "Slow", "prompt": "work", "task_mode": "subagent", "timeout_seconds": 10},
+        json={
+            "title": "Slow",
+            "prompt": "work",
+            "task_mode": "subagent",
+            "timeout_seconds": 10,
+            "session_kind": "terminal",
+        },
     ).json()
     client.post(
         f"/api/workspaces/tasks/{task['id']}/start",
@@ -241,7 +263,12 @@ async def test_reviewer_same_task_rereview_does_not_clear(
     )
     task = client.post(
         f"/api/workspaces/{workspace['id']}/tasks",
-        json={"title": "Clear once", "prompt": "implement", "clear_context": True},
+        json={
+            "title": "Clear once",
+            "prompt": "implement",
+            "clear_context": True,
+            "session_kind": "terminal",
+        },
     ).json()
     client.post(
         f"/api/workspaces/tasks/{task['id']}/start",

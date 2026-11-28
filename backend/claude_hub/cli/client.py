@@ -279,16 +279,15 @@ class HubClient:
         """POST /api/auth/logout."""
         return self._request("POST", "/api/auth/logout")
 
-    def get_network_access(self) -> Any:
-        """GET /api/system/network-access."""
-        return self._request("GET", "/api/system/network-access")
-
     def get_quota(self, refresh: bool = False) -> Any:
         """GET /api/quota."""
         # Allow the server's 30s Antigravity budget to return its own timeout
         # reading instead of losing all providers to the HTTP client's deadline.
         return self._request(
-            "GET", "/api/quota", params={"refresh": "true"} if refresh else None, timeout=35.0
+            "GET",
+            "/api/quota",
+            params={"refresh": "true"} if refresh else None,
+            timeout=35.0,
         )
 
     # -- Workspaces ---------------------------------------------------------
@@ -297,10 +296,6 @@ class HubClient:
         """GET /api/workspaces."""
         return self._request("GET", "/api/workspaces")
 
-    def create_workspace(self, body: Dict[str, Any]) -> Any:
-        """POST /api/workspaces."""
-        return self._request("POST", "/api/workspaces", json=body)
-
     def ensure_workspace(self, body: Dict[str, Any]) -> Any:
         """POST /api/workspaces/ensure."""
         return self._request("POST", "/api/workspaces/ensure", json=body)
@@ -308,6 +303,10 @@ class HubClient:
     def update_workspace(self, workspace_id: str, body: Dict[str, Any]) -> Any:
         """PATCH /api/workspaces/{workspace_id}."""
         return self._request("PATCH", f"/api/workspaces/{workspace_id}", json=body)
+
+    def delete_workspace(self, workspace_id: str) -> None:
+        """DELETE /api/workspaces/{workspace_id}."""
+        self._request("DELETE", f"/api/workspaces/{workspace_id}")
 
     def get_board_overview(self, *, done_per_workspace: int = 8) -> Any:
         """GET /api/workspaces/board-overview."""
@@ -322,31 +321,29 @@ class HubClient:
         params = {"include_archived": True} if include_archived else None
         return self._request("GET", f"/api/workspaces/{workspace_id}/board", params=params)
 
-    def dispatch_workspace(self, workspace_id: str) -> None:
-        """POST /api/workspaces/{workspace_id}/dispatch (204)."""
-        self._request("POST", f"/api/workspaces/{workspace_id}/dispatch")
-
-    def preview_workspace_artifact(
-        self,
-        workspace_id: str,
-        path: str,
-        report_id: Optional[str] = None,
-    ) -> Any:
-        """GET /api/workspaces/{workspace_id}/artifacts/preview."""
-        params: Dict[str, Any] = {"path": path}
-        if report_id is not None:
-            params["report_id"] = report_id
-        return self._request(
-            "GET",
-            f"/api/workspaces/{workspace_id}/artifacts/preview",
-            params=params,
-        )
-
     def get_attachment_response(self, attachment_id: str) -> httpx.Response:
         """GET /api/workspaces/attachments/{attachment_id}."""
         return self.request_response("GET", f"/api/workspaces/attachments/{attachment_id}")
 
     # -- Tasks --------------------------------------------------------------
+
+    def get_task(self, task_id: str) -> Any:
+        """GET /api/workspaces/tasks/{task_id}."""
+        return self._request("GET", f"/api/workspaces/tasks/{task_id}")
+
+    def get_task_status(
+        self,
+        task_id: str,
+        *,
+        reports_limit: int = 0,
+        include_brief: bool = False,
+    ) -> Any:
+        """GET /api/workspaces/tasks/{task_id}/status."""
+        params: Dict[str, Any] = {
+            "reports_limit": reports_limit,
+            "include_brief": include_brief,
+        }
+        return self._request("GET", f"/api/workspaces/tasks/{task_id}/status", params=params)
 
     def create_task(self, workspace_id: str, body: Dict[str, Any]) -> Any:
         """POST /api/workspaces/{workspace_id}/tasks."""
@@ -383,18 +380,6 @@ class HubClient:
     def reap_task_feedback(self, task_id: str, body: Dict[str, Any]) -> Any:
         """POST /api/workspaces/tasks/{task_id}/feedback/reap."""
         return self._request("POST", f"/api/workspaces/tasks/{task_id}/feedback/reap", json=body)
-
-    def spawn_worker(self, task_id: str, body: Dict[str, Any]) -> Any:
-        """POST /api/workspaces/tasks/{task_id}/spawn."""
-        return self._request("POST", f"/api/workspaces/tasks/{task_id}/spawn", json=body)
-
-    def apply_dispatch_decision(self, task_id: str, body: Dict[str, Any]) -> Any:
-        """POST /api/workspaces/tasks/{task_id}/dispatch-decision."""
-        return self._request(
-            "POST",
-            f"/api/workspaces/tasks/{task_id}/dispatch-decision",
-            json=body,
-        )
 
     def get_task_reports(self, workspace_id: str, task_id: str) -> Any:
         """GET /api/workspaces/{workspace_id}/tasks/{task_id}/reports."""
@@ -473,6 +458,19 @@ class HubClient:
 
     # -- Agents / sessions --------------------------------------------------
 
+    def get_session(self, session_id: str) -> Any:
+        """GET /api/workspaces/sessions/{session_id}."""
+        data = self._request("GET", f"/api/workspaces/sessions/{session_id}")
+        return redact_session_json_payload(data)
+
+    def get_session_stream_events(
+        self, session_id: str, params: Optional[Dict[str, Any]] = None
+    ) -> Any:
+        """GET /api/workspaces/sessions/{session_id}/stream/events."""
+        return self._request(
+            "GET", f"/api/workspaces/sessions/{session_id}/stream/events", params=params
+        )
+
     def ensure_agent(self, workspace_id: str, body: Dict[str, Any]) -> Any:
         """POST /api/workspaces/{workspace_id}/agent."""
         data = self._request("POST", f"/api/workspaces/{workspace_id}/agent", json=body)
@@ -508,11 +506,15 @@ class HubClient:
         """POST /api/workspaces/sessions/{session_id}/reports."""
         return self._request("POST", f"/api/workspaces/sessions/{session_id}/reports", json=body)
 
-    # -- Tabs / terminal / filesystem / remote -----------------------------
+    # -- Tabs / remote ------------------------------------------------------
 
     def list_tabs(self) -> Any:
         """GET /api/tabs."""
         return self._request("GET", "/api/tabs")
+
+    def list_archived_tabs(self) -> Any:
+        """GET /api/tabs/archived."""
+        return self._request("GET", "/api/tabs/archived")
 
     def list_tab_statuses(self) -> Any:
         """GET /api/tabs/status."""
@@ -522,21 +524,25 @@ class HubClient:
         """POST /api/tabs."""
         return self._request("POST", "/api/tabs", json=body)
 
-    def update_tab_order(self, tab_ids: list[str]) -> Any:
-        """PUT /api/tabs/order."""
-        return self._request("PUT", "/api/tabs/order", json={"tab_ids": tab_ids})
-
-    def duplicate_tab(self, tab_id: str) -> Any:
-        """POST /api/tabs/{tab_id}/duplicate."""
-        return self._request("POST", f"/api/tabs/{tab_id}/duplicate")
-
     def get_tab(self, tab_id: str) -> Any:
         """GET /api/tabs/{tab_id}."""
         return self._request("GET", f"/api/tabs/{tab_id}")
 
+    def get_tab_stream_events(self, tab_id: str, params: Optional[Dict[str, Any]] = None) -> Any:
+        """GET /api/workspaces/tabs/{tab_id}/stream/events."""
+        return self._request("GET", f"/api/workspaces/tabs/{tab_id}/stream/events", params=params)
+
     def update_tab(self, tab_id: str, body: Dict[str, Any]) -> Any:
         """PUT /api/tabs/{tab_id}."""
         return self._request("PUT", f"/api/tabs/{tab_id}", json=body)
+
+    def archive_tab(self, tab_id: str) -> Any:
+        """POST /api/tabs/{tab_id}/archive."""
+        return self._request("POST", f"/api/tabs/{tab_id}/archive")
+
+    def unarchive_tab(self, tab_id: str) -> Any:
+        """POST /api/tabs/{tab_id}/unarchive."""
+        return self._request("POST", f"/api/tabs/{tab_id}/unarchive")
 
     def delete_tab(self, tab_id: str) -> None:
         """DELETE /api/tabs/{tab_id}."""
@@ -554,15 +560,6 @@ class HubClient:
         """DELETE a queued/waiting inbox message (not an active provider turn)."""
         return self._request("DELETE", f"/api/workspaces/tabs/{tab_id}/messages/{message_id}")
 
-    def list_directory(self, path: Optional[str] = None) -> Any:
-        """GET /api/filesystem/list."""
-        params = {"path": path} if path is not None else None
-        return self._request("GET", "/api/filesystem/list", params=params)
-
-    def get_home_directory(self) -> Any:
-        """GET /api/filesystem/home."""
-        return self._request("GET", "/api/filesystem/home")
-
     def list_remote_profiles(self) -> Any:
         """GET /api/remote/profiles."""
         return self._request("GET", "/api/remote/profiles")
@@ -573,23 +570,6 @@ class HubClient:
         if path is not None:
             params["path"] = path
         return self._request("GET", "/api/remote/filesystem/list", params=params)
-
-    def upload_clipboard_image(
-        self,
-        path: str,
-        content_type: Optional[str] = None,
-    ) -> Any:
-        """POST /api/clipboard/image."""
-        image_path = Path(path)
-        with image_path.open("rb") as f:
-            files = {
-                "image": (
-                    image_path.name,
-                    f,
-                    content_type or "application/octet-stream",
-                )
-            }
-            return self._request("POST", "/api/clipboard/image", files=files)
 
     # -- Lessons ------------------------------------------------------------
 

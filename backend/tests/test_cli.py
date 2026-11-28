@@ -43,27 +43,35 @@ def test_help_lists_groups():
     runner = CliRunner()
     result = runner.invoke(cli, ["--help"])
     assert result.exit_code == 0
-    for group in (
-        "auth",
-        "system",
-        "tab",
-        "terminal",
-        "filesystem",
-        "remote",
-        "clipboard",
-        "api",
+    expected_groups = (
         "workspace",
         "task",
         "agent",
         "session",
         "lessons",
+        "dot",
+        "schedule",
+        "tab",
+        "feishu",
         "quota",
-    ):
+        "remote",
+        "auth",
+        "api",
+    )
+    for group in expected_groups:
         assert group in result.output
-    # `fs` is a hidden alias for `filesystem`: omitted from the help listing.
     listed = cli.list_commands(click.Context(cli))
-    assert "filesystem" in listed
-    assert "fs" not in listed
+    assert set(listed) == set(expected_groups)
+    for retired in (
+        "filesystem",
+        "fs",
+        "clipboard",
+        "system",
+        "terminal",
+        "feedback",
+        "patrol",
+    ):
+        assert retired not in listed
 
 
 QUOTA_SAMPLE = {
@@ -448,7 +456,7 @@ def test_error_nonzero_exit(monkeypatch):
     assert "Task not found" in result.output
 
 
-def test_task_send_is_followup_alias(monkeypatch):
+def test_task_followup_posts_to_task_mailbox(monkeypatch):
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
             200,
@@ -465,7 +473,18 @@ def test_task_send_is_followup_alias(monkeypatch):
     runner = CliRunner()
     result = runner.invoke(
         cli,
-        ["--json", "task", "send", "ws1", "t1", "--message", "hello", "--call-id", "send-1"],
+        [
+            "--json",
+            "task",
+            "followup",
+            "t1",
+            "--workspace-id",
+            "ws1",
+            "--message",
+            "hello",
+            "--call-id",
+            "send-1",
+        ],
     )
     assert result.exit_code == 0, result.output
     assert [request.url.path for request in captured] == ["/api/workspaces/ws1/tasks/t1/followup"]
@@ -475,94 +494,94 @@ def test_task_send_is_followup_alias(monkeypatch):
     assert "/sessions/" not in captured[0].url.path
 
 
-def test_task_send_missing_task_errors(monkeypatch):
+def test_task_followup_missing_task_errors(monkeypatch):
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(404, json={"detail": "Task not found"})
 
     captured = patch_get_client(monkeypatch, handler)
     runner = CliRunner()
-    result = runner.invoke(cli, ["task", "send", "ws1", "nope", "--message", "hi"])
+    result = runner.invoke(
+        cli, ["task", "followup", "nope", "--workspace-id", "ws1", "--message", "hi"]
+    )
     assert result.exit_code != 0
     assert "not found" in result.output.lower()
     assert captured[0].url.path.endswith("/followup")
 
 
-def test_task_get_scans_workspaces_and_includes_reports(monkeypatch):
-    reports = [{"created_at": "t1", "state": "working", "message": "progress"}]
+def test_task_status_o1_endpoint_includes_reports_and_brief(monkeypatch):
+    status_payload = {
+        "workspace_id": "wsB",
+        "task": {"id": "t9", "title": "T", "status": "review"},
+        "lifecycle": {"phase": "reviewing", "reason": "awaiting_reviewer"},
+        "goal_packet": None,
+        "latest_report": {"created_at": "t2", "state": "review_passed"},
+        "latest_report_message": "ok",
+        "latest_acceptance_report": None,
+        "latest_acceptance_check": [],
+        "latest_review": {"created_at": "t2", "state": "review_passed"},
+        "review_reports": [
+            {
+                "created_at": "t1",
+                "state": "review_failed",
+                "session_id": "cb-reviewer-1",
+                "review_cycle": 1,
+                "review_reason": "needs work",
+            },
+            {
+                "created_at": "t2",
+                "state": "review_passed",
+                "session_id": "cb-reviewer-1",
+            },
+        ],
+        "reports": [
+            {"created_at": "t2", "state": "review_passed"},
+            {"created_at": "t1", "state": "review_failed"},
+        ],
+        "reports_meta": {"total": 3, "returned": 2, "truncated": True},
+        "brief_markdown": "# Task Brief\nReady.",
+        "human_acceptance_requested_at": None,
+        "human_accepted_at": None,
+    }
 
     def handler(request: httpx.Request) -> httpx.Response:
-        path = request.url.path
-        if path == "/api/workspaces":
-            return httpx.Response(200, json=[{"id": "wsA"}, {"id": "wsB"}])
-        if path == "/api/workspaces/wsA/board":
-            return httpx.Response(200, json={"tasks": []})
-        if path == "/api/workspaces/wsB/board":
-            return httpx.Response(
-                200,
-                json={"tasks": [{"id": "t9", "title": "T", "status": "working"}]},
-            )
-        if path == "/api/workspaces/wsB/tasks/t9/reports":
-            return httpx.Response(200, json=reports)
-        raise AssertionError(f"unexpected path {path}")
+        assert request.url.path == "/api/workspaces/tasks/t9/status"
+        assert request.url.params.get("reports_limit") == "2"
+        assert request.url.params.get("include_brief") == "true"
+        return httpx.Response(200, json=status_payload)
 
     patch_get_client(monkeypatch, handler)
     runner = CliRunner()
-    result = runner.invoke(cli, ["--json", "task", "get", "t9"])
+    result = runner.invoke(cli, ["--json", "task", "status", "t9", "--reports", "2", "--brief"])
     assert result.exit_code == 0, result.output
     detail = json.loads(result.output)
     assert detail["workspace_id"] == "wsB"
-    assert detail["reports"] == reports
-
-
-def test_task_report_newest_first_and_review_filter(monkeypatch):
-    reports = [
-        {"created_at": "t0", "state": "working", "message": "progress"},
-        {
-            "created_at": "t1",
-            "state": "review_failed",
-            "session_id": "cb-reviewer-1",
-            "review_cycle": 1,
-            "review_reason": "needs work",
-        },
-        {"created_at": "t2", "state": "review_passed", "session_id": "cb-reviewer-1"},
+    assert [r["created_at"] for r in detail["reports"]] == ["t2", "t1"]
+    assert detail["reports_meta"]["truncated"] is True
+    assert detail["brief_markdown"] == "# Task Brief\nReady."
+    assert [r["state"] for r in detail["review_reports"]] == [
+        "review_failed",
+        "review_passed",
     ]
 
+
+def test_task_status_workspace_mismatch_errors(monkeypatch):
     def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path == "/api/workspaces/wsA/board":
-            return httpx.Response(200, json={"tasks": [{"id": "t9", "status": "review"}]})
-        assert request.url.path == "/api/workspaces/wsA/tasks/t9/reports"
-        return httpx.Response(200, json=reports)
+        assert request.url.path == "/api/workspaces/tasks/t9/status"
+        return httpx.Response(
+            200,
+            json={
+                "workspace_id": "wsB",
+                "task": {"id": "t9", "status": "working"},
+                "reports": [],
+                "reports_meta": {"total": 0, "returned": 0, "truncated": False},
+            },
+        )
 
     patch_get_client(monkeypatch, handler)
     runner = CliRunner()
-    result = runner.invoke(
-        cli, ["--json", "task", "report", "t9", "--workspace-id", "wsA", "--limit", "2"]
-    )
-    assert result.exit_code == 0, result.output
-    assert [r["created_at"] for r in json.loads(result.output)] == ["t2", "t1"]
-
-    result = runner.invoke(cli, ["--json", "task", "review", "t9", "--workspace-id", "wsA"])
-    assert result.exit_code == 0, result.output
-    rounds = json.loads(result.output)
-    assert [r["verdict"] for r in rounds] == ["review_failed", "review_passed"]
-    assert rounds[0]["notes"] == "needs work"
-
-
-def test_task_report_with_workspace_id_requires_task(monkeypatch):
-    calls: List[str] = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        calls.append(request.url.path)
-        if request.url.path == "/api/workspaces/wsA/board":
-            return httpx.Response(200, json={"tasks": []})
-        raise AssertionError(f"unexpected path {request.url.path}")
-
-    patch_get_client(monkeypatch, handler)
-    runner = CliRunner()
-    result = runner.invoke(cli, ["task", "report", "missing", "--workspace-id", "wsA"])
+    result = runner.invoke(cli, ["task", "status", "t9", "--workspace-id", "wsA"])
     assert result.exit_code != 0
     assert "not found in workspace wsA" in result.output
-    assert calls == ["/api/workspaces/wsA/board"]
 
 
 def test_task_accept_marks_review_task_done(monkeypatch):
@@ -570,17 +589,14 @@ def test_task_accept_marks_review_task_done(monkeypatch):
 
     def handler(request: httpx.Request) -> httpx.Response:
         path = request.url.path
-        if path == "/api/workspaces/wsA/board":
+        if path == "/api/workspaces/tasks/t9" and request.method == "GET":
             return httpx.Response(
                 200,
                 json={
-                    "tasks": [
-                        {
-                            "id": "t9",
-                            "status": "review",
-                            "human_acceptance_requested_at": "2026-06-28T01:00:00",
-                        }
-                    ]
+                    "id": "t9",
+                    "workspace_id": "wsA",
+                    "status": "review",
+                    "human_acceptance_requested_at": "2026-06-28T01:00:00",
                 },
             )
         if path == "/api/workspaces/tasks/t9" and request.method == "PATCH":
@@ -599,7 +615,7 @@ def test_task_accept_marks_review_task_done(monkeypatch):
 def test_task_accept_rejects_non_review(monkeypatch):
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.method == "GET"
-        return httpx.Response(200, json={"tasks": [{"id": "t9", "status": "working"}]})
+        return httpx.Response(200, json={"id": "t9", "workspace_id": "wsA", "status": "working"})
 
     patch_get_client(monkeypatch, handler)
     runner = CliRunner()
@@ -611,7 +627,7 @@ def test_task_accept_rejects_non_review(monkeypatch):
 def test_task_accept_rejects_review_without_human_acceptance(monkeypatch):
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.method == "GET"
-        return httpx.Response(200, json={"tasks": [{"id": "t9", "status": "review"}]})
+        return httpx.Response(200, json={"id": "t9", "workspace_id": "wsA", "status": "review"})
 
     patch_get_client(monkeypatch, handler)
     runner = CliRunner()
@@ -620,7 +636,7 @@ def test_task_accept_rejects_review_without_human_acceptance(monkeypatch):
     assert "not awaiting human acceptance" in result.output
 
 
-def test_session_list_and_logs(monkeypatch):
+def test_session_list_and_logs_support_terminal_and_chat(monkeypatch):
     history = "\n".join(f"line{i}" for i in range(1, 121))
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -635,8 +651,48 @@ def test_session_list_and_logs(monkeypatch):
                     ]
                 },
             )
-        if path == "/api/workspaces":
-            return httpx.Response(200, json=[{"id": "wsA"}])
+        if path == "/api/workspaces/sessions/s2":
+            return httpx.Response(
+                200,
+                json={
+                    "id": "s2",
+                    "workspace_id": "wsA",
+                    "session_kind": "terminal",
+                    "tab_id": "tab2",
+                },
+            )
+        if path == "/api/workspaces/sessions/s-chat":
+            return httpx.Response(
+                200,
+                json={
+                    "id": "s-chat",
+                    "workspace_id": "wsA",
+                    "session_kind": "chat",
+                    "archived": True,
+                },
+            )
+        if path == "/api/workspaces/sessions/s-chat/stream/events":
+            assert request.url.params.get("persisted_only") == "true"
+            return httpx.Response(
+                200,
+                json={
+                    "events": [
+                        {
+                            "type": "turn_started",
+                            "turn_id": "t1",
+                            "message_id": "t1:user",
+                            "payload": {"summary": "check status"},
+                        },
+                        {
+                            "type": "text_delta",
+                            "turn_id": "t1",
+                            "message_id": "t1:assistant",
+                            "payload": {"text": "all green"},
+                        },
+                    ],
+                    "has_more": False,
+                },
+            )
         if path == "/api/terminal/history/tab2":
             assert request.url.params.get("lines") == "100"
             return httpx.Response(200, json={"history": history})
@@ -651,6 +707,11 @@ def test_session_list_and_logs(monkeypatch):
     result = runner.invoke(cli, ["session", "logs", "s2", "--lines", "2"])
     assert result.exit_code == 0, result.output
     assert result.output.splitlines() == ["line119", "line120"]
+
+    chat_logs = runner.invoke(cli, ["session", "logs", "s-chat", "--lines", "5"])
+    assert chat_logs.exit_code == 0, chat_logs.output
+    assert "[user] check status" in chat_logs.output
+    assert "[assistant] all green" in chat_logs.output
 
 
 def test_session_report_payload_json_and_bilingual_fields(monkeypatch):
@@ -1058,14 +1119,52 @@ def test_whitespace_only_explicit_urls_fall_through(tmp_path, monkeypatch):
     assert resolve(base_url="  http://from-flag:7777  ").base_url == "http://from-flag:7777"
 
 
-def test_fs_alias_invokes_filesystem_endpoint(monkeypatch):
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json={"home": "/home/tester"})
+def test_resolve_workspace_id_zero_one_and_ambiguous_matches(tmp_path, monkeypatch):
+    from claude_hub.cli.commands.common import resolve_workspace_id
 
-    captured = patch_get_client(monkeypatch, handler)
-    result = CliRunner().invoke(cli, ["fs", "home"])
-    assert result.exit_code == 0, result.output
-    assert captured[0].url.path == "/api/filesystem/home"
+    repo = tmp_path / "repo"
+    other = tmp_path / "other"
+    repo.mkdir()
+    other.mkdir()
+
+    # 1. Zero matches -> fail closed without creating any workspace
+    zero_client = make_client(
+        lambda req: httpx.Response(
+            200,
+            json=[
+                {
+                    "id": "ws-other",
+                    "name": "Other",
+                    "path": str(other),
+                    "target": "local",
+                }
+            ],
+        )
+    )
+    with pytest.raises(click.ClickException, match="No Hub Workspace matches"):
+        resolve_workspace_id(zero_client, None, cwd=repo)
+
+    # 2. Exactly 1 match -> resolves cleanly
+    one_client = make_client(
+        lambda req: httpx.Response(
+            200,
+            json=[{"id": "ws-1", "name": "Repo", "path": str(repo), "target": "local"}],
+        )
+    )
+    assert resolve_workspace_id(one_client, None, cwd=repo) == "ws-1"
+
+    # 3. Multiple matches (e.g. two workspaces pointing to same tree) -> fail closed
+    ambig_client = make_client(
+        lambda req: httpx.Response(
+            200,
+            json=[
+                {"id": "ws-a", "name": "LocalA", "path": str(repo), "target": "local"},
+                {"id": "ws-b", "name": "LocalB", "path": str(repo), "target": "local"},
+            ],
+        )
+    )
+    with pytest.raises(click.ClickException, match="Multiple Hub Workspaces match"):
+        resolve_workspace_id(ambig_client, None, cwd=repo)
 
 
 def test_transport_error_names_url_and_suggests_ipv6_loopback_same_port():
@@ -1232,14 +1331,14 @@ def test_board_mixed_rows_no_partial_crash(monkeypatch):
 
     patch_get_client(monkeypatch, handler)
     runner = CliRunner()
-    result = runner.invoke(cli, ["workspace", "board", "ws1"])
+    result = runner.invoke(cli, ["workspace", "status", "ws1", "--full"])
     assert result.exit_code == 0, result.output
     assert "Traceback" not in result.output
     assert "AttributeError" not in result.output
     assert "t1" in result.output
 
 
-def test_workspace_summary_and_docs_surface_board_state(monkeypatch):
+def test_workspace_status_surfaces_summary_and_full_board(monkeypatch):
     board = {
         "workspace": {
             "id": "ws1",
@@ -1287,7 +1386,7 @@ def test_workspace_summary_and_docs_surface_board_state(monkeypatch):
 
     patch_get_client(monkeypatch, handler)
     runner = CliRunner()
-    result = runner.invoke(cli, ["--json", "workspace", "summary", "ws1"])
+    result = runner.invoke(cli, ["--json", "workspace", "status", "ws1"])
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
     assert payload["task_counts"] == {"review": 1, "working": 1}
@@ -1295,54 +1394,50 @@ def test_workspace_summary_and_docs_surface_board_state(monkeypatch):
     assert payload["active_tasks"][0]["latest_report_message"] == "editing"
     assert payload["snapshot_path"] == "/state/snapshot.md"
 
-    result = runner.invoke(cli, ["workspace", "docs", "ws1"])
-    assert result.exit_code == 0, result.output
-    assert "snapshot: /state/snapshot.md" in result.output
-    assert "Snapshot" in result.output
+    text_summary = runner.invoke(cli, ["workspace", "status", "ws1"])
+    assert text_summary.exit_code == 0, text_summary.output
+    assert "snapshot: /state/snapshot.md" in text_summary.output
 
 
-def test_agent_and_session_status_show_runtime(monkeypatch):
+def test_session_list_and_status_show_runtime(monkeypatch):
+    session_s1 = {
+        "id": "s1",
+        "workspace_id": "ws1",
+        "role": "orchestrator",
+        "agent_type": "codex",
+        "session_kind": "chat",
+        "status": "active",
+        "runtime_status": "working",
+        "current_task_id": "t1",
+        "tab_id": "tab1",
+        "target": "local",
+        "last_activity_at": "2026-06-29T01:00:00",
+    }
     board = {
         "sessions": [
+            session_s1,
             {
-                "id": "s1",
-                "role": "orchestrator",
-                "agent_type": "codex",
-                "status": "active",
-                "runtime_status": "working",
-                "current_task_id": "t1",
-                "tab_id": "tab1",
-                "target": "local",
-                "last_activity_at": "2026-06-29T01:00:00",
+                "id": "s2",
+                "role": "reviewer",
+                "agent_type": "claude",
+                "runtime_status": "idle",
             },
-            {"id": "s2", "role": "reviewer", "agent_type": "claude", "runtime_status": "idle"},
         ]
     }
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/api/workspaces/ws1/board":
             return httpx.Response(200, json=board)
-        if request.url.path == "/api/workspaces":
-            return httpx.Response(200, json=[{"id": "ws1"}])
+        if request.url.path == "/api/workspaces/sessions/s1":
+            return httpx.Response(200, json=session_s1)
         raise AssertionError(f"unexpected path {request.url.path}")
 
     patch_get_client(monkeypatch, handler)
     runner = CliRunner()
-    result = runner.invoke(cli, ["--json", "agent", "status", "ws1", "--role", "orchestrator"])
+    result = runner.invoke(cli, ["--json", "session", "list", "ws1", "--role", "orchestrator"])
     assert result.exit_code == 0, result.output
-    agents = json.loads(result.output)
-    assert agents == [
-        {
-            "id": "s1",
-            "role": "orchestrator",
-            "agent_type": "codex",
-            "status": "active",
-            "runtime_status": "working",
-            "current_task_id": "t1",
-            "tab_id": "tab1",
-            "last_activity_at": "2026-06-29T01:00:00",
-        }
-    ]
+    sessions = json.loads(result.output)
+    assert [s["id"] for s in sessions] == ["s1"]
 
     result = runner.invoke(cli, ["session", "status", "s1"])
     assert result.exit_code == 0, result.output
@@ -1351,7 +1446,9 @@ def test_agent_and_session_status_show_runtime(monkeypatch):
     assert "tab1" in result.output
 
 
-def test_task_status_surfaces_goal_review_and_acceptance(monkeypatch):
+def test_task_status_surfaces_goal_review_and_acceptance_with_legacy_fallback(
+    monkeypatch,
+):
     goal_packet = {
         "objective": "Ship CLI display",
         "acceptance_criteria": ["status command"],
@@ -1386,6 +1483,10 @@ def test_task_status_surfaces_goal_review_and_acceptance(monkeypatch):
     ]
 
     def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/workspaces/tasks/t1/status":
+            return httpx.Response(404, json={"detail": "Not Found"})
+        if request.url.path == "/api/workspaces/tasks/t1":
+            return httpx.Response(404, json={"detail": "Not Found"})
         if request.url.path == "/api/workspaces/ws1/board":
             return httpx.Response(
                 200,
@@ -1806,12 +1907,13 @@ def test_session_send_payload_json_attachments(monkeypatch):
     assert isinstance(bodies[0]["call_id"], str)
 
 
-def test_lessons_summarize(monkeypatch):
+def test_lessons_reap_workspace_and_single_task(monkeypatch):
     bodies: List[Dict[str, Any]] = []
+    paths: List[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.method == "POST"
-        assert request.url.path == "/api/workspaces/ws1/lessons/summarize"
+        paths.append(request.url.path)
         bodies.append(json.loads(request.content))
         return httpx.Response(201, json={"id": "run1"})
 
@@ -1819,10 +1921,19 @@ def test_lessons_summarize(monkeypatch):
     runner = CliRunner()
     result = runner.invoke(
         cli,
-        ["lessons", "summarize", "ws1", "--mode", "full", "--limit", "10", "--force"],
+        ["lessons", "reap", "ws1", "--mode", "full", "--limit", "10", "--force"],
     )
     assert result.exit_code == 0, result.output
+    assert paths[0] == "/api/workspaces/ws1/lessons/summarize"
     assert bodies[0] == {"mode": "full", "limit": 10, "force": True}
+
+    task_reap = runner.invoke(
+        cli,
+        ["lessons", "reap", "--task-id", "t1", "--summarize"],
+    )
+    assert task_reap.exit_code == 0, task_reap.output
+    assert paths[1] == "/api/workspaces/tasks/t1/feedback/reap"
+    assert bodies[1] == {"summarize": True}
 
 
 @pytest.mark.parametrize("status", [200, 204])
@@ -1839,7 +1950,7 @@ def test_lessons_delete(monkeypatch, status):
 
     patch_get_client(monkeypatch, handler)
     runner = CliRunner()
-    result = runner.invoke(cli, ["lessons", "delete", "ws1", "l1"])
+    result = runner.invoke(cli, ["lessons", "delete", "l1", "--workspace-id", "ws1"])
     assert result.exit_code == 0, result.output
     assert paths[0] == "/api/workspaces/ws1/lessons/l1"
     assert methods[0] == "DELETE"
@@ -1872,12 +1983,9 @@ def test_session_list_archived_filter(monkeypatch, include_archived):
 @pytest.mark.parametrize("explicit_workspace", [False, True])
 def test_session_archive_commands(monkeypatch, action, explicit_workspace):
     def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path == "/api/workspaces":
+        if request.method == "GET" and request.url.path == "/api/workspaces/sessions/old":
             assert not explicit_workspace
-            return httpx.Response(200, json=[{"id": "wsA"}])
-        if request.url.path == "/api/workspaces/wsA/board":
-            assert request.url.params.get("include_archived") == "true"
-            return httpx.Response(200, json={"sessions": [{"id": "old", "archived": True}]})
+            return httpx.Response(200, json={"id": "old", "workspace_id": "wsA", "archived": True})
         assert request.method == "POST"
         assert request.url.path == f"/api/workspaces/wsA/sessions/old/{action}"
         return httpx.Response(200, json={"id": "old", "archived": action == "archive"})
@@ -1889,7 +1997,7 @@ def test_session_archive_commands(monkeypatch, action, explicit_workspace):
     result = CliRunner().invoke(cli, args)
     assert result.exit_code == 0, result.output
     assert json.loads(result.output) == {"id": "old", "archived": action == "archive"}
-    assert len(captured) == (1 if explicit_workspace else 3)
+    assert len(captured) == (1 if explicit_workspace else 2)
 
 
 @pytest.mark.parametrize("action", ["archive", "unarchive"])
@@ -1974,3 +2082,478 @@ def test_task_list_lifecycle_filters_warn_on_old_hub(monkeypatch):
     result = CliRunner().invoke(cli, ["task", "list", "ws1", "--attention"])
     assert result.exit_code == 0, result.output
     assert "does not report task lifecycles" in result.stderr
+
+
+def test_older_server_fallback_without_workspace_id_scans_workspace_boards(monkeypatch):
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path in (
+            "/api/workspaces/tasks/t-done/status",
+            "/api/workspaces/tasks/t-done",
+            "/api/workspaces/sessions/s-arch",
+        ):
+            return httpx.Response(404, json={"detail": "Not Found"})
+        if path == "/api/workspaces":
+            return httpx.Response(200, json=[{"id": "ws1", "name": "Repo1"}])
+        if path == "/api/workspaces/ws1/board":
+            include_archived = request.url.params.get("include_archived") == "true"
+            sessions = (
+                [
+                    {
+                        "id": "s-arch",
+                        "session_kind": "chat",
+                        "status": "idle",
+                        "archived": True,
+                    }
+                ]
+                if include_archived
+                else []
+            )
+            return httpx.Response(
+                200,
+                json={
+                    "workspace": {"id": "ws1"},
+                    "tasks": [{"id": "t-done", "title": "Old done", "status": "done"}],
+                    "sessions": sessions,
+                },
+            )
+        if path == "/api/workspaces/ws1/tasks/t-done/reports":
+            return httpx.Response(200, json=[])
+        raise AssertionError(f"unexpected path {path}")
+
+    patch_get_client(monkeypatch, handler)
+    runner = CliRunner()
+    task_res = runner.invoke(cli, ["--json", "task", "status", "t-done"])
+    assert task_res.exit_code == 0, task_res.output
+    assert json.loads(task_res.output)["workspace_id"] == "ws1"
+
+    sess_res = runner.invoke(cli, ["--json", "session", "status", "s-arch"])
+    assert sess_res.exit_code == 0, sess_res.output
+    assert json.loads(sess_res.output)["archived"] is True
+
+
+def test_chat_logs_paginates_to_latest_page_and_tab_logs_uses_managed_session(
+    monkeypatch,
+):
+    seen_session_calls: List[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/api/tabs/tab-managed":
+            return httpx.Response(
+                200,
+                json={
+                    "id": "tab-managed",
+                    "session_kind": "chat",
+                    "managed_session_id": "s-managed",
+                    "archived": False,
+                },
+            )
+        if path == "/api/workspaces/sessions/s-managed/stream/events":
+            since = int(request.url.params.get("since_sequence", "-1"))
+            seen_session_calls.append(f"since={since}")
+            if since < 0:
+                return httpx.Response(
+                    200,
+                    json={
+                        "events": [
+                            {
+                                "type": "turn_started",
+                                "turn_id": "t1",
+                                "payload": {"summary": "early prompt"},
+                            },
+                            {
+                                "type": "text_delta",
+                                "turn_id": "t1",
+                                "message_id": "t1:assistant",
+                                "payload": {"text": "early answer"},
+                            },
+                        ],
+                        "next_sequence": 10,
+                        "has_more": True,
+                    },
+                )
+            return httpx.Response(
+                200,
+                json={
+                    "events": [
+                        {
+                            "type": "turn_started",
+                            "turn_id": "t2",
+                            "payload": {"summary": "latest prompt"},
+                        },
+                        {
+                            "type": "text_delta",
+                            "turn_id": "t2",
+                            "message_id": "t2:assistant",
+                            "payload": {"text": "latest answer"},
+                        },
+                        {
+                            "type": "tool_call_started",
+                            "turn_id": "t2",
+                            "payload": {"tool_name": "Read"},
+                        },
+                    ],
+                    "next_sequence": 20,
+                    "has_more": True,
+                },
+            )
+        raise AssertionError(f"unexpected path {path}")
+
+    def paged_handler(request: httpx.Request) -> httpx.Response:
+        if (
+            request.url.path == "/api/workspaces/sessions/s-managed/stream/events"
+            and int(request.url.params.get("since_sequence", "-1")) == 20
+        ):
+            return httpx.Response(
+                200,
+                json={
+                    "events": [
+                        {
+                            "type": "turn_completed",
+                            "turn_id": "t2",
+                            "payload": {"assistant_text": "latest answer"},
+                        }
+                    ],
+                    "next_sequence": 21,
+                    "has_more": False,
+                },
+            )
+        return handler(request)
+
+    patch_get_client(monkeypatch, paged_handler)
+    res = CliRunner().invoke(cli, ["tab", "logs", "tab-managed", "-n", "3"])
+    assert res.exit_code == 0, res.output
+    assert seen_session_calls == ["since=-1", "since=10"]
+    assert res.output.splitlines() == [
+        "[user] latest prompt",
+        "[assistant] latest answer",
+        "[tool] Read",
+    ]
+
+
+def test_task_status_reports_limit_and_older_server_brief_markdown_fallback(
+    monkeypatch,
+):
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/api/workspaces/tasks/task-1/status":
+            return httpx.Response(404, json={"detail": "Not Found"})
+        if path == "/api/workspaces/tasks/task-1":
+            return httpx.Response(404, json={"detail": "Not Found"})
+        if path == "/api/workspaces/ws-1/board":
+            return httpx.Response(
+                200,
+                json={"tasks": [{"id": "task-1", "workspace_id": "ws-1", "status": "working"}]},
+            )
+        if path == "/api/workspaces/ws-1/tasks/task-1/reports":
+            return httpx.Response(200, json=[])
+        if path == "/api/workspaces/ws-1/tasks/task-1/brief":
+            return httpx.Response(200, json={"markdown": "# Handoff Brief\nAll clear"})
+        raise AssertionError(f"unexpected path {path}")
+
+    patch_get_client(monkeypatch, handler)
+    too_high = CliRunner().invoke(cli, ["task", "status", "task-1", "--reports", "201"])
+    assert too_high.exit_code == 2
+
+    ok = CliRunner().invoke(
+        cli, ["--json", "task", "status", "task-1", "--workspace-id", "ws-1", "--brief"]
+    )
+    assert ok.exit_code == 0, ok.output
+    assert json.loads(ok.output)["brief_markdown"] == "# Handoff Brief\nAll clear"
+
+
+def test_older_server_fallbacks_for_session_archive_and_task_progress(monkeypatch, tmp_path):
+    key_file = tmp_path / "task-1.key"
+    key_file.write_text("secret-key-" + ("x" * 32), encoding="utf-8")
+    key_file.chmod(0o600)
+    calls: list[tuple[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append((request.method, request.url.path))
+        if request.url.path in {
+            "/api/workspaces/sessions/s-old",
+            "/api/workspaces/tasks/task-1",
+        }:
+            return httpx.Response(404, json={"detail": "Not Found"})
+        if request.url.path == "/api/workspaces":
+            return httpx.Response(200, json=[{"id": "ws-1"}])
+        if request.url.path == "/api/workspaces/ws-1/board":
+            return httpx.Response(
+                200,
+                json={
+                    "sessions": [{"id": "s-old", "workspace_id": "ws-1", "archived": False}],
+                    "tasks": [
+                        {
+                            "id": "task-1",
+                            "workspace_id": "ws-1",
+                            "execution_epoch": 3,
+                            "progress_revision": 7,
+                        }
+                    ],
+                },
+            )
+        if request.url.path == "/api/workspaces/ws-1/sessions/s-old/archive":
+            return httpx.Response(200, json={"id": "s-old", "archived": True})
+        if request.url.path == "/api/workspaces/ws-1/tasks/task-1/progress":
+            payload = json.loads(request.content.decode())
+            assert payload["expected_execution_epoch"] == 3
+            assert payload["expected_progress_revision"] == 7
+            return httpx.Response(
+                200,
+                json={
+                    "task_id": "task-1",
+                    "execution_epoch": 3,
+                    "progress_revision": 8,
+                    "status": "working",
+                },
+            )
+        raise AssertionError(f"unexpected request {request.method} {request.url.path}")
+
+    patch_get_client(monkeypatch, handler)
+    arch = CliRunner().invoke(cli, ["session", "archive", "s-old"])
+    assert arch.exit_code == 0, arch.output
+    assert "archived s-old" in arch.output
+
+    prog = CliRunner().invoke(
+        cli,
+        [
+            "task",
+            "progress",
+            "task-1",
+            "--state",
+            "working",
+            "--summary",
+            "still going",
+            "--reporter-key-file",
+            str(key_file),
+        ],
+    )
+    assert prog.exit_code == 0, prog.output
+
+
+def test_remote_workspace_cwd_preserved_and_session_report_call_id(monkeypatch):
+    seen_create_body: dict = {}
+    seen_report_body: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/workspaces" and request.method == "GET":
+            return httpx.Response(200, json=[{"id": "ws-remote", "target": "remote"}])
+        if request.url.path == "/api/workspaces/ws-remote/tasks" and request.method == "POST":
+            seen_create_body.update(json.loads(request.content.decode()))
+            return httpx.Response(200, json={"id": "t-rem"})
+        if request.url.path == "/api/workspaces/tasks/t-rem/start" and request.method == "POST":
+            return httpx.Response(503, json={"detail": "SSH tunnel busy"})
+        if request.url.path == "/api/workspaces/sessions/s-1/reports" and request.method == "POST":
+            seen_report_body.update(json.loads(request.content.decode()))
+            return httpx.Response(200, json={"id": "r-1"})
+        raise AssertionError(f"unexpected {request.method} {request.url.path}")
+
+    patch_get_client(monkeypatch, handler)
+    run_res = CliRunner().invoke(
+        cli,
+        [
+            "task",
+            "run",
+            "ws-remote",
+            "--title",
+            "Remote job",
+            "--prompt",
+            "Check GPU",
+            "--cwd",
+            "~/remote_repo",
+            "--payload-json",
+            '{"request_key": "custom-rk-1"}',
+        ],
+    )
+    assert run_res.exit_code != 0
+    assert seen_create_body["cwd"] == "~/remote_repo"
+    assert seen_create_body["request_key"] == "custom-rk-1"
+    assert "Task t-rem created (request_key=custom-rk-1) but start failed" in run_res.output
+
+    rep_res = CliRunner().invoke(
+        cli,
+        [
+            "session",
+            "report",
+            "s-1",
+            "--state",
+            "working",
+            "--message",
+            "step 1",
+            "--call-id",
+            "rep-cid-1",
+        ],
+    )
+    assert rep_res.exit_code == 0, rep_res.output
+    assert seen_report_body["call_id"] == "rep-cid-1"
+
+
+@pytest.mark.asyncio
+async def test_backend_task_update_agent_type_and_remote_start_cwd(monkeypatch, tmp_path):
+    from datetime import datetime, timezone
+    from unittest.mock import AsyncMock
+
+    from claude_hub.models.schemas import (
+        AgentRuntimeStatus,
+        AgentType,
+        ExecutionTarget,
+        ManagedSession,
+        ManagedSessionStatus,
+        SessionKind,
+        StartTaskRequest,
+        Workspace,
+        WorkspaceSessionRole,
+        WorkspaceTaskCreate,
+        WorkspaceTaskRecipe,
+        WorkspaceTaskUpdate,
+    )
+    from claude_hub.services.workspace_manager import WorkspaceManager
+
+    monkeypatch.setenv("CLAUDE_HUB_HOME", str(tmp_path / "hub"))
+    wm = WorkspaceManager()
+    monkeypatch.setattr(wm, "_save_state", lambda: None)
+    monkeypatch.setattr(wm, "_save_workspace_state", lambda _ws_id: None)
+    now = datetime.now(timezone.utc)
+    local_dir = tmp_path / "repo"
+    local_dir.mkdir()
+    ws_local = Workspace(
+        id="ws-local",
+        name="local",
+        target=ExecutionTarget.LOCAL,
+        path=str(local_dir),
+        default_branch="main",
+        session_prefix="loc",
+        created_at=now,
+        updated_at=now,
+    )
+    ws_remote = Workspace(
+        id="ws-remote",
+        name="remote",
+        target=ExecutionTarget.REMOTE,
+        path="/opt/tiger/repo",
+        remote_profile_id="prof-1",
+        remote_cwd="/opt/tiger/repo",
+        default_branch="main",
+        session_prefix="rem",
+        created_at=now,
+        updated_at=now,
+    )
+    wm.workspaces[ws_local.id] = ws_local
+    wm.workspaces[ws_remote.id] = ws_remote
+
+    t_local = wm.create_task(
+        ws_local.id,
+        WorkspaceTaskCreate(
+            title="Local task",
+            prompt="Run",
+            agent_type=AgentType.CODEX,
+            cwd=str(local_dir),
+        ),
+    )
+    edited = await wm.update_task(
+        t_local.id,
+        WorkspaceTaskUpdate(
+            agent_type=AgentType.CLAUDE,
+            recipe=WorkspaceTaskRecipe.SPEC_IMPLEMENT_REVIEW,
+        ),
+    )
+    assert edited.agent_type == AgentType.CLAUDE
+    assert edited.auto_worktree is False
+
+    # Reject traex on a terminal task, allow joint (MASO, chat session) update,
+    # and reject binding a terminal session onto a MASO task.
+    t_term = wm.create_task(
+        ws_local.id,
+        WorkspaceTaskCreate(
+            title="Term task",
+            prompt="Run",
+            agent_type=AgentType.CODEX,
+            session_kind=SessionKind.TERMINAL,
+        ),
+    )
+    with pytest.raises(ValueError, match="TraeX is not supported"):
+        await wm.update_task(t_term.id, WorkspaceTaskUpdate(agent_type=AgentType.TRAEX))
+    maso_sess = ManagedSession(
+        id="s-maso-1",
+        workspace_id=ws_local.id,
+        workspace_path=str(local_dir),
+        role=WorkspaceSessionRole.ORCHESTRATOR,
+        title="MASO worker",
+        tab_id="tab-maso-1",
+        tmux_session="",
+        agent_type=AgentType.MASO,
+        session_kind=SessionKind.CHAT,
+        target=ExecutionTarget.LOCAL,
+        ephemeral=True,
+        caller_owned_ephemeral=True,
+        status=ManagedSessionStatus.IDLE,
+        runtime_status=AgentRuntimeStatus.IDLE,
+        created_at=now,
+        updated_at=now,
+    )
+    term_sess = maso_sess.model_copy(
+        update={
+            "id": "s-term-1",
+            "tab_id": "tab-term-1",
+            "agent_type": AgentType.CODEX,
+            "session_kind": SessionKind.TERMINAL,
+        }
+    )
+    wm.sessions[maso_sess.id] = maso_sess
+    wm.sessions[term_sess.id] = term_sess
+    upgraded = await wm.update_task(
+        t_term.id,
+        WorkspaceTaskUpdate(agent_type=AgentType.MASO, session_id="s-maso-1"),
+    )
+    assert upgraded.agent_type == AgentType.MASO
+    assert upgraded.session_kind == SessionKind.CHAT
+    with pytest.raises(ValueError, match="MASO is an HTTP Chat provider"):
+        await wm.update_task(
+            upgraded.id,
+            WorkspaceTaskUpdate(session_id="s-term-1"),
+        )
+
+    t_remote = wm.create_task(
+        ws_remote.id,
+        WorkspaceTaskCreate(
+            title="Remote task",
+            prompt="Run",
+            agent_type=AgentType.CODEX,
+            session_kind=SessionKind.TERMINAL,
+            cwd="~/remote_sub",
+        ),
+    )
+    captured_ensure = []
+
+    async def fake_ensure(workspace_id, payload, *, bootstrap=True):
+        captured_ensure.append((workspace_id, payload))
+        sess = ManagedSession(
+            id="s-rem-1",
+            workspace_id=workspace_id,
+            workspace_path=payload.remote_cwd or "/opt/tiger/repo",
+            remote_cwd=payload.remote_cwd,
+            role=WorkspaceSessionRole.ORCHESTRATOR,
+            title="Remote worker",
+            tab_id="tab-rem-1",
+            tmux_session="tmux-rem-1",
+            agent_type=payload.agent_type,
+            session_kind=payload.session_kind,
+            target=ExecutionTarget.REMOTE,
+            ephemeral=True,
+            caller_owned_ephemeral=True,
+            status=ManagedSessionStatus.IDLE,
+            runtime_status=AgentRuntimeStatus.IDLE,
+            created_at=now,
+            updated_at=now,
+        )
+        wm.sessions[sess.id] = sess
+        return sess
+
+    monkeypatch.setattr(wm, "ensure_workspace_agent", fake_ensure)
+    monkeypatch.setattr(wm, "dispatch_workspace", AsyncMock())
+    started = await wm.start_task(t_remote.id, StartTaskRequest())
+    assert started.session_id == "s-rem-1"
+    assert len(captured_ensure) == 1
+    assert captured_ensure[0][1].remote_cwd == "~/remote_sub"
+    assert captured_ensure[0][1].cwd is None

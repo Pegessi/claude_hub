@@ -98,8 +98,9 @@ def progress_args(path):
         "--json",
         "task",
         "progress",
-        "ws1",
         "task-1",
+        "--workspace-id",
+        "ws1",
         "--reporter-key-file",
         str(path),
         "--state",
@@ -120,8 +121,9 @@ def handoff_args(target="initiator"):
         "--json",
         "task",
         "handoff",
-        "ws1",
         "task-1",
+        "--workspace-id",
+        "ws1",
         "--execution-control",
         target,
         "--expected-execution-epoch",
@@ -149,8 +151,9 @@ def envelope():
 def test_help_exposes_explicit_commands():
     result = CliRunner().invoke(cli, ["task", "--help"])
     assert result.exit_code == 0
-    for name in ("register", "progress", "handoff", "dispatch", "context"):
+    for name in ("register", "progress", "handoff", "start", "run", "context"):
         assert name in result.output
+    assert "\n  dispatch " not in result.output
     for name in ("register", "progress"):
         help_text = CliRunner().invoke(cli, ["task", name, "--help"]).output
         assert "--tab-id" not in help_text
@@ -466,7 +469,7 @@ def test_handoff_reuse_requires_call_id_and_workspace_rejects_keys(tmp_path, mon
     assert captured == []
 
 
-def test_dispatch_has_explicit_start_request(monkeypatch):
+def test_start_has_explicit_start_request(monkeypatch):
     captured = patch_client(
         monkeypatch, lambda r: httpx.Response(200, json={**TASK, "execution_control": "workspace"})
     )
@@ -474,12 +477,16 @@ def test_dispatch_has_explicit_start_request(monkeypatch):
         cli,
         [
             "task",
-            "dispatch",
+            "start",
             "task-1",
             "--agent-type",
             "codex",
             "--target-session-id",
             "session-1",
+            "--model",
+            "gpt-5.4",
+            "--env-preset",
+            "day1",
             "--clear-context",
         ],
     )
@@ -488,17 +495,15 @@ def test_dispatch_has_explicit_start_request(monkeypatch):
     assert body(captured[0]) == {
         "agent_type": "codex",
         "target_session_id": "session-1",
+        "model": "gpt-5.4",
+        "env_preset": "day1",
         "clear_context": True,
     }
 
 
-def test_create_only_records_while_run_dispatches(monkeypatch):
+def test_create_only_records_while_run_creates_and_starts_without_shared_pool(monkeypatch):
     def handler(request):
-        return (
-            httpx.Response(200, json={"id": "session-1"})
-            if request.url.path.endswith("/agent")
-            else httpx.Response(201, json=TASK)
-        )
+        return httpx.Response(201, json=TASK)
 
     captured = patch_client(monkeypatch, handler)
     for operation, expected in [
@@ -506,7 +511,6 @@ def test_create_only_records_while_run_dispatches(monkeypatch):
         (
             "run",
             [
-                "/api/workspaces/ws1/agent",
                 "/api/workspaces/ws1/tasks",
                 "/api/workspaces/tasks/task-1/start",
             ],
@@ -522,6 +526,65 @@ def test_create_only_records_while_run_dispatches(monkeypatch):
             body(next(r for r in captured if r.url.path.endswith("/tasks")))["execution_control"]
             == "workspace"
         )
+
+
+def test_progress_auto_reads_cas_on_fresh_call_and_rejects_implicit_cas_on_retry(
+    tmp_path, monkeypatch
+):
+    path = key_file(tmp_path)
+
+    def handler(request):
+        if request.method == "GET" and request.url.path == "/api/workspaces/tasks/task-1":
+            return httpx.Response(200, json={**TASK, "execution_epoch": 3, "progress_revision": 5})
+        assert request.url.path == "/api/workspaces/ws1/tasks/task-1/progress"
+        return httpx.Response(200, json=envelope())
+
+    captured = patch_client(monkeypatch, handler)
+    fresh = CliRunner().invoke(
+        cli,
+        [
+            "--json",
+            "task",
+            "progress",
+            "task-1",
+            "--reporter-key-file",
+            str(path),
+            "--state",
+            "working",
+            "--summary",
+            "Step done",
+        ],
+    )
+    assert fresh.exit_code == 0, fresh.output
+    assert [r.url.path for r in captured] == [
+        "/api/workspaces/tasks/task-1",
+        "/api/workspaces/ws1/tasks/task-1/progress",
+    ]
+    assert body(captured[1])["expected_execution_epoch"] == 3
+    assert body(captured[1])["expected_progress_revision"] == 5
+    assert "expected_execution_epoch=3 expected_progress_revision=5" in fresh.stderr
+
+    captured.clear()
+    retry_missing_cas = CliRunner().invoke(
+        cli,
+        [
+            "--json",
+            "task",
+            "progress",
+            "task-1",
+            "--reporter-key-file",
+            str(path),
+            "--state",
+            "working",
+            "--summary",
+            "Step done",
+            "--call-id",
+            "retry-1",
+        ],
+    )
+    assert retry_missing_cas.exit_code == 2
+    assert "Retries with --call-id must pass both" in retry_missing_cas.output
+    assert captured == []
 
 
 @pytest.mark.parametrize(
@@ -574,8 +637,8 @@ def test_context_explicit_identity_is_separate_from_tab_observation(monkeypatch)
     def handler(request):
         if request.url.path.endswith("/task-context"):
             return httpx.Response(200, json=observed)
-        if request.url.path.endswith("/board"):
-            return httpx.Response(200, json={"tasks": [TASK]})
+        if request.url.path == "/api/workspaces/tasks/task-1":
+            return httpx.Response(200, json=TASK)
         return httpx.Response(200, json=CAPABILITIES)
 
     captured = patch_client(monkeypatch, handler)
@@ -590,7 +653,7 @@ def test_context_explicit_identity_is_separate_from_tab_observation(monkeypatch)
     assert "title" not in data and "latest_progress" not in data
     assert [r.url.path for r in captured] == [
         "/api/workspaces/tabs/main-tab/task-context",
-        "/api/workspaces/ws1/board",
+        "/api/workspaces/tasks/task-1",
         "/api/workspaces/ws1/task-capabilities",
     ]
     assert all(r.method == "GET" for r in captured)
@@ -609,10 +672,8 @@ def test_context_one_observed_task_is_only_a_lookup_clue(monkeypatch):
     def handler(request):
         if request.url.path.endswith("/task-context"):
             return httpx.Response(200, json=observed)
-        if request.url.path == "/api/workspaces":
-            return httpx.Response(200, json=[{"id": "ws1"}])
-        if request.url.path.endswith("/board"):
-            return httpx.Response(200, json={"tasks": [TASK]})
+        if request.url.path == "/api/workspaces/tasks/task-1":
+            return httpx.Response(200, json=TASK)
         return httpx.Response(200, json=CAPABILITIES)
 
     captured = patch_client(monkeypatch, handler)
@@ -622,8 +683,7 @@ def test_context_one_observed_task_is_only_a_lookup_clue(monkeypatch):
     assert data["task_id"] == "task-1" and data["observation_reason"] == "active"
     assert [r.url.path for r in captured] == [
         "/api/workspaces/tabs/main-tab/task-context",
-        "/api/workspaces",
-        "/api/workspaces/ws1/board",
+        "/api/workspaces/tasks/task-1",
         "/api/workspaces/ws1/task-capabilities",
     ]
 
@@ -907,8 +967,8 @@ def test_handoff_to_explicit_file_removes_the_superseded_default(key_dir, tmp_pa
     new = tmp_path / "new.key"
 
     def handler(request):
-        if request.url.path.endswith("/board"):
-            return httpx.Response(200, json={"tasks": [TASK]})
+        if request.url.path == "/api/workspaces/tasks/task-1":
+            return httpx.Response(200, json=TASK)
         if request.method == "GET":
             return httpx.Response(200, json=CAPABILITIES)
         data = envelope()
@@ -938,8 +998,8 @@ def test_handoff_to_explicit_file_removes_the_superseded_default(key_dir, tmp_pa
 
 def test_context_reports_only_the_default_key_path(key_dir, monkeypatch):
     def handler(request):
-        if request.url.path.endswith("/board"):
-            return httpx.Response(200, json={"tasks": [TASK]})
+        if request.url.path == "/api/workspaces/tasks/task-1":
+            return httpx.Response(200, json=TASK)
         return httpx.Response(200, json=CAPABILITIES)
 
     patch_client(monkeypatch, handler)

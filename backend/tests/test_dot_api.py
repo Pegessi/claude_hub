@@ -117,13 +117,13 @@ def test_setup_passes_provider_env_to_the_chat_tab(
 
     async def fake_create_tab(**kwargs: Any) -> SimpleNamespace:
         calls.append(("create", kwargs["env"]))
-        tabs["t-1"] = SimpleNamespace(
-            id="t-1",
+        tabs["dot-setup-tab-1"] = SimpleNamespace(
+            id="dot-setup-tab-1",
             archived=False,
             env=kwargs["env"] or {},
             session_kind=SimpleNamespace(value="terminal"),
         )
-        return tabs["t-1"]
+        return tabs["dot-setup-tab-1"]
 
     async def fake_switch_env(tab_id: str, env: dict[str, str], **_: Any) -> SimpleNamespace:
         calls.append(("switch", env))
@@ -140,7 +140,7 @@ def test_setup_passes_provider_env_to_the_chat_tab(
         json={"env_preset": "socks-proxy-1080", "env": {"ANTHROPIC_MODEL": "m"}},
     )
     assert first.status_code == 200, first.text
-    assert first.json()["tab_id"] == "t-1"
+    assert first.json()["tab_id"] == "dot-setup-tab-1"
     assert calls == [
         (
             "create",
@@ -155,10 +155,10 @@ def test_setup_passes_provider_env_to_the_chat_tab(
     # A user-chosen env is kept; an empty or built-in fallback env gets seeded.
     assert client.post("/api/dot/setup", json={"env": {"X": "1"}}).status_code == 200
     assert len(calls) == 1
-    tabs["t-1"].env = {}
+    tabs["dot-setup-tab-1"].env = {}
     assert client.post("/api/dot/setup", json={"env": {"X": "1"}}).status_code == 200
     assert calls[-1] == ("switch", {"X": "1"})
-    tabs["t-1"].env = dict(DEFAULT_CLAUDE_LAUNCH_ENV)
+    tabs["dot-setup-tab-1"].env = dict(DEFAULT_CLAUDE_LAUNCH_ENV)
     assert client.post("/api/dot/setup", json={"env": {"Y": "2"}}).status_code == 200
     assert calls[-1] == ("switch", {"Y": "2"})
     assert client.post("/api/dot/setup").status_code == 200
@@ -286,7 +286,7 @@ def test_cli_remember_recall_and_merge(
     assert merged["summary"] == "Fast attention on H100"
     assert merged["tags"] == ["gpu", "paper"] and merged["files"] == card["files"]
 
-    recall = runner.invoke(cli, ["--json", "dot", "recall", "H100"])
+    recall = runner.invoke(cli, ["--json", "dot", "cards", "H100"])
     assert json.loads(recall.output)[0]["id"] == card["id"]
 
     focus = runner.invoke(cli, ["dot", "focus", "add", "Ship Dot", "--priority", "1"])

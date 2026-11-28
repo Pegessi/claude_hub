@@ -18,18 +18,19 @@ REST below is the source of truth.
 ## CLI
 
 **Task Graph.** `claude-hub task` over `/api/workspaces/.../tasks/*`.
-Every `events` / `wait` / `ack` call requires an explicit `TASK_ID`
-(`task:<task_id>` consumer). `--call-id` on `followup` only (omit → new UUID,
-stderr `call_id=<id>`). `wait` does not ACK unless `--ack`.
+Every `events` / `ack` call requires an explicit `TASK_ID`
+(`task:<task_id>` consumer; `WS_ID` is resolved automatically in O(1) unless
+`--workspace-id` is passed). `--call-id` on `followup` / `progress` / `handoff`
+(omit → new UUID, stderr `call_id=<id>`). `events --wait` does not ACK unless `--ack`.
 
 ```bash
-uv run claude-hub --json task create WS_ID --title "Child step" --prompt "Do the sub-step." --parent-task-id PARENT_TASK_ID
-uv run claude-hub --json task tree WS_ID
-uv run claude-hub --json task tree WS_ID TASK_ID
-uv run claude-hub --json task events WS_ID TASK_ID --since-sequence 0
-uv run claude-hub --json task wait WS_ID TASK_ID --since-sequence 0 --subtree
-uv run claude-hub --json task ack WS_ID TASK_ID SEQUENCE
-uv run claude-hub --json task followup WS_ID TASK_ID --message "..." --call-id fu-1
+uv run claude-hub --json task create [WS_ID] --title "Child step" --prompt "Do the sub-step." --parent-task-id PARENT_TASK_ID
+uv run claude-hub --json task list [WS_ID] --tree
+uv run claude-hub --json task list [WS_ID] --tree --root TASK_ID
+uv run claude-hub --json task events TASK_ID --since-sequence 0
+uv run claude-hub --json task events TASK_ID --wait --since-sequence 0 --subtree
+uv run claude-hub --json task ack TASK_ID SEQUENCE
+uv run claude-hub --json task followup TASK_ID --message "..." --call-id fu-1
 uv run claude-hub --json task abort TASK_ID --reason "superseded"
 uv run claude-hub --json task start TASK_ID --target-session-id WORKER_SESSION_ID
 ```
@@ -46,8 +47,8 @@ and TaskMailbox events keyed by `task:<task_id>`.
 - **Task Graph (canonical).** `WorkspaceTask` nodes linked by `parent_task_id`
   (materialized `root_task_id` / `path`) and explicit `depends_on_task_ids` prerequisites.
   Parent edges express supervision, not execution order. Supervisors coordinate via TaskMailbox
-  consumers (`task:<task_id>` only). Primary commands: `tree`, `events`, `wait`,
-  `ack`, `followup`, `abort`, `start`. Durable cursor: `consumer_ack_sequence`
+  consumers (`task:<task_id>` only). Primary commands: `list --tree`, `events [--wait]`,
+  `ack`, `followup`, `abort`, `start`, `run`. Durable cursor: `consumer_ack_sequence`
   (per Task).
 - **Session assignment.** Each Task names at most one worker (`session_id`) and
   one reviewer (`review_session_id`). Dispatch/start assigns workers with
@@ -81,7 +82,7 @@ Every Task also has one derived **lifecycle**:
 - for queued work, the Task blocking it.
 
 The lifecycle is exposed as `WorkspaceBoard.task_lifecycles` and in
-`task list/get/status`; `task list --attention` lists only what needs a
+`task list/status`; `task list --attention` lists only what needs a
 person. A phase change emits one `lifecycle` mailbox event, which also wakes
 `wait`.
 
@@ -161,8 +162,7 @@ Before resuming an omitted task or acting on a clipped field, read its complete
 contract and evidence:
 
 ```bash
-claude-hub --json task status TASK_ID --workspace-id WS_ID
-claude-hub --json task report TASK_ID --workspace-id WS_ID --limit 5
+claude-hub --json task status TASK_ID --reports 5
 ```
 
 ## Task Graph REST (primary)

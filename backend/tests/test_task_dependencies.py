@@ -26,6 +26,7 @@ from claude_hub.models import (
     ManagedSessionStatus,
     ScheduledTask,
     ScheduledTaskKind,
+    SessionKind,
     User,
     WorkspaceCreate,
     WorkspaceSessionRole,
@@ -58,6 +59,7 @@ def workspace(manager, tmp_path):
 
 
 def create(manager, workspace, title="task", **kwargs):
+    kwargs.setdefault("session_kind", SessionKind.TERMINAL)
     return manager.create_task(
         workspace.id, WorkspaceTaskCreate(title=title, prompt="Implement and validate", **kwargs)
     )
@@ -147,7 +149,7 @@ async def test_start_gate_precedes_session_creation_and_requires_done(
     ensure.assert_not_called()
     refresh.assert_not_called()
     assert manager.tasks[dependent.id].status == WorkspaceTaskStatus.TODO
-    session_for(manager, workspace)
+    ensure.return_value = session_for(manager, workspace)
     manager.tasks[prerequisite.id] = prerequisite.model_copy(
         update={"status": WorkspaceTaskStatus.DONE}
     )

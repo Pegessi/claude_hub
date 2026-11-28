@@ -1,29 +1,26 @@
 """``schedule`` command group — manage scheduled tasks.
 
-Scheduled tasks fire an action on a cron / interval / one-off basis. Four
-kinds are supported:
-
+Four kinds are supported:
 * ``chat_turn`` — queue a native turn in an existing Chat conversation.
-* ``tab_message`` — type a message into an existing terminal tab's pane and
-  submit it. This is the agent self-scheduling primitive: an agent calls this
-  command (which hits the scheduling API) to register a schedule that
-  re-messages its own tab. The agent learns its own tab id from the
-  ``CLAUDE_HUB_TAB_ID`` environment variable, which the Hub injects into
-  every tab's environment.
+* ``tab_message`` — type a message into an existing terminal tab's pane.
 * ``new_session`` — create a new session in a workspace and send it a message.
-* ``hub_task`` — publish a Hub-native task that runs on a throwaway ephemeral
-  session and auto-cleans when done (no agent / reviewer resources held).
+* ``hub_task`` — publish a Hub-native task that runs in an isolated session.
 """
 
 from __future__ import annotations
 
-from typing import Any, Dict, List
+import os
+from typing import Any, Dict, List, Optional
 
 import click
 
 from claude_hub.cli import main as cli_main
 from claude_hub.cli.client import HubError
-from claude_hub.cli.commands.common import merge_payload
+from claude_hub.cli.commands.common import (
+    merge_payload,
+    parse_json_object,
+    resolve_workspace_id,
+)
 from claude_hub.cli.output import emit, print_rows, truncate
 
 SCHEDULE_COLUMNS = [
@@ -38,30 +35,31 @@ SCHEDULE_COLUMNS = [
 ]
 
 SCHEDULE_KINDS = ["chat_turn", "tab_message", "new_session", "hub_task"]
+RUN_COLUMNS = ["scheduled_for", "status", "id", "error"]
 
 
 def _schedule_body(
-    payload_json: str | None,
+    payload_json: Optional[str],
     *,
-    name: str | None,
-    kind: str | None,
-    enabled: bool | None,
-    run_at: str | None,
-    cron: str | None,
-    interval: int | None,
-    tab_id: str | None,
-    workspace_id: str | None,
-    agent_type: str | None,
-    message: str | None,
-    task_title: str | None,
-    env_preset: str | None = None,
+    name: Optional[str],
+    kind: Optional[str],
+    enabled: Optional[bool],
+    run_at: Optional[str],
+    cron: Optional[str],
+    interval: Optional[int],
+    tab_id: Optional[str],
+    workspace_id: Optional[str],
+    agent_type: Optional[str],
+    message: Optional[str],
+    task_title: Optional[str],
+    env_preset: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Build a scheduled-task body, validating the schedule spec locally."""
     schedule_fields = [run_at, cron, interval]
     provided = [f for f in schedule_fields if f is not None]
     if len(provided) > 1:
         raise click.ClickException("Only one of --run-at, --cron, or --interval may be set.")
-    body = merge_payload(
+    return merge_payload(
         payload_json,
         name=name,
         kind=kind,
@@ -76,7 +74,6 @@ def _schedule_body(
         task_title=task_title,
         env_preset=env_preset,
     )
-    return body
 
 
 @click.group()
@@ -116,31 +113,39 @@ def schedule_list(ctx: click.Context) -> None:
 
 
 @schedule.command("get")
-@click.argument("task_id")
+@click.argument("schedule_id")
 @click.pass_context
-def schedule_get(ctx: click.Context, task_id: str) -> None:
+def schedule_get(ctx: click.Context, schedule_id: str) -> None:
     """Fetch a single scheduled task."""
     try:
         with cli_main.get_client(ctx) as client:
-            data = client.get_scheduled_task(task_id)
+            data = client.get_scheduled_task(schedule_id)
     except HubError as e:
         raise click.ClickException(str(e)) from e
     emit(data, cli_main.as_json(ctx))
 
 
 @schedule.command("create")
-@click.option("--name", required=True, help="Human-readable task name.")
+@click.option("--name", required=True, help="Human-readable schedule name.")
 @click.option(
     "--kind",
     required=True,
     type=click.Choice(SCHEDULE_KINDS),
-    help="How the task fires when due.",
+    help="How the schedule fires when due.",
 )
 @click.option("--run-at", default=None, help="One-shot fire time (ISO 8601).")
 @click.option("--cron", default=None, help="5-field cron expression (e.g. '30 9 * * *').")
 @click.option("--interval", type=int, default=None, help="Repeat every N seconds.")
-@click.option("--tab-id", default=None, help="Target Chat/terminal tab (chat_turn/tab_message).")
-@click.option("--workspace-id", default=None, help="Workspace (new_session / hub_task kinds).")
+@click.option(
+    "--tab-id",
+    default=None,
+    help="Target Chat/terminal tab (defaults to $CLAUDE_HUB_TAB_ID for chat_turn/tab_message).",
+)
+@click.option(
+    "--workspace-id",
+    default=None,
+    help="Workspace id (defaults to cwd match for new_session/hub_task).",
+)
 @click.option(
     "--agent-type",
     default=None,
@@ -160,36 +165,54 @@ def schedule_create(
     ctx: click.Context,
     name: str,
     kind: str,
-    run_at: str | None,
-    cron: str | None,
-    interval: int | None,
-    tab_id: str | None,
-    workspace_id: str | None,
-    agent_type: str | None,
-    message: str | None,
-    task_title: str | None,
-    env_preset: str | None,
+    run_at: Optional[str],
+    cron: Optional[str],
+    interval: Optional[int],
+    tab_id: Optional[str],
+    workspace_id: Optional[str],
+    agent_type: Optional[str],
+    message: Optional[str],
+    task_title: Optional[str],
+    env_preset: Optional[str],
     enabled: bool,
-    payload_json: str | None,
+    payload_json: Optional[str],
 ) -> None:
     """Create a scheduled task. Exactly one of --run-at / --cron / --interval."""
-    body = _schedule_body(
-        payload_json,
-        name=name,
-        kind=kind,
-        enabled=enabled,
-        run_at=run_at,
-        cron=cron,
-        interval=interval,
-        tab_id=tab_id,
-        workspace_id=workspace_id,
-        agent_type=agent_type,
-        message=message,
-        task_title=task_title,
-        env_preset=env_preset,
-    )
+    raw_payload = parse_json_object(payload_json)
+    effective_tab = tab_id
+    if (
+        effective_tab is None
+        and "tab_id" not in raw_payload
+        and kind in ("chat_turn", "tab_message")
+    ):
+        env_tab = os.environ.get("CLAUDE_HUB_TAB_ID", "").strip()
+        if env_tab:
+            effective_tab = env_tab
+
     try:
         with cli_main.get_client(ctx) as client:
+            effective_ws = workspace_id
+            if (
+                effective_ws is None
+                and "workspace_id" not in raw_payload
+                and kind in ("new_session", "hub_task")
+            ):
+                effective_ws = resolve_workspace_id(client, None)
+            body = _schedule_body(
+                payload_json,
+                name=name,
+                kind=kind,
+                enabled=enabled,
+                run_at=run_at,
+                cron=cron,
+                interval=interval,
+                tab_id=effective_tab,
+                workspace_id=effective_ws,
+                agent_type=agent_type,
+                message=message,
+                task_title=task_title,
+                env_preset=env_preset,
+            )
             data = client.create_scheduled_task(body)
     except HubError as e:
         raise click.ClickException(str(e)) from e
@@ -197,8 +220,9 @@ def schedule_create(
 
 
 @schedule.command("update")
-@click.argument("task_id")
-@click.option("--name", default=None, help="New task name.")
+@click.argument("schedule_id")
+@click.option("--name", default=None, help="New schedule name.")
+@click.option("--enabled/--disabled", default=None, help="Enable or disable the schedule.")
 @click.option("--run-at", default=None, help="One-shot fire time (ISO 8601).")
 @click.option("--cron", default=None, help="5-field cron expression.")
 @click.option("--interval", type=int, default=None, help="Repeat every N seconds.")
@@ -216,29 +240,26 @@ def schedule_create(
 @click.pass_context
 def schedule_update(
     ctx: click.Context,
-    task_id: str,
-    name: str | None,
-    run_at: str | None,
-    cron: str | None,
-    interval: int | None,
-    tab_id: str | None,
-    workspace_id: str | None,
-    agent_type: str | None,
-    message: str | None,
-    task_title: str | None,
-    env_preset: str | None,
-    payload_json: str | None,
+    schedule_id: str,
+    name: Optional[str],
+    enabled: Optional[bool],
+    run_at: Optional[str],
+    cron: Optional[str],
+    interval: Optional[int],
+    tab_id: Optional[str],
+    workspace_id: Optional[str],
+    agent_type: Optional[str],
+    message: Optional[str],
+    task_title: Optional[str],
+    env_preset: Optional[str],
+    payload_json: Optional[str],
 ) -> None:
-    """Update fields of a scheduled task (kind is immutable).
-
-    When any schedule field (--run-at / --cron / --interval) is supplied the
-    next-run time is recomputed.
-    """
+    """Update fields (including --enabled/--disabled) of a scheduled task."""
     body = _schedule_body(
         payload_json,
         name=name,
         kind=None,
-        enabled=None,
+        enabled=enabled,
         run_at=run_at,
         cron=cron,
         interval=interval,
@@ -251,79 +272,91 @@ def schedule_update(
     )
     try:
         with cli_main.get_client(ctx) as client:
-            data = client.update_scheduled_task(task_id, body)
+            data = client.update_scheduled_task(schedule_id, body)
     except HubError as e:
         raise click.ClickException(str(e)) from e
     emit(data, cli_main.as_json(ctx))
 
 
 @schedule.command("delete")
-@click.argument("task_id")
+@click.argument("schedule_id")
 @click.pass_context
-def schedule_delete(ctx: click.Context, task_id: str) -> None:
+def schedule_delete(ctx: click.Context, schedule_id: str) -> None:
     """Delete a scheduled task."""
     try:
         with cli_main.get_client(ctx) as client:
-            client.delete_scheduled_task(task_id)
+            client.delete_scheduled_task(schedule_id)
     except HubError as e:
         raise click.ClickException(str(e)) from e
-    click.echo(f"deleted {task_id}")
-
-
-@schedule.command("enable")
-@click.argument("task_id")
-@click.pass_context
-def schedule_enable(ctx: click.Context, task_id: str) -> None:
-    """Enable a scheduled task."""
-    try:
-        with cli_main.get_client(ctx) as client:
-            data = client.update_scheduled_task(task_id, {"enabled": True})
-    except HubError as e:
-        raise click.ClickException(str(e)) from e
-    emit(data, cli_main.as_json(ctx))
-
-
-@schedule.command("disable")
-@click.argument("task_id")
-@click.pass_context
-def schedule_disable(ctx: click.Context, task_id: str) -> None:
-    """Disable a scheduled task."""
-    try:
-        with cli_main.get_client(ctx) as client:
-            data = client.update_scheduled_task(task_id, {"enabled": False})
-    except HubError as e:
-        raise click.ClickException(str(e)) from e
-    emit(data, cli_main.as_json(ctx))
+    if cli_main.as_json(ctx):
+        emit({"ok": True, "schedule_id": schedule_id}, True)
+    else:
+        click.echo(f"deleted {schedule_id}")
 
 
 @schedule.command("run")
-@click.argument("task_id")
+@click.argument("schedule_id")
 @click.pass_context
-def schedule_run(ctx: click.Context, task_id: str) -> None:
-    """Fire a scheduled task immediately.
-
-    Stamps and advances the schedule like a tick fire (a one-shot is disabled
-    after firing). Exits non-zero if the fire side-effect fails.
-    """
+def schedule_run(ctx: click.Context, schedule_id: str) -> None:
+    """Fire a scheduled task immediately."""
     try:
         with cli_main.get_client(ctx) as client:
-            data = client.run_scheduled_task(task_id)
+            data = client.run_scheduled_task(schedule_id)
     except HubError as e:
         raise click.ClickException(str(e)) from e
     emit(data, cli_main.as_json(ctx))
 
 
-RUN_COLUMNS = ["scheduled_for", "status", "id", "error"]
-
-
 @schedule.command("runs")
-@click.argument("task_id")
+@click.argument("schedule_id", required=False, default=None)
+@click.option(
+    "--cancel",
+    "cancel_run_id",
+    default=None,
+    help="Cancel one scheduled run by RUN_ID.",
+)
+@click.option(
+    "--clear",
+    is_flag=True,
+    default=False,
+    help="Cancel all queued/waiting occurrences of SCHEDULE_ID.",
+)
 @click.pass_context
-def schedule_runs(ctx: click.Context, task_id: str) -> None:
-    """List the durable Chat runs of a task (newest first)."""
+def schedule_runs(
+    ctx: click.Context,
+    schedule_id: Optional[str],
+    cancel_run_id: Optional[str],
+    clear: bool,
+) -> None:
+    """List durable runs of a schedule, cancel one run (--cancel), or clear backlog (--clear)."""
+    if cancel_run_id and clear:
+        raise click.UsageError("Pass either --cancel RUN_ID or --clear, not both.")
+    if cancel_run_id:
+        try:
+            with cli_main.get_client(ctx) as client:
+                data = client.cancel_scheduled_task_run(cancel_run_id)
+        except HubError as e:
+            raise click.ClickException(str(e)) from e
+        emit(data, cli_main.as_json(ctx))
+        return
+
+    if not schedule_id:
+        raise click.UsageError("SCHEDULE_ID is required unless --cancel RUN_ID is passed.")
+
+    if clear:
+        try:
+            with cli_main.get_client(ctx) as client:
+                data = client.clear_scheduled_task_backlog(schedule_id)
+        except HubError as e:
+            raise click.ClickException(str(e)) from e
+        emit(data, cli_main.as_json(ctx))
+        if not cli_main.as_json(ctx):
+            click.echo(f"cancelled {data.get('cancelled', 0)} queued run(s)")
+        return
+
     try:
         with cli_main.get_client(ctx) as client:
-            data = client.list_scheduled_task_runs(task_id)
+            data = client.list_scheduled_task_runs(schedule_id)
     except HubError as e:
         raise click.ClickException(str(e)) from e
     if cli_main.as_json(ctx):
@@ -339,35 +372,3 @@ def schedule_runs(ctx: click.Context, task_id: str) -> None:
         for item in data or []
     ]
     print_rows(rows, RUN_COLUMNS)
-
-
-@schedule.command("cancel-run")
-@click.argument("run_id")
-@click.pass_context
-def schedule_cancel_run(ctx: click.Context, run_id: str) -> None:
-    """Cancel one wedged or queued scheduled Chat run.
-
-    Releases a run stuck in queued/waiting/dispatching/running without a
-    backend restart; the tab's queue then drains to the next occurrence.
-    """
-    try:
-        with cli_main.get_client(ctx) as client:
-            data = client.cancel_scheduled_task_run(run_id)
-    except HubError as e:
-        raise click.ClickException(str(e)) from e
-    emit(data, cli_main.as_json(ctx))
-
-
-@schedule.command("clear-runs")
-@click.argument("task_id")
-@click.pass_context
-def schedule_clear_runs(ctx: click.Context, task_id: str) -> None:
-    """Cancel every queued/waiting occurrence of a task (a live run is kept)."""
-    try:
-        with cli_main.get_client(ctx) as client:
-            data = client.clear_scheduled_task_backlog(task_id)
-    except HubError as e:
-        raise click.ClickException(str(e)) from e
-    emit(data, cli_main.as_json(ctx))
-    if not cli_main.as_json(ctx):
-        click.echo(f"cancelled {data.get('cancelled', 0)} queued run(s)")

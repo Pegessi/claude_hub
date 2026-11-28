@@ -218,7 +218,7 @@ async def test_snapshot_brief_and_overview_include_initiator_progress(manager, w
     assert "pytest 42 passed" in snapshot
     assert "outputs/NEXT_EXPERIMENT.md" in snapshot
     assert "Inspect the latest initiator progress blocker/question" in snapshot
-    assert f"claude-hub task brief {task.id} --workspace-id {workspace.id}" in snapshot
+    assert f"claude-hub task status {task.id} --brief" in snapshot
 
     brief = manager.get_task_brief(workspace.id, task.id)
     assert brief["task_id"] == task.id
