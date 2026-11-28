@@ -2,11 +2,26 @@
 
 import asyncio
 from datetime import timedelta
+from typing import Iterator
 from unittest.mock import AsyncMock
+
+import pytest
 
 from claude_hub.models import AgentReport, AgentReportState, WorkspaceTaskStatus
 from claude_hub.services.workspace_manager.prompts.review import BLIND_REVIEW_RULES
 from tests.test_review_delivery import delivery_env  # noqa: F401
+
+
+@pytest.fixture(autouse=True)
+def isolated_event_loop_policy() -> Iterator[None]:
+    # asyncio.run() clears its policy's current loop; keep that test-local so
+    # synchronous stream tests do not inherit a cleared default loop.
+    previous = asyncio.get_event_loop_policy()
+    asyncio.set_event_loop_policy(asyncio.DefaultEventLoopPolicy())
+    try:
+        yield
+    finally:
+        asyncio.set_event_loop_policy(previous)
 
 
 def test_review_failure_cap_and_liveness(delivery_env, monkeypatch):
