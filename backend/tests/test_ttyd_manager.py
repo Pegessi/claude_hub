@@ -6430,3 +6430,174 @@ async def test_delete_failure_or_cancellation_preserves_owner_and_releases_lock(
     finally:
         release.set()
         await _finish_lifecycle_calls([task])
+
+
+@pytest.mark.asyncio
+async def test_configure_tmux_compounds_commands_without_fixed_sleep(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    process = TTYDProcess(tab_id="cfg-tab", port=45501, name="cfg")
+    process._tmux_session_known_ready = True
+    exec_calls: list[tuple[str, ...]] = []
+
+    class _DoneProc:
+        returncode = 0
+
+        async def wait(self) -> int:
+            return 0
+
+    async def fake_exec(*args: str, **_kwargs: object) -> _DoneProc:
+        exec_calls.append(tuple(args))
+        return _DoneProc()
+
+    async def forbid_sleep(delay: float) -> None:
+        raise AssertionError(f"_configure_tmux must not sleep({delay})")
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+    monkeypatch.setattr(asyncio, "sleep", forbid_sleep)
+
+    await process._configure_tmux()
+    assert len(exec_calls) == 1
+    joined = " ".join(exec_calls[0])
+    assert "status off" in joined
+    assert "history-limit" in joined
+    assert process.tmux_session in exec_calls[0]
+
+
+@pytest.mark.asyncio
+async def test_list_tab_agent_statuses_batches_panes_and_chat_summaries(
+    monkeypatch: MonkeyPatch, tmp_path: Path
+) -> None:
+    from claude_hub.models import AgentStreamEvent, AgentStreamEventType
+    from claude_hub.services.agent_stream import store as store_mod
+    from claude_hub.services.terminal_runtime import tmux_control
+
+    wm_module = importlib.import_module("claude_hub.services.workspace_manager")
+    monkeypatch.setattr(wm_module, "STATE_ROOT", tmp_path / "state")
+    manager = TTYDManager()
+    manager.processes.clear()
+    manager._tab_order.clear()
+    manager._status_cache.clear()
+
+    now_utc = datetime.now(timezone.utc)
+    for idx in range(3):
+        tid = f"chat-batch-{idx}"
+        st = store_mod.AgentStreamStore("terminal-tabs", f"terminal-tab-{tid}")
+        st._replace_rows(
+            [
+                AgentStreamEvent(
+                    stream_sequence=0,
+                    session_id=tid,
+                    tab_id=tid,
+                    agent_type=AgentType.CODEX,
+                    created_at=now_utc,
+                    turn_id="t1",
+                    type=AgentStreamEventType.TEXT_DELTA,
+                    payload={"text": f"hello-{idx}"},
+                ),
+                AgentStreamEvent(
+                    stream_sequence=1,
+                    session_id=tid,
+                    tab_id=tid,
+                    agent_type=AgentType.CODEX,
+                    created_at=now_utc,
+                    turn_id="t1",
+                    type=AgentStreamEventType.TURN_COMPLETED,
+                    payload={},
+                ),
+            ]
+        )
+        proc = TTYDProcess(
+            tab_id=tid,
+            port=45600 + idx,
+            name=f"Chat {idx}",
+            cwd=str(tmp_path),
+            agent_type=AgentType.CODEX,
+            session_kind=SessionKind.CHAT,
+        )
+        manager.processes[tid] = proc
+        manager._tab_order.append(tid)
+
+    live_term = TTYDProcess(
+        tab_id="term-live",
+        port=45610,
+        name="Live Term",
+        cwd=str(tmp_path),
+        agent_type=AgentType.CLAUDE,
+        session_kind=SessionKind.TERMINAL,
+    )
+    dead_term = TTYDProcess(
+        tab_id="term-dead",
+        port=45611,
+        name="Dead Term",
+        cwd=str(tmp_path),
+        agent_type=AgentType.CLAUDE,
+        session_kind=SessionKind.TERMINAL,
+    )
+    manager.processes[live_term.tab_id] = live_term
+    manager.processes[dead_term.tab_id] = dead_term
+    manager._tab_order.extend([live_term.tab_id, dead_term.tab_id])
+
+    pane_calls = 0
+
+    async def fake_list_panes(_runtime: object) -> tuple[set[str], dict[str, str | None]]:
+        nonlocal pane_calls
+        pane_calls += 1
+        return {live_term.tmux_session}, {live_term.tmux_session: "claude"}
+
+    exists_calls = 0
+
+    async def fake_exists(_session: str) -> bool:
+        nonlocal exists_calls
+        exists_calls += 1
+        return True
+
+    fg_calls = 0
+
+    async def forbid_fg(self: TTYDProcess) -> str | None:
+        nonlocal fg_calls
+        fg_calls += 1
+        return "claude"
+
+    exec_cmds: list[tuple[str, ...]] = []
+
+    class _CaptureProc:
+        returncode = 0
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            return (b"Ready for prompt", b"")
+
+    async def fake_exec(*args: str, **_kwargs: object) -> _CaptureProc:
+        exec_cmds.append(tuple(args))
+        return _CaptureProc()
+
+    batch_summary_calls = 0
+    real_batch = store_mod.read_stream_summaries_batch_sync
+
+    def spy_batch(
+        paths: dict[str, Path], *args: object, **kwargs: object
+    ) -> dict[str, store_mod.StreamSummary | None]:
+        nonlocal batch_summary_calls
+        batch_summary_calls += 1
+        return real_batch(paths, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(tmux_control, "_tmux_list_session_panes", fake_list_panes)
+    monkeypatch.setattr(ttyd_manager_module, "_tmux_session_exists_async", fake_exists)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+    monkeypatch.setattr(store_mod, "read_stream_summaries_batch_sync", spy_batch)
+    monkeypatch.setattr(
+        ttyd_manager_module, "native_provider_binary_available", lambda _agent: True
+    )
+
+    statuses = await manager.list_tab_agent_statuses()
+    by_id = {st.tab_id: st for st in statuses}
+    assert len(statuses) == 5
+    assert pane_calls == 1
+    assert batch_summary_calls == 1
+    assert exists_calls == 0
+    assert fg_calls == 0
+    assert len(exec_cmds) == 1 and "capture-pane" in exec_cmds[0]
+    assert by_id["chat-batch-0"].last_reply_excerpt == "hello-0"
+    assert by_id["chat-batch-2"].last_reply_excerpt == "hello-2"
+    assert by_id["term-live"].detail == "claude is waiting"
+    assert by_id["term-dead"].status == AgentRuntimeStatus.OFFLINE

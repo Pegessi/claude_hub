@@ -28,13 +28,9 @@ class ProcessCaptureMixin(ProcessHost):
             logger.debug(f"Error reading stderr for tab {self.tab_id}: {e}")
 
     async def _configure_tmux(self) -> None:
-        """Configure tmux options for better mouse scrolling and user experience."""
+        """Configure tmux options in batched invocations without fixed sleeps."""
         try:
-            # Wait a bit for tmux session to be ready
-            await asyncio.sleep(0.5)
-
-            # Set tmux options - these will apply to all sessions
-            tmux_commands = [
+            global_commands: list[list[str]] = [
                 ["set", "-g", "mouse", "off"],
                 ["set", "-g", "history-limit", "100000"],
                 ["set", "-g", "terminal-overrides", "xterm*:smcup@:rmcup@"],
@@ -55,28 +51,29 @@ class ProcessCaptureMixin(ProcessHost):
                 ["set", "-g", "status", "off"],
             ]
 
-            for cmd in tmux_commands:
-                try:
-                    proc = await asyncio.create_subprocess_exec(
-                        *self._runtime.tmux_command(*cmd),
-                        stdout=asyncio.subprocess.DEVNULL,
-                        stderr=asyncio.subprocess.DEVNULL,
-                    )
-                    await proc.wait()
-                except Exception:
-                    pass
+            chained_args: list[str] = []
+            for idx, cmd in enumerate(global_commands):
+                if idx > 0:
+                    chained_args.append(";")
+                chained_args.extend(cmd)
 
-            # Set options on our specific session too
-            for cmd in tmux_commands:
-                try:
-                    proc = await asyncio.create_subprocess_exec(
-                        *self._runtime.tmux_command("-t", self.tmux_session, *cmd),
-                        stdout=asyncio.subprocess.DEVNULL,
-                        stderr=asyncio.subprocess.DEVNULL,
-                    )
-                    await proc.wait()
-                except Exception:
-                    pass
+            if getattr(self, "_tmux_session_known_ready", False):
+                session_commands: list[list[str]] = [
+                    ["set", "-t", self.tmux_session, "mouse", "off"],
+                    ["set", "-t", self.tmux_session, "history-limit", "100000"],
+                    ["set", "-t", self.tmux_session, "mode-keys", "vi"],
+                    ["set", "-t", self.tmux_session, "status", "off"],
+                ]
+                for cmd in session_commands:
+                    chained_args.append(";")
+                    chained_args.extend(cmd)
+
+            proc = await asyncio.create_subprocess_exec(
+                *self._runtime.tmux_command(*chained_args),
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            await proc.wait()
 
             logger.info(f"Configured tmux options for tab {self.tab_id}")
         except Exception as e:
@@ -127,7 +124,9 @@ class ProcessCaptureMixin(ProcessHost):
         )
         return await self._run_remote_capture_command(self._remote_shell_command(script))
 
-    async def _capture_local_history(self, lines: int = 100000) -> str:
+    async def _capture_local_history(
+        self, lines: int = 100000, *, known_alive: bool = False
+    ) -> str:
         """Capture full terminal history from tmux for replay on reconnect.
 
         Captures the entire terminal content (scrollback + visible screen)
@@ -138,7 +137,9 @@ class ProcessCaptureMixin(ProcessHost):
         Returns an empty string if the tmux session does not exist yet
         (ttyd creates sessions lazily on first WebSocket connection).
         """
-        if not await self._runtime._tmux_session_exists_async(self.tmux_session):
+        if not known_alive and not await self._runtime._tmux_session_exists_async(
+            self.tmux_session
+        ):
             return ""
         safe_lines = max(100, min(lines, 100000))
         start = f"-{safe_lines}"
@@ -158,12 +159,17 @@ class ProcessCaptureMixin(ProcessHost):
         )
         stdout, stderr = await proc.communicate()
         if proc.returncode != 0:
+            if known_alive:
+                # Session disappeared between the batch inventory and capture.
+                return ""
             error = stderr.decode("utf-8", errors="ignore").strip()
             raise RuntimeError(error or f"tmux capture-pane failed with code {proc.returncode}")
 
         return stdout.decode("utf-8", errors="ignore")
 
-    async def capture_history(self, lines: int = 100000, prefer_remote: bool = False) -> str:
+    async def capture_history(
+        self, lines: int = 100000, prefer_remote: bool = False, *, known_alive: bool = False
+    ) -> str:
         if prefer_remote and self.target == ExecutionTarget.REMOTE:
             try:
                 remote_history = await self._capture_remote_history(lines)
@@ -175,6 +181,8 @@ class ProcessCaptureMixin(ProcessHost):
                     self.tab_id,
                     e,
                 )
+        if known_alive:
+            return await self._capture_local_history(lines, known_alive=True)
         return await self._capture_local_history(lines)
 
     async def _capture_local_cursor_position(self) -> Optional[CursorPosition]:

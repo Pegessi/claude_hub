@@ -856,3 +856,68 @@ test('Cross-Review can retry a failed create after empty reconciliation', async 
   assert.equal(goal.goal.value.id, 'goal-1')
   assert.equal(goal.isCrossReviewOpen.value, false)
 })
+
+test('hot model switch refreshes capabilities in place without restarting the live stream', async t => {
+  const h = await mount(t)
+  const settings = h.owner(h.keys.chatSettingsKey)
+  const tab = h.state.store.tabs[0]
+  h.state.store.switchEnv = async (_id, data) => {
+    tab.env = { ...data.env }
+  }
+  const startsBefore = h.state.calls.filter(([name]) => name === 'start').length
+  const refreshesBefore = h.state.calls.filter(([name]) => name === 'refreshCapabilities').length
+
+  await settings.selectModelAndEffort(
+    { id: 'gpt-5.5', label: 'GPT 5.5', supported_reasoning_efforts: [{ id: 'high', label: 'High' }] },
+    'high',
+  )
+  await flush()
+
+  assert.equal(
+    h.state.calls.filter(([name]) => name === 'start').length,
+    startsBefore,
+    'hot model/effort update must not tear down and restart the live stream',
+  )
+  assert.equal(
+    h.state.calls.filter(([name]) => name === 'refreshCapabilities').length,
+    refreshesBefore + 1,
+  )
+
+  // Cold environment changes (e.g. endpoint or home) still restart the stream.
+  tab.env = { ...tab.env, CODEX_HOME: '/isolated/codex-home' }
+  await flush()
+  assert.equal(
+    h.state.calls.filter(([name]) => name === 'start').length,
+    startsBefore + 1,
+  )
+})
+
+test('reconciling banner stays quiet during brief catch-up unless Stop is armed', async t => {
+  const h = await mount(t)
+  const stream = h.state.streams[0]
+  const timeline = h.owner(h.keys.chatTimelineKey)
+
+  stream.events.value = []
+  stream.connectionState.value = 'reconciling'
+  await flush()
+  assert.equal(timeline.timelineLoadingMessage.value, '', 'fast reconciliation must not flash banner')
+
+  // Active turn arms Stop immediately so the user can abort without waiting.
+  stream.events.value = [{
+    stream_sequence: 1,
+    type: 'turn_started',
+    payload: { summary: 'running' },
+    session_id: 's',
+    tab_id: 'one',
+    turn_id: 'turn-live',
+    agent_type: 'codex',
+    created_at: new Date().toISOString(),
+    redacted: false,
+  }]
+  await flush()
+  assert.equal(timeline.timelineLoadingMessage.value, 'Updating conversation…')
+
+  stream.connectionState.value = 'live'
+  await flush()
+  assert.equal(timeline.timelineLoadingMessage.value, '')
+})

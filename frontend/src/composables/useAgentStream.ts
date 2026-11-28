@@ -605,6 +605,7 @@ export function useAgentStream(configuration: () => string = () => ''): UseAgent
         const caps = JSON.parse(ev.data) as StreamCapabilities
         capabilities.value = caps
         agentStreamCapabilitiesCache.set(streamPath, helloConfiguration, caps)
+        if (caps.structured && historyReady.value) cacheCurrentHistory()
         if (!caps.structured) {
           const message = caps.unavailable_reason || 'structured observation unavailable for this session'
           if (stateMachine.fail(generationId, message)) {
@@ -678,6 +679,9 @@ export function useAgentStream(configuration: () => string = () => ''): UseAgent
     const requestConfiguration = configuration()
     const requestRevision = capabilitiesRevision
     const cachedCapabilities = agentStreamCapabilitiesCache.get(streamPath, requestConfiguration)
+    if (cachedCapabilities?.structured) {
+      capabilities.value = cachedCapabilities
+    }
     // Handle rejection immediately: history may finish after a failed capability
     // request, and remains useful even when the execution backend is unavailable.
     const prepared = (cachedCapabilities
@@ -935,6 +939,7 @@ export function useAgentStream(configuration: () => string = () => ''): UseAgent
       ) return
       capabilities.value = nextCapabilities
       agentStreamCapabilitiesCache.set(streamPath, requestConfiguration, nextCapabilities)
+      if (nextCapabilities.structured && historyReady.value) cacheCurrentHistory()
       if (!nextCapabilities.structured) {
         const message = nextCapabilities.unavailable_reason || 'structured observation unavailable for this session'
         if (stateMachine.fail(generationId, message)) {

@@ -250,7 +250,8 @@ def _help_confirms_plan_mode(binary: str, flag: str) -> bool:
 _ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 _OSC_RE = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
 _MARKER_RE = re.compile(r"\s*\((default|current)\)\s*$", re.IGNORECASE)
-_MODELS_POSITIVE_TTL_S = 600.0  # successful probe: 10 minutes
+_MODELS_POSITIVE_TTL_S = 1800.0  # successful probe: 30 minutes (aligned with UI cache)
+_MODELS_PREEMPTIVE_REFRESH_S = 300.0  # refresh in background within final 5 minutes
 _MODELS_NEGATIVE_TTL_S = 60.0  # failed probe (static fallback): 1 minute
 _REASONING_EFFORTS = set(REASONING_EFFORTS)
 _REASONING_LABELS = {
@@ -331,14 +332,30 @@ def _static_options(agent_type: str) -> List[StreamModelOption]:
     )
 
 
+_CODEX_CACHE_PARSED_MAX = 16
+_CODEX_CACHE_PARSED: Dict[Tuple[Optional[bytes], Tuple[str, ...]], List[StreamModelOption]] = {}
+
+
 def _codex_model_options(env: Dict[str, str]) -> List[StreamModelOption]:
     """Read this Codex home's catalog without freezing it in a process-wide TTL."""
     effective = {**os.environ, **env}
     home = Path(effective.get("HOME") or "~").expanduser()
     root = Path(effective.get("CODEX_HOME") or home / ".codex").expanduser()
     try:
-        payload = json.loads((root / "models_cache.json").read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+        raw_bytes: Optional[bytes] = (root / "models_cache.json").read_bytes()
+    except OSError:
+        raw_bytes = None
+    static_ids = tuple(option.id for option in _static_options("codex"))
+    cache_key = (raw_bytes, static_ids)
+    cached = _CODEX_CACHE_PARSED.get(cache_key)
+    if cached is not None:
+        return list(cached)
+    if raw_bytes is not None:
+        try:
+            payload = json.loads(raw_bytes.decode("utf-8"))
+        except ValueError:
+            payload = None
+    else:
         payload = None
     rows = provider_model_options.codex_cache_rows(payload)
     # The cache enriches known IDs and may advertise releases the persistent
@@ -354,9 +371,12 @@ def _codex_model_options(env: Dict[str, str]) -> List[StreamModelOption]:
             label=model,
             description="Codex fallback model; availability depends on your account.",
         )
-        for model in (option.id for option in _static_options("codex"))
+        for model in static_ids
         if model not in cache_ids
     )
+    if len(_CODEX_CACHE_PARSED) >= _CODEX_CACHE_PARSED_MAX:
+        _CODEX_CACHE_PARSED.pop(next(iter(_CODEX_CACHE_PARSED)), None)
+    _CODEX_CACHE_PARSED[cache_key] = list(options)
     return options
 
 
@@ -493,10 +513,67 @@ class _ModelsCacheEntry:
 _models_cache: Dict[str, _ModelsCacheEntry] = {}
 _models_lock = asyncio.Lock()
 _models_locks: Dict[str, asyncio.Lock] = {}
+_models_refresh_tasks: Dict[str, asyncio.Task[None]] = {}
 
 
 def _models_lock_for(agent_type: str) -> asyncio.Lock:
     return _models_locks.setdefault(agent_type, asyncio.Lock())
+
+
+async def _probe_and_store_model_catalog(
+    agent_type: str, prior_entry: Optional[_ModelsCacheEntry]
+) -> ModelCatalog:
+    metadata_cacheable = True
+    if agent_type == "cursor":
+        options, is_fallback = await _probe_cursor_models()
+        # A transient outage should not replace a previously discovered
+        # catalog with the much smaller static emergency list.
+        if is_fallback and prior_entry is not None:
+            options = prior_entry.options
+        ttl = _MODELS_NEGATIVE_TTL_S if is_fallback else _MODELS_POSITIVE_TTL_S
+        metadata_cacheable = not is_fallback
+    elif agent_type == "antigravity":
+        options, is_fallback = await _probe_antigravity_models()
+        if is_fallback and prior_entry is not None:
+            options = prior_entry.options
+        ttl = _MODELS_NEGATIVE_TTL_S if is_fallback else _MODELS_POSITIVE_TTL_S
+        metadata_cacheable = not is_fallback
+    else:
+        options = _static_options(agent_type)
+        ttl = _MODELS_POSITIVE_TTL_S
+    _models_cache[agent_type] = _ModelsCacheEntry(
+        options, time.monotonic() + ttl, metadata_cacheable=metadata_cacheable
+    )
+    return ModelCatalog(options, metadata_cacheable=metadata_cacheable)
+
+
+def _schedule_preemptive_model_refresh(agent_type: str) -> None:
+    existing = _models_refresh_tasks.get(agent_type)
+    if existing is not None and not existing.done():
+        return
+
+    async def _run() -> None:
+        try:
+            async with _models_lock_for(agent_type):
+                entry = _models_cache.get(agent_type)
+                now = time.monotonic()
+                if (
+                    entry is not None
+                    and entry.metadata_cacheable
+                    and (entry.expires_at - now) >= _MODELS_PREEMPTIVE_REFRESH_S
+                ):
+                    return
+                await _probe_and_store_model_catalog(agent_type, entry)
+        except Exception:
+            logger.debug(
+                "Preemptive model catalog refresh failed for %s", agent_type, exc_info=True
+            )
+        finally:
+            if _models_refresh_tasks.get(agent_type) is task:
+                _models_refresh_tasks.pop(agent_type, None)
+
+    task = asyncio.create_task(_run())
+    _models_refresh_tasks[agent_type] = task
 
 
 async def model_catalog_for(agent_type: str) -> ModelCatalog:
@@ -506,32 +583,19 @@ async def model_catalog_for(agent_type: str) -> ModelCatalog:
     entry = _models_cache.get(agent_type)
     now = time.monotonic()
     if entry is not None and entry.expires_at > now:
+        if (
+            agent_type in {"cursor", "antigravity"}
+            and entry.metadata_cacheable
+            and (entry.expires_at - now) < _MODELS_PREEMPTIVE_REFRESH_S
+        ):
+            _schedule_preemptive_model_refresh(agent_type)
         return ModelCatalog(entry.options, metadata_cacheable=entry.metadata_cacheable)
     async with _models_lock_for(agent_type):
         entry = _models_cache.get(agent_type)
         now = time.monotonic()
         if entry is not None and entry.expires_at > now:
             return ModelCatalog(entry.options, metadata_cacheable=entry.metadata_cacheable)
-        metadata_cacheable = True
-        if agent_type == "cursor":
-            options, is_fallback = await _probe_cursor_models()
-            # A transient outage should not replace a previously discovered
-            # catalog with the much smaller static emergency list.
-            if is_fallback and entry is not None:
-                options = entry.options
-            ttl = _MODELS_NEGATIVE_TTL_S if is_fallback else _MODELS_POSITIVE_TTL_S
-            metadata_cacheable = not is_fallback
-        elif agent_type == "antigravity":
-            options, is_fallback = await _probe_antigravity_models()
-            ttl = _MODELS_NEGATIVE_TTL_S if is_fallback else _MODELS_POSITIVE_TTL_S
-            metadata_cacheable = not is_fallback
-        else:
-            options = _static_options(agent_type)
-            ttl = _MODELS_POSITIVE_TTL_S
-        _models_cache[agent_type] = _ModelsCacheEntry(
-            options, time.monotonic() + ttl, metadata_cacheable=metadata_cacheable
-        )
-        return ModelCatalog(options, metadata_cacheable=metadata_cacheable)
+        return await _probe_and_store_model_catalog(agent_type, entry)
 
 
 async def available_models_for(agent_type: str) -> List[StreamModelOption]:

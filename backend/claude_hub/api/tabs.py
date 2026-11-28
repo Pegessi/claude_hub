@@ -177,10 +177,13 @@ async def list_tabs(current_user: User = Depends(get_current_user)) -> List[Term
     tabs = ttyd_manager.list_tabs()
     # Attach the unread flag (computed from the event stream) so the sidebar
     # can highlight tabs with unread completed turns.
+    processes = [
+        process for tab in tabs if (process := ttyd_manager.processes.get(tab.id)) is not None
+    ]
+    unread_by_id = await ttyd_manager.compute_tabs_unread(processes)
     for tab in tabs:
-        process = ttyd_manager.processes.get(tab.id)
-        if process is not None:
-            tab.is_unread = await ttyd_manager.compute_tab_unread(process)
+        if tab.id in unread_by_id:
+            tab.is_unread = unread_by_id[tab.id]
     return tabs
 
 

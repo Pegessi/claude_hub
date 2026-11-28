@@ -6926,3 +6926,90 @@ async def test_cursor_retriable_recovery_completes_stream_turn(
         assert not any(e.type == AgentStreamEventType.ERROR for e in events)
     finally:
         await tailer.stop()
+
+
+@pytest.mark.asyncio
+async def test_codex_slow_model_list_returns_disk_catalog_within_budget_and_shares_cache(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import claude_hub.services.agent_stream.providers.codex as codex_provider
+
+    monkeypatch.setattr(codex_provider, "_DISCOVERED_CATALOG_CACHE", {})
+    monkeypatch.setattr(codex_provider, "_FOREGROUND_MODEL_DISCOVERY_BUDGET_S", 0.03)
+    (tmp_path / "models_cache.json").write_text(
+        json.dumps(
+            {
+                "models": [
+                    {
+                        "slug": "cached-fast-model",
+                        "display_name": "Cached Fast Model",
+                        "visibility": "list",
+                        "default_reasoning_level": "high",
+                        "supported_reasoning_levels": [{"effort": "high"}],
+                    }
+                ]
+            }
+        )
+    )
+
+    class _RealSubprocessMarker(asyncio.subprocess.Process):
+        def __init__(self) -> None:
+            pass
+
+    release_rpc = asyncio.Event()
+    rpc_calls = 0
+
+    async def slow_send_request(
+        self: CodexNativeSession, method: str, params: Dict[str, Any]
+    ) -> Any:
+        nonlocal rpc_calls
+        if method == "model/list":
+            rpc_calls += 1
+            await release_rpc.wait()
+            return {
+                "data": [
+                    {
+                        "model": "live-discovered-model",
+                        "displayName": "Live Discovered Model",
+                        "defaultReasoningEffort": "medium",
+                        "supportedReasoningEfforts": [{"reasoningEffort": "medium"}],
+                    }
+                ]
+            }
+        return {"data": []}
+
+    monkeypatch.setattr(CodexNativeSession, "_send_request", slow_send_request)
+
+    first = _codex_session()
+    first.session.env = {"CODEX_HOME": str(tmp_path)}
+    first.start = AsyncMock()  # type: ignore[method-assign]
+    first._process = _RealSubprocessMarker()
+    first._mode_discovery_attempted = True
+
+    try:
+        await asyncio.wait_for(first.prepare_capabilities(), timeout=0.5)
+        initial_ids = [m.id for m in first.capabilities().available_models]
+        assert "cached-fast-model" in initial_ids
+        assert "live-discovered-model" not in initial_ids
+
+        release_rpc.set()
+        assert first._model_discovery_task is not None
+        await asyncio.wait_for(first._model_discovery_task, timeout=1.0)
+        merged_ids = [m.id for m in first.capabilities().available_models]
+        assert merged_ids[0] == "live-discovered-model"
+        assert "cached-fast-model" in merged_ids
+
+        # A second Codex session in the same scope reuses the discovered catalog
+        # immediately without issuing another slow model/list RPC.
+        second = _codex_session()
+        second.session.env = {"CODEX_HOME": str(tmp_path)}
+        second.start = AsyncMock()  # type: ignore[method-assign]
+        second._process = _RealSubprocessMarker()
+        second._mode_discovery_attempted = True
+        await second.prepare_capabilities()
+        assert [m.id for m in second.capabilities().available_models][0] == "live-discovered-model"
+        assert rpc_calls == 1
+    finally:
+        release_rpc.set()
+        if first._model_discovery_task is not None and not first._model_discovery_task.done():
+            await first._model_discovery_task

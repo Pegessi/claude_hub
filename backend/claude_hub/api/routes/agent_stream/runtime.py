@@ -31,6 +31,8 @@ class _CapabilityPreparationCacheState:
         self.lock = asyncio.Lock()
         self.key: Optional[_CapabilityPreparationKey] = None
         self.expires_at = 0.0
+        self.inflight_key: Optional[_CapabilityPreparationKey] = None
+        self.inflight_task: Optional[asyncio.Task[StreamCapabilities]] = None
 
 
 def _capability_preparation_state(transport: Any) -> _CapabilityPreparationCacheState:
@@ -82,13 +84,36 @@ async def _capabilities_from_transport(
     cache_preparation: bool,
     refresh: bool,
 ) -> StreamCapabilities:
-    if not cache_preparation:
-        _invalidate_capability_preparation_state(transport)
-        await transport.prepare_capabilities()
-        return cast(StreamCapabilities, transport.capabilities())
-
     state = _capability_preparation_state(transport)
     key = _capability_preparation_key(session)
+    if (
+        not refresh
+        and state.inflight_task is not None
+        and not state.inflight_task.done()
+        and state.inflight_key == key
+    ):
+        return await asyncio.shield(state.inflight_task)
+
+    if not cache_preparation:
+        _invalidate_capability_preparation_state(transport)
+        if refresh:
+            await transport.prepare_capabilities()
+            return cast(StreamCapabilities, transport.capabilities())
+
+        async def _prepare_uncached() -> StreamCapabilities:
+            await transport.prepare_capabilities()
+            return cast(StreamCapabilities, transport.capabilities())
+
+        task = asyncio.create_task(_prepare_uncached())
+        state.inflight_key = key
+        state.inflight_task = task
+        try:
+            return await asyncio.shield(task)
+        finally:
+            if state.inflight_task is task:
+                state.inflight_task = None
+                state.inflight_key = None
+
     async with state.lock:
         now = time.monotonic()
         cached = not refresh and state.key == key and state.expires_at > now
@@ -98,8 +123,20 @@ async def _capabilities_from_transport(
                 return caps
         state.key = None
         state.expires_at = 0.0
-        await transport.prepare_capabilities()
-        caps = cast(StreamCapabilities, transport.capabilities())
+
+        async def _prepare_cached() -> StreamCapabilities:
+            await transport.prepare_capabilities()
+            return cast(StreamCapabilities, transport.capabilities())
+
+        task = asyncio.create_task(_prepare_cached())
+        state.inflight_key = key
+        state.inflight_task = task
+        try:
+            caps = await asyncio.shield(task)
+        finally:
+            if state.inflight_task is task:
+                state.inflight_task = None
+                state.inflight_key = None
         if caps.structured and caps.metadata_cacheable:
             state.key = key
             state.expires_at = time.monotonic() + _CAPABILITY_PREPARATION_TTL_S

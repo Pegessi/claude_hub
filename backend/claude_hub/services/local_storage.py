@@ -26,6 +26,7 @@ from .runtime_isolation import resolve_runtime_home, resolve_state_root
 _SCHEMA_LOCK = threading.Lock()
 _CACHE_LOCK = threading.Lock()
 _PREPARED_WRITE = threading.local()
+_INITIALIZED_DATABASES: set[tuple[str, int, int]] = set()
 # Content-addressed caches keyed by cryptographic SHA-256 digests. Because a
 # SHA-256 digest uniquely identifies immutable UTF-8 JSON text, entries never
 # go stale across transactions, rollbacks, threads, or external writers.
@@ -124,55 +125,73 @@ def storage_location(path: Path) -> tuple[Path, str]:
 @contextmanager
 def connection(path: Path) -> Iterator[sqlite3.Connection]:
     database, _ = storage_location(path)
-    database.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    db_identity: tuple[str, int, int] | None = None
+    try:
+        stat_res = database.stat()
+        candidate_id = (str(database), stat_res.st_dev, stat_res.st_ino)
+        if candidate_id in _INITIALIZED_DATABASES and (stat_res.st_mode & 0o777) == 0o600:
+            db_identity = candidate_id
+    except OSError:
+        db_identity = None
+
+    if db_identity is None:
+        database.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     try:
         db = sqlite3.connect(database, timeout=30)
     except sqlite3.Error as exc:
         raise OSError(f"Cannot open SQLite storage: {database}: {exc}") from exc
     try:
-        with _SCHEMA_LOCK:
-            database.chmod(0o600)
-            deadline = time.monotonic() + 30
-            while True:
-                try:
-                    if db.execute("PRAGMA journal_mode").fetchone()[0] == "wal":
-                        break
-                    db.execute("PRAGMA journal_mode=WAL")
-                    break
-                except sqlite3.OperationalError as exc:
-                    if "locked" not in str(exc) or time.monotonic() >= deadline:
-                        raise
-                    time.sleep(0.01)
+        if db_identity is not None:
             db.execute("PRAGMA synchronous=FULL")
-            version = db.execute("PRAGMA user_version").fetchone()[0]
-            if version not in (0, 1):
-                raise OSError(f"Unsupported SQLite storage version: {version}")
-            if version == 0:
-                db.executescript("""
-                    CREATE TABLE IF NOT EXISTS documents (
-                        name TEXT PRIMARY KEY, layout BLOB NOT NULL
-                    );
-                    CREATE TABLE IF NOT EXISTS document_rows (
-                        name TEXT NOT NULL, key TEXT NOT NULL, digest BLOB NOT NULL, body BLOB NOT NULL,
-                        PRIMARY KEY(name,key)
-                    ) WITHOUT ROWID;
-                    CREATE TABLE IF NOT EXISTS streams (
-                        id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE, generation INTEGER NOT NULL DEFAULT 0, dictionary BLOB NOT NULL
-                    );
-                    CREATE TABLE IF NOT EXISTS stream_events (
-                        name INTEGER NOT NULL, sequence INTEGER NOT NULL, turn_id TEXT,
-                        kind TEXT NOT NULL, visible INTEGER NOT NULL, identity TEXT, body BLOB NOT NULL,
-                        PRIMARY KEY(name,sequence)
-                    );
-                    CREATE TABLE IF NOT EXISTS stream_errors (
-                        name INTEGER NOT NULL, line INTEGER NOT NULL, raw BLOB NOT NULL,
-                        PRIMARY KEY(name,line)
-                    ) WITHOUT ROWID;
-                    CREATE INDEX IF NOT EXISTS stream_turn ON stream_events(name,turn_id,sequence);
-                    CREATE INDEX IF NOT EXISTS stream_kind ON stream_events(name,kind,sequence);
-                    CREATE INDEX IF NOT EXISTS stream_identity ON stream_events(name,identity) WHERE turn_id IS NOT NULL AND identity IS NOT NULL;
-                """)
-                db.execute("PRAGMA user_version=1")
+        else:
+            with _SCHEMA_LOCK:
+                database.chmod(0o600)
+                deadline = time.monotonic() + 30
+                while True:
+                    try:
+                        if db.execute("PRAGMA journal_mode").fetchone()[0] == "wal":
+                            break
+                        db.execute("PRAGMA journal_mode=WAL")
+                        break
+                    except sqlite3.OperationalError as exc:
+                        if "locked" not in str(exc) or time.monotonic() >= deadline:
+                            raise
+                        time.sleep(0.01)
+                db.execute("PRAGMA synchronous=FULL")
+                version = db.execute("PRAGMA user_version").fetchone()[0]
+                if version not in (0, 1):
+                    raise OSError(f"Unsupported SQLite storage version: {version}")
+                if version == 0:
+                    db.executescript("""
+                        CREATE TABLE IF NOT EXISTS documents (
+                            name TEXT PRIMARY KEY, layout BLOB NOT NULL
+                        );
+                        CREATE TABLE IF NOT EXISTS document_rows (
+                            name TEXT NOT NULL, key TEXT NOT NULL, digest BLOB NOT NULL, body BLOB NOT NULL,
+                            PRIMARY KEY(name,key)
+                        ) WITHOUT ROWID;
+                        CREATE TABLE IF NOT EXISTS streams (
+                            id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE, generation INTEGER NOT NULL DEFAULT 0, dictionary BLOB NOT NULL
+                        );
+                        CREATE TABLE IF NOT EXISTS stream_events (
+                            name INTEGER NOT NULL, sequence INTEGER NOT NULL, turn_id TEXT,
+                            kind TEXT NOT NULL, visible INTEGER NOT NULL, identity TEXT, body BLOB NOT NULL,
+                            PRIMARY KEY(name,sequence)
+                        );
+                        CREATE TABLE IF NOT EXISTS stream_errors (
+                            name INTEGER NOT NULL, line INTEGER NOT NULL, raw BLOB NOT NULL,
+                            PRIMARY KEY(name,line)
+                        ) WITHOUT ROWID;
+                        CREATE INDEX IF NOT EXISTS stream_turn ON stream_events(name,turn_id,sequence);
+                        CREATE INDEX IF NOT EXISTS stream_kind ON stream_events(name,kind,sequence);
+                        CREATE INDEX IF NOT EXISTS stream_identity ON stream_events(name,identity) WHERE turn_id IS NOT NULL AND identity IS NOT NULL;
+                    """)
+                    db.execute("PRAGMA user_version=1")
+                try:
+                    init_stat = database.stat()
+                    _INITIALIZED_DATABASES.add((str(database), init_stat.st_dev, init_stat.st_ino))
+                except OSError:
+                    pass
         yield db
     except (sqlite3.Error, zlib.error) as exc:
         raise OSError(f"SQLite storage failed: {database}: {exc}") from exc

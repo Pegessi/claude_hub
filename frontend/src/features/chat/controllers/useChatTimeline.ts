@@ -27,12 +27,14 @@ interface Dependencies {
   isEditingTurn: (turn: TimelineTurn) => boolean
   optimisticCancelledTurnId: Ref<string | null>
   pendingTurns: ComputedRef<PendingTurn[]>
+  stopArmed?: ComputedRef<boolean> | Ref<boolean>
   props: ChatPaneProps
 }
 
 /** A backfill read may be retired by a growing descriptor; this many tries is
  *  enough to land one and few enough that a permanent failure stays quiet. */
 const BACKFILL_MAX_ATTEMPTS = 3
+const RECONCILING_BANNER_DELAY_MS = 250
 
 export function useChatTimeline(deps: Dependencies) {
   // ── Timeline grouping ───────────────────────────────────────────────────────
@@ -145,9 +147,24 @@ export function useChatTimeline(deps: Dependencies) {
 
   let timelineVisit = 0
 
+  let reconcilingBannerTimer: ReturnType<typeof setTimeout> | null = null
+
+  const reconcilingBannerVisible = ref(false)
+
+  function clearReconcilingBannerTimer() {
+    if (reconcilingBannerTimer !== null) {
+      clearTimeout(reconcilingBannerTimer)
+      reconcilingBannerTimer = null
+    }
+  }
+
   const timelineLoadingMessage = computed(() => {
     if (deps.connectionState.value === 'failed') return ''
-    if (deps.connectionState.value === 'reconciling') return 'Updating conversation…'
+    if (deps.connectionState.value === 'reconciling') {
+      if (deps.stopArmed?.value) return 'Updating conversation…'
+      if (!reconcilingBannerVisible.value) return ''
+      return deps.events.value.length === 0 ? 'Preparing chat…' : 'Updating conversation…'
+    }
     if (deps.connectionState.value === 'idle' || deps.connectionState.value === 'hydrating') return 'Loading conversation…'
     return timelinePhase.value !== 'revealed' ? 'Opening latest messages…' : ''
   })
@@ -554,6 +571,8 @@ export function useChatTimeline(deps: Dependencies) {
   function deactivateViewport() {
     timelineDisposed = true
     timelineVisit++
+    clearReconcilingBannerTimer()
+    reconcilingBannerVisible.value = false
     timelineResizeObserver?.disconnect()
     timelineResizeObserver = null
     cancelScheduledTimelineScroll()
@@ -717,6 +736,26 @@ export function useChatTimeline(deps: Dependencies) {
       // A failed history read stays hidden until Retry hydrates it.
     }, { immediate: true })
 
+    watch(
+      () => deps.connectionState.value,
+      state => {
+        clearReconcilingBannerTimer()
+        if (state !== 'reconciling') {
+          reconcilingBannerVisible.value = false
+          return
+        }
+        reconcilingBannerVisible.value = false
+        reconcilingBannerTimer = setTimeout(() => {
+          reconcilingBannerTimer = null
+          if (!timelineDisposed && deps.connectionState.value === 'reconciling') {
+            reconcilingBannerVisible.value = true
+          }
+        }, RECONCILING_BANNER_DELAY_MS)
+        ;(reconcilingBannerTimer as unknown as { unref?: () => void })?.unref?.()
+      },
+      { immediate: true },
+    )
+
     onMounted(() => {
       timelineDisposed = false
       void nextTick(() => {
@@ -727,6 +766,8 @@ export function useChatTimeline(deps: Dependencies) {
 
     onUnmounted(() => {
       timelineDisposed = true
+      clearReconcilingBannerTimer()
+      reconcilingBannerVisible.value = false
       timelineResizeObserver?.disconnect()
       timelineResizeObserver = null
       cancelScheduledTimelineScroll()

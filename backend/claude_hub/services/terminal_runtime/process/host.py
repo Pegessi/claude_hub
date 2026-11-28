@@ -317,11 +317,13 @@ class ProcessHost(ABC):
         raise NotImplementedError()
 
     @abstractmethod
-    async def _capture_local_history(self, lines: int = ...) -> str:
+    async def _capture_local_history(self, lines: int = ..., *, known_alive: bool = ...) -> str:
         raise NotImplementedError()
 
     @abstractmethod
-    async def capture_history(self, lines: int = ..., prefer_remote: bool = ...) -> str:
+    async def capture_history(
+        self, lines: int = ..., prefer_remote: bool = ..., *, known_alive: bool = ...
+    ) -> str:
         raise NotImplementedError()
 
     @abstractmethod

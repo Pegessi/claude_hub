@@ -270,6 +270,53 @@ class ManagerStatusMixin(ManagerHost):
         summary = await self._stream_summary(process)
         return summary.excerpt if summary is not None else None
 
+    def _build_open_task_review_index(
+        self,
+    ) -> tuple[Dict[str, Tuple[bool, list[str]]], Dict[str, Tuple[bool, list[str]]]]:
+        """Index non-terminal workspace tasks once per batch status poll."""
+        from ....models.schemas import TaskExecutionControl, WorkspaceTaskStatus
+        from ...mr_status_cache import extract_codebase_mr_urls
+
+        by_tab_id: Dict[str, Tuple[bool, list[str]]] = {}
+        by_session_id: Dict[str, Tuple[bool, list[str]]] = {}
+        try:
+            from ... import workspace_manager
+
+            for task in list(getattr(workspace_manager, "tasks", {}).values()):
+                if task.status in {
+                    WorkspaceTaskStatus.DONE,
+                    WorkspaceTaskStatus.FAILED,
+                }:
+                    continue
+                is_review = task.status == WorkspaceTaskStatus.REVIEW
+                lp = task.latest_progress
+                texts: list[Optional[str]] = [
+                    *(lp.artifact_refs if lp else []),
+                    lp.summary if lp else None,
+                ]
+                urls = extract_codebase_mr_urls(texts)
+                if (
+                    task.execution_control == TaskExecutionControl.INITIATOR
+                    and task.source
+                    and task.source.tab_id
+                ):
+                    prev_rev, prev_urls = by_tab_id.get(task.source.tab_id, (False, []))
+                    merged_urls = list(prev_urls)
+                    for url in urls:
+                        if url not in merged_urls:
+                            merged_urls.append(url)
+                    by_tab_id[task.source.tab_id] = (prev_rev or is_review, merged_urls)
+                if task.session_id:
+                    prev_rev, prev_urls = by_session_id.get(task.session_id, (False, []))
+                    merged_urls = list(prev_urls)
+                    for url in urls:
+                        if url not in merged_urls:
+                            merged_urls.append(url)
+                    by_session_id[task.session_id] = (prev_rev or is_review, merged_urls)
+        except Exception:
+            pass
+        return by_tab_id, by_session_id
+
     def _derive_tab_review_projection(
         self,
         process: TTYDProcess,
@@ -277,6 +324,9 @@ class ManagerStatusMixin(ManagerHost):
         *,
         effective_activity_at: Optional[datetime] = None,
         sampled_at: Optional[datetime] = None,
+        open_task_index: Optional[
+            tuple[Dict[str, Tuple[bool, list[str]]], Dict[str, Tuple[bool, list[str]]]]
+        ] = None,
     ) -> tuple[Optional[str], Optional[str], Optional[str]]:
         """Project calm review status (open MR, task in review, or active <= 4h) without blocking."""
         if process.subagent_id or process.parent_tab_id:
@@ -292,40 +342,61 @@ class ManagerStatusMixin(ManagerHost):
         candidate_urls: list[str] = []
         has_task_in_review = False
         has_linked_open_task = False
-        try:
-            from ... import workspace_manager
-
-            for task in list(getattr(workspace_manager, "tasks", {}).values()):
-                if task.status in {
-                    WorkspaceTaskStatus.DONE,
-                    WorkspaceTaskStatus.FAILED,
-                }:
-                    continue
-                matched = bool(
-                    (
-                        task.execution_control == TaskExecutionControl.INITIATOR
-                        and task.source
-                        and task.source.tab_id == process.tab_id
-                    )
-                    or (
-                        process.managed_session_id and task.session_id == process.managed_session_id
-                    )
-                )
-                if not matched:
-                    continue
+        if open_task_index is not None:
+            by_tab_id, by_session_id = open_task_index
+            tab_entry = by_tab_id.get(process.tab_id)
+            if tab_entry is not None:
                 has_linked_open_task = True
-                if task.status == WorkspaceTaskStatus.REVIEW:
+                if tab_entry[0]:
                     has_task_in_review = True
-                lp = task.latest_progress
-                texts: list[Optional[str]] = [
-                    *(lp.artifact_refs if lp else []),
-                    lp.summary if lp else None,
-                ]
-                for url in extract_codebase_mr_urls(texts):
+                for url in tab_entry[1]:
                     if url not in candidate_urls:
                         candidate_urls.append(url)
-        except Exception:
-            pass
+            if process.managed_session_id:
+                sess_entry = by_session_id.get(process.managed_session_id)
+                if sess_entry is not None:
+                    has_linked_open_task = True
+                    if sess_entry[0]:
+                        has_task_in_review = True
+                    for url in sess_entry[1]:
+                        if url not in candidate_urls:
+                            candidate_urls.append(url)
+        else:
+            try:
+                from ... import workspace_manager
+
+                for task in list(getattr(workspace_manager, "tasks", {}).values()):
+                    if task.status in {
+                        WorkspaceTaskStatus.DONE,
+                        WorkspaceTaskStatus.FAILED,
+                    }:
+                        continue
+                    matched = bool(
+                        (
+                            task.execution_control == TaskExecutionControl.INITIATOR
+                            and task.source
+                            and task.source.tab_id == process.tab_id
+                        )
+                        or (
+                            process.managed_session_id
+                            and task.session_id == process.managed_session_id
+                        )
+                    )
+                    if not matched:
+                        continue
+                    has_linked_open_task = True
+                    if task.status == WorkspaceTaskStatus.REVIEW:
+                        has_task_in_review = True
+                    lp = task.latest_progress
+                    texts: list[Optional[str]] = [
+                        *(lp.artifact_refs if lp else []),
+                        lp.summary if lp else None,
+                    ]
+                    for url in extract_codebase_mr_urls(texts):
+                        if url not in candidate_urls:
+                            candidate_urls.append(url)
+            except Exception:
+                pass
 
         if summary is not None and summary.assistant_mr_urls:
             tab_name = (process.name or "").lower()
@@ -363,6 +434,19 @@ class ManagerStatusMixin(ManagerHost):
                 return "recent_active", None, None
         return None, None, None
 
+    def _is_completed_at_unread(
+        self, process: TTYDProcess, completed_at_str: Optional[str]
+    ) -> bool:
+        if completed_at_str is None:
+            return False
+        try:
+            completed_at = self._runtime.datetime.fromisoformat(completed_at_str)
+        except ValueError:
+            return False
+        if process.last_viewed_at is None:
+            return True
+        return completed_at > process.last_viewed_at
+
     async def compute_tab_unread(self, process: TTYDProcess) -> bool:
         """Return True when the tab's latest completed turn is unread.
 
@@ -377,21 +461,57 @@ class ManagerStatusMixin(ManagerHost):
             *tab_stream_identity(process.tab_id, process.workspace_id, process.managed_session_id)
         )
         completed_at_str = await store.latest_turn_completed_at()
-        if completed_at_str is None:
-            return False
-        try:
-            completed_at = self._runtime.datetime.fromisoformat(completed_at_str)
-        except ValueError:
-            return False
-        if process.last_viewed_at is None:
-            return True
-        return completed_at > process.last_viewed_at
+        return self._is_completed_at_unread(process, completed_at_str)
+
+    async def compute_tabs_unread(self, processes: Iterable[TTYDProcess]) -> Dict[str, bool]:
+        """Batch-compute unread flags for ``list_tabs`` in one SQLite read pass."""
+        proc_list = list(processes)
+        if not proc_list:
+            return {}
+        if (
+            "compute_tab_unread" in self.__dict__
+            or type(self).compute_tab_unread is not ManagerStatusMixin.compute_tab_unread
+        ):
+            return {proc.tab_id: await self.compute_tab_unread(proc) for proc in proc_list}
+
+        from ...agent_stream.store import (
+            AgentStreamStore,
+            _complete_io,
+            read_latest_turn_completed_batch_sync,
+        )
+
+        paths_by_tab: Dict[str, Path] = {}
+        proc_by_tab: Dict[str, TTYDProcess] = {}
+        for proc in proc_list:
+            proc_by_tab[proc.tab_id] = proc
+            paths_by_tab[proc.tab_id] = AgentStreamStore(
+                *tab_stream_identity(proc.tab_id, proc.workspace_id, proc.managed_session_id)
+            ).path
+
+        resolved, legacy_unimported = await _complete_io(
+            read_latest_turn_completed_batch_sync, paths_by_tab
+        )
+        result: Dict[str, bool] = {
+            tab_id: self._is_completed_at_unread(proc_by_tab[tab_id], completed_at_str)
+            for tab_id, completed_at_str in resolved.items()
+        }
+        for tab_id in legacy_unimported:
+            result[tab_id] = await self.compute_tab_unread(proc_by_tab[tab_id])
+        return result
 
     async def get_tab_agent_status(
         self,
         tab_id: str,
         use_cache: bool = True,
         live_sessions: Optional[set[str]] = None,
+        *,
+        foreground_commands: Optional[Dict[str, Optional[str]]] = None,
+        preloaded_summaries: Optional[Dict[str, Optional["StreamSummary"]]] = None,
+        binary_available: Optional[Dict[AgentType, bool]] = None,
+        capture_semaphore: Optional[asyncio.Semaphore] = None,
+        open_task_index: Optional[
+            tuple[Dict[str, Tuple[bool, list[str]]], Dict[str, Tuple[bool, list[str]]]]
+        ] = None,
     ) -> Optional[TerminalAgentStatus]:
         """Get a best-effort terminal agent status for one tab.
 
@@ -431,12 +551,21 @@ class ManagerStatusMixin(ManagerHost):
                 ):
                     native_runtime_status = AgentRuntimeStatus.ATTENTION
                     native_detail = UNCERTAIN_DELIVERY_DETAIL
-                elif self._runtime.native_provider_binary_available(process.agent_type):
-                    native_runtime_status = AgentRuntimeStatus.IDLE
-                    native_detail = IDLE_DETAIL
                 else:
-                    native_runtime_status = AgentRuntimeStatus.OFFLINE
-                    native_detail = "native provider binary is unavailable"
+                    if binary_available is not None and process.agent_type in binary_available:
+                        is_bin_available = binary_available[process.agent_type]
+                    else:
+                        is_bin_available = self._runtime.native_provider_binary_available(
+                            process.agent_type
+                        )
+                        if binary_available is not None:
+                            binary_available[process.agent_type] = is_bin_available
+                    if is_bin_available:
+                        native_runtime_status = AgentRuntimeStatus.IDLE
+                        native_detail = IDLE_DETAIL
+                    else:
+                        native_runtime_status = AgentRuntimeStatus.OFFLINE
+                        native_detail = "native provider binary is unavailable"
             else:
                 native_runtime_status = native.status
                 native_detail = native.detail
@@ -451,11 +580,12 @@ class ManagerStatusMixin(ManagerHost):
             # skipped and the activity line speaks for it. A turn that is ALSO
             # blocked on a question is the top "Waiting for your answer" row:
             # that row keeps its preview.
-            summary = (
-                None
-                if (native_runtime_status == AgentRuntimeStatus.WORKING and not pending_question)
-                else await self._stream_summary(process)
-            )
+            if native_runtime_status == AgentRuntimeStatus.WORKING and not pending_question:
+                summary = None
+            elif preloaded_summaries is not None and tab_id in preloaded_summaries:
+                summary = preloaded_summaries[tab_id]
+            else:
+                summary = await self._stream_summary(process)
             excerpt = summary.excerpt if summary is not None else None
             effective_activity_at = (
                 activity_since
@@ -476,6 +606,7 @@ class ManagerStatusMixin(ManagerHost):
                     summary,
                     effective_activity_at=effective_activity_at,
                     sampled_at=sampled_at,
+                    open_task_index=open_task_index,
                 )
             return TerminalAgentStatus(
                 tab_id=process.tab_id,
@@ -525,13 +656,43 @@ class ManagerStatusMixin(ManagerHost):
             self._status_cache[tab_id] = status
             return status
 
+        from ..process.capture import ProcessCaptureMixin
+
+        can_pass_known_alive = (
+            live_sessions is not None
+            and "capture_history" not in process.__dict__
+            and "_capture_local_history" not in process.__dict__
+            and type(process).capture_history is ProcessCaptureMixin.capture_history
+            and type(process)._capture_local_history is ProcessCaptureMixin._capture_local_history
+        )
         try:
-            raw_output = await process.capture_history(lines=120)
+            if capture_semaphore is not None:
+                async with capture_semaphore:
+                    raw_output = (
+                        await process.capture_history(lines=120, known_alive=True)
+                        if can_pass_known_alive
+                        else await process.capture_history(lines=120)
+                    )
+            else:
+                raw_output = (
+                    await process.capture_history(lines=120, known_alive=True)
+                    if can_pass_known_alive
+                    else await process.capture_history(lines=120)
+                )
         except Exception as e:
             logger.debug(f"Unable to capture status output for tab {tab_id}: {e}")
             raw_output = ""
 
-        foreground_command = await process.capture_foreground_command()
+        can_use_batched_fg = (
+            foreground_commands is not None
+            and "capture_foreground_command" not in process.__dict__
+            and type(process).capture_foreground_command
+            is ProcessCaptureMixin.capture_foreground_command
+        )
+        if can_use_batched_fg and foreground_commands is not None:
+            foreground_command = foreground_commands.get(process.tmux_session)
+        else:
+            foreground_command = await process.capture_foreground_command()
         output = _ANSI_ESCAPE_RE.sub("", raw_output)
         output_hash = hashlib.sha256(output.encode("utf-8", errors="ignore")).hexdigest()
         runtime_status, status_text, detail, last_changed_at = self._classify_agent_status(
@@ -586,10 +747,102 @@ class ManagerStatusMixin(ManagerHost):
                     ordered_ids.append(tab_id)
                     seen.add(tab_id)
 
-        live_sessions = await self._runtime._tmux_list_sessions()
+        if not ordered_ids:
+            return []
+
+        if (
+            "get_tab_agent_status" in self.__dict__
+            or type(self).get_tab_agent_status is not ManagerStatusMixin.get_tab_agent_status
+        ):
+            live_sessions = await self._runtime._tmux_list_sessions()
+            results = await asyncio.gather(
+                *(
+                    self.get_tab_agent_status(tab_id, live_sessions=live_sessions)
+                    for tab_id in ordered_ids
+                )
+            )
+            return [status for status in results if status]
+
+        sampled_now = self._runtime.datetime.now()
+        needs_tmux_probe = False
+        chat_summary_paths: Dict[str, Path] = {}
+        can_batch_summaries = (
+            "_stream_summary" not in self.__dict__
+            and type(self)._stream_summary is ManagerStatusMixin._stream_summary
+        )
+        if can_batch_summaries:
+            from ...agent_stream.store import AgentStreamStore
+
+        for tab_id in ordered_ids:
+            proc = self.processes.get(tab_id)
+            if proc is None:
+                continue
+            if (
+                proc.session_kind == SessionKind.CHAT
+                and proc.cursor_transport != "terminal_transcript"
+            ):
+                if can_batch_summaries:
+                    native = self._runtime.get_tab_native_runtime_snapshot(tab_id)
+                    pending_q = (
+                        bool(getattr(native, "pending_question", False)) if native else False
+                    )
+                    if native is None or native.status != AgentRuntimeStatus.WORKING or pending_q:
+                        chat_summary_paths[tab_id] = AgentStreamStore(
+                            *tab_stream_identity(
+                                proc.tab_id, proc.workspace_id, proc.managed_session_id
+                            )
+                        ).path
+            else:
+                cached = self._status_cache.get(tab_id)
+                if (
+                    cached is None
+                    or (sampled_now - cached.sampled_at).total_seconds()
+                    >= _STATUS_CACHE_TTL_SECONDS
+                ):
+                    needs_tmux_probe = True
+
+        list_sessions_fn = self._runtime._tmux_list_sessions
+        is_default_list_sessions = (
+            getattr(list_sessions_fn, "__name__", "") == "_tmux_list_sessions"
+            and getattr(list_sessions_fn, "__module__", "") == "claude_hub.services.ttyd_manager"
+        )
+        foreground_commands: Optional[Dict[str, Optional[str]]] = None
+        if not needs_tmux_probe and is_default_list_sessions:
+            live_sessions = set()
+            foreground_commands = {}
+        elif is_default_list_sessions:
+            from ..tmux_control import _tmux_list_session_panes
+
+            live_sessions, foreground_commands = await _tmux_list_session_panes(self._runtime)
+        else:
+            live_sessions = await list_sessions_fn()
+
+        preloaded_summaries: Optional[Dict[str, Optional["StreamSummary"]]] = None
+        if chat_summary_paths:
+            from ...agent_stream.store import _complete_io, read_stream_summaries_batch_sync
+
+            try:
+                preloaded_summaries = await _complete_io(
+                    read_stream_summaries_batch_sync, chat_summary_paths
+                )
+            except Exception as e:  # pragma: no cover - defensive fallback
+                logger.debug(f"Unable to batch-read stream summaries: {e}")
+                preloaded_summaries = None
+
+        binary_available: Dict[AgentType, bool] = {}
+        capture_semaphore = asyncio.Semaphore(16)
+        open_task_index = self._build_open_task_review_index()
         results = await asyncio.gather(
             *(
-                self.get_tab_agent_status(tab_id, live_sessions=live_sessions)
+                self.get_tab_agent_status(
+                    tab_id,
+                    live_sessions=live_sessions,
+                    foreground_commands=foreground_commands,
+                    preloaded_summaries=preloaded_summaries,
+                    binary_available=binary_available,
+                    capture_semaphore=capture_semaphore,
+                    open_task_index=open_task_index,
+                )
                 for tab_id in ordered_ids
             )
         )

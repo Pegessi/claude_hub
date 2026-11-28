@@ -773,6 +773,123 @@ async def test_maso_capability_preparation_is_not_cached() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("agent_type", [AgentType.CODEX, AgentType.MASO])
+async def test_concurrent_capability_requests_coalesce_inflight_without_freezing_uncacheable(
+    agent_type: AgentType,
+) -> None:
+    from claude_hub.api.routes.agent_stream import runtime as stream_runtime
+
+    session = _native_session(agent_type).model_copy(update={"session_kind": SessionKind.CHAT})
+    transport = _CapabilityTransport()
+    transport.metadata_cacheable = False
+    transport.entered = asyncio.Event()
+    transport.release = asyncio.Event()
+    manager = _capability_manager(session, transport)
+
+    first_task = asyncio.create_task(
+        stream_runtime.capabilities_for(
+            lambda: manager,
+            lambda _session: True,
+            lambda _session: None,
+            session,
+            manager,
+            cache_preparation=True,
+        )
+    )
+    await asyncio.wait_for(transport.entered.wait(), 1)
+    second_task = asyncio.create_task(
+        stream_runtime.capabilities_for(
+            lambda: manager,
+            lambda _session: True,
+            lambda _session: None,
+            session,
+            manager,
+            cache_preparation=True,
+        )
+    )
+    await asyncio.sleep(0.01)
+    transport.release.set()
+    first, second = await asyncio.gather(first_task, second_task)
+    assert first.structured is True and second.structured is True
+    assert transport.prepare_count == 1
+
+    transport.entered = None
+    transport.release = None
+    await stream_runtime.capabilities_for(
+        lambda: manager,
+        lambda _session: True,
+        lambda _session: None,
+        session,
+        manager,
+        cache_preparation=True,
+    )
+    assert transport.prepare_count == 2
+
+
+@pytest.mark.asyncio
+async def test_batch_latest_turn_completed_matches_per_store_queries() -> None:
+    from claude_hub.services.agent_stream.store import (
+        AgentStreamStore,
+        read_latest_turn_completed_batch_sync,
+    )
+
+    store_done = AgentStreamStore("terminal-tabs", "batch-unread-done")
+    store_running = AgentStreamStore("terminal-tabs", "batch-unread-running")
+    store_empty = AgentStreamStore("terminal-tabs", "batch-unread-empty")
+
+    now = datetime.now(timezone.utc)
+    await store_done.append(
+        AgentStreamEvent(
+            session_id="batch-unread-done",
+            tab_id="tab-done",
+            agent_type=AgentType.CLAUDE,
+            type=AgentStreamEventType.TURN_STARTED,
+            stream_sequence=-1,
+            created_at=now,
+            turn_id="t1",
+            payload={"summary": "hi"},
+        )
+    )
+    completed = await store_done.append(
+        AgentStreamEvent(
+            session_id="batch-unread-done",
+            tab_id="tab-done",
+            agent_type=AgentType.CLAUDE,
+            type=AgentStreamEventType.TURN_COMPLETED,
+            stream_sequence=-1,
+            created_at=now,
+            turn_id="t1",
+            payload={"status": "completed"},
+        )
+    )
+    await store_running.append(
+        AgentStreamEvent(
+            session_id="batch-unread-running",
+            tab_id="tab-running",
+            agent_type=AgentType.CLAUDE,
+            type=AgentStreamEventType.TURN_STARTED,
+            stream_sequence=-1,
+            created_at=now,
+            turn_id="t2",
+            payload={"summary": "still running"},
+        )
+    )
+
+    paths = {
+        "done": store_done.path,
+        "running": store_running.path,
+        "empty": store_empty.path,
+    }
+    resolved, unimported = read_latest_turn_completed_batch_sync(paths)
+    assert unimported == []
+    assert resolved["done"] == await store_done.latest_turn_completed_at()
+    assert resolved["running"] == await store_running.latest_turn_completed_at()
+    assert resolved["empty"] == await store_empty.latest_turn_completed_at()
+    resolved_cached, _ = read_latest_turn_completed_batch_sync(paths)
+    assert resolved_cached == resolved
+
+
+@pytest.mark.asyncio
 async def test_cancelled_capability_refresh_invalidates_cached_success() -> None:
     from claude_hub.api.routes.agent_stream import runtime as stream_runtime
 
@@ -8907,3 +9024,119 @@ async def test_failed_capabilities_distinguish_history_from_live_readiness(
     bindings.capabilities_for = AsyncMock(return_value=caps)
     page = await observation.stream_events_for(session, manager, -1, 100, bindings)
     assert len(page.events) == int(with_history)
+
+
+@pytest.mark.asyncio
+async def test_codex_slow_background_discovery_waits_foreground_budget_only_once(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from claude_hub.services.agent_stream import native as native_mod
+    from claude_hub.services.agent_stream.providers import codex as codex_mod
+
+    _isolate_state_root(monkeypatch, tmp_path)
+    codex_home = tmp_path / ".codex"
+    codex_home.mkdir(parents=True, exist_ok=True)
+    (codex_home / "models_cache.json").write_text(
+        json.dumps(
+            {"models": [{"slug": "gpt-5.4", "display_name": "GPT 5.4", "visibility": "list"}]}
+        ),
+        encoding="utf-8",
+    )
+    codex_mod._DISCOVERED_CATALOG_CACHE.clear()
+    monkeypatch.setattr(codex_mod, "_FOREGROUND_MODEL_DISCOVERY_BUDGET_S", 0.06)
+
+    session = _native_session().model_copy(
+        update={
+            "agent_type": AgentType.CODEX,
+            "env": {"CODEX_HOME": str(codex_home)},
+        }
+    )
+    transport = native_mod.CodexNativeSession(session)
+    release_discovery = asyncio.Event()
+
+    async def fake_start() -> None:
+        transport._started = True
+
+    async def slow_send(method: str, params: dict[str, Any]) -> dict[str, Any]:
+        if method == "collaborationMode/list":
+            return {"data": []}
+        if method == "model/list":
+            await release_discovery.wait()
+            return {
+                "data": [
+                    {
+                        "model": "gpt-5.5-live",
+                        "displayName": "GPT 5.5 Live",
+                        "supportedReasoningEfforts": [{"reasoningEffort": "high"}],
+                        "defaultReasoningEffort": "high",
+                    }
+                ]
+            }
+        return {}
+
+    monkeypatch.setattr(transport, "start", fake_start)
+    monkeypatch.setattr(transport, "_send_request", slow_send)
+    monkeypatch.setattr(transport, "_uses_live_catalog_cache", lambda: True)
+
+    try:
+        t0 = time.perf_counter()
+        await transport.prepare_capabilities()
+        first_ms = (time.perf_counter() - t0) * 1000
+        assert first_ms >= 50.0
+        assert any(opt.id == "gpt-5.4" for opt in transport._available_models)
+
+        t1 = time.perf_counter()
+        await transport.prepare_capabilities()
+        second_ms = (time.perf_counter() - t1) * 1000
+        assert second_ms < 25.0
+
+        release_discovery.set()
+        if transport._model_discovery_task is not None:
+            await transport._model_discovery_task
+        await transport.prepare_capabilities()
+        assert any(opt.id == "gpt-5.5-live" for opt in transport._available_models)
+    finally:
+        release_discovery.set()
+        await transport.stop()
+
+
+def test_codex_model_options_reuses_parsed_catalog_until_bytes_change(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from claude_hub.services.agent_stream import native as native_mod
+
+    codex_home = tmp_path / ".codex"
+    codex_home.mkdir(parents=True, exist_ok=True)
+    cache_file = codex_home / "models_cache.json"
+    cache_file.write_text(
+        json.dumps(
+            {"models": [{"slug": "gpt-5.4-a", "display_name": "GPT 5.4 A", "visibility": "list"}]}
+        ),
+        encoding="utf-8",
+    )
+    native_mod._CODEX_CACHE_PARSED.clear()
+    loads_count = 0
+    real_loads = json.loads
+
+    def counting_loads(raw: str | bytes, *args: Any, **kwargs: Any) -> Any:
+        nonlocal loads_count
+        loads_count += 1
+        return real_loads(raw, *args, **kwargs)
+
+    monkeypatch.setattr(native_mod.json, "loads", counting_loads)
+    env = {"CODEX_HOME": str(codex_home)}
+    first = native_mod._codex_model_options(env)
+    second = native_mod._codex_model_options(env)
+    assert loads_count == 1
+    assert [m.id for m in first] == [m.id for m in second]
+    assert first is not second
+
+    cache_file.write_text(
+        json.dumps(
+            {"models": [{"slug": "gpt-5.4-b", "display_name": "GPT 5.4 B", "visibility": "list"}]}
+        ),
+        encoding="utf-8",
+    )
+    third = native_mod._codex_model_options(env)
+    assert loads_count == 2
+    assert any(m.id == "gpt-5.4-b" for m in third)

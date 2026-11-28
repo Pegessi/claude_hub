@@ -206,6 +206,38 @@ def conversation_event_visible(event: AgentStreamEvent) -> bool:
     return not has_subthread
 
 
+def _raw_payload_visible_in_conversation(
+    kind: str, turn_id: Optional[str], raw_dict: object
+) -> bool:
+    """Fast dict-level equivalent of ``conversation_event_visible`` before Pydantic validation."""
+    if not turn_id:
+        return True
+    if kind in {item.value for item in _CONTROL_TYPES}:
+        return True
+    payload = raw_dict.get("payload") if isinstance(raw_dict, dict) else None
+    if not isinstance(payload, dict):
+        payload = {}
+    if kind == AgentStreamEventType.STATUS.value and (
+        payload.get("provider_status") == "subagent_lifecycle"
+        or payload.get("subagent_status") in _SUBAGENT_LIFECYCLE_STATUSES
+    ):
+        return True
+    thread = payload.get("subagent_thread")
+    has_subthread = isinstance(thread, str) and bool(thread.strip())
+    if kind in (
+        AgentStreamEventType.TOOL_CALL_STARTED.value,
+        AgentStreamEventType.TOOL_CALL_COMPLETED.value,
+    ):
+        return _is_subagent_delegation_tool(
+            payload.get("name"),
+            payload.get("args"),
+            has_subthread=has_subthread,
+        )
+    if kind in {item.value for item in _PROCESS_TYPES}:
+        return False
+    return not has_subthread
+
+
 class ConversationHistoryIndex:
     """Project the durable SQLite index without a second in-memory event index."""
 
@@ -218,6 +250,14 @@ class ConversationHistoryIndex:
         _, logical_name = storage_location(path)
         with connection(path) as db:
             db.execute("BEGIN")
+            if since >= 0:
+                has_newer = db.execute(
+                    "SELECT 1 FROM streams s WHERE s.name=? AND EXISTS ("
+                    "SELECT 1 FROM stream_events e WHERE e.name=s.id AND e.sequence>?)",
+                    (logical_name, since),
+                ).fetchone()
+                if has_newer is None:
+                    return AgentStreamEventPage(events=[], next_sequence=since, has_more=False)
             stream = db.execute(
                 "SELECT id,dictionary FROM streams WHERE name=?", (logical_name,)
             ).fetchone()
@@ -239,19 +279,15 @@ class ConversationHistoryIndex:
                 is_visible = bool(visible)
                 if not is_visible and turn_id:
                     if kind == "status" and body is not None:
-                        ev = AgentStreamEvent.model_validate(unpack(body, dictionary))
-                        if conversation_event_visible(ev):
-                            candidate = ev
-                            is_visible = True
+                        raw_dict = unpack(body, dictionary)
+                        if _raw_payload_visible_in_conversation(kind, turn_id, raw_dict):
+                            ev = AgentStreamEvent.model_validate(raw_dict)
+                            if conversation_event_visible(ev):
+                                candidate = ev
+                                is_visible = True
                     elif kind == "tool_call_started" and body is not None:
                         raw_dict = unpack(body, dictionary)
-                        payload_obj = (
-                            raw_dict.get("payload") if isinstance(raw_dict, dict) else None
-                        )
-                        if (
-                            isinstance(payload_obj, dict)
-                            and payload_obj.get("name") in _SUBAGENT_TOOL_NAMES
-                        ):
+                        if _raw_payload_visible_in_conversation(kind, turn_id, raw_dict):
                             ev = AgentStreamEvent.model_validate(raw_dict)
                             if conversation_event_visible(ev):
                                 candidate = ev
@@ -274,14 +310,8 @@ class ConversationHistoryIndex:
                                 ).fetchone()
                                 if row is not None and row[0] is not None:
                                     raw_dict = unpack(row[0], dictionary)
-                                    payload_obj = (
-                                        raw_dict.get("payload")
-                                        if isinstance(raw_dict, dict)
-                                        else None
-                                    )
-                                    if (
-                                        isinstance(payload_obj, dict)
-                                        and payload_obj.get("name") in _SUBAGENT_TOOL_NAMES
+                                    if _raw_payload_visible_in_conversation(
+                                        kind, turn_id, raw_dict
                                     ):
                                         comp_ev = AgentStreamEvent.model_validate(raw_dict)
                                         if conversation_event_visible(comp_ev):
@@ -290,10 +320,14 @@ class ConversationHistoryIndex:
                             elif start_row[0]:
                                 start_visible = True
                             elif start_row[1] is not None:
-                                start_ev = AgentStreamEvent.model_validate(
-                                    unpack(start_row[1], dictionary)
-                                )
-                                start_visible = conversation_event_visible(start_ev)
+                                start_raw = unpack(start_row[1], dictionary)
+                                if _raw_payload_visible_in_conversation(
+                                    "tool_call_started", turn_id, start_raw
+                                ):
+                                    start_ev = AgentStreamEvent.model_validate(start_raw)
+                                    start_visible = conversation_event_visible(start_ev)
+                                else:
+                                    start_visible = False
                             else:
                                 start_visible = False
                             checked_tool_starts[key] = start_visible
@@ -332,18 +366,25 @@ class ConversationHistoryIndex:
                     attributed[tool_identity] = None
                 next_sequence = sequence
             details = []
-            for turn_id in touched:
-                first, last, count, hidden = db.execute(
-                    "SELECT min(sequence),max(sequence),count(*),sum(visible=0) FROM stream_events WHERE name=? AND turn_id=? AND sequence<=?",
-                    (name, turn_id, next_sequence),
-                ).fetchone()
-                if hidden:
+            touched_ids = list(touched)
+            stats_by_turn: Dict[str, tuple[int, int, int, int]] = {}
+            for offset in range(0, len(touched_ids), 500):
+                chunk = touched_ids[offset : offset + 500]
+                placeholders = ",".join("?" for _ in chunk)
+                for row_turn_id, first, last, count, hidden in db.execute(
+                    f"SELECT turn_id,min(sequence),max(sequence),count(*),sum(visible=0) FROM stream_events WHERE name=? AND sequence<=? AND turn_id IN ({placeholders}) GROUP BY turn_id",
+                    (name, next_sequence, *chunk),
+                ):
+                    stats_by_turn[str(row_turn_id)] = (first, last, count, hidden)
+            for turn_id in touched_ids:
+                stats = stats_by_turn.get(turn_id)
+                if stats is not None and stats[3]:
                     details.append(
                         AgentStreamHistoryDetail(
                             turn_id=turn_id,
-                            first_sequence=first,
-                            last_sequence=last,
-                            event_count=count,
+                            first_sequence=stats[0],
+                            last_sequence=stats[1],
+                            event_count=stats[2],
                         )
                     )
             return AgentStreamEventPage(

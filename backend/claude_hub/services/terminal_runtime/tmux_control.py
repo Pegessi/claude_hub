@@ -161,6 +161,48 @@ async def _tmux_list_sessions(runtime: RuntimeBindings) -> set[str]:
     return {line for line in stdout.decode("utf-8", errors="ignore").splitlines() if line}
 
 
+async def _tmux_list_session_panes(
+    runtime: RuntimeBindings,
+) -> tuple[set[str], dict[str, Optional[str]]]:
+    """Return live tmux session names and active-pane foreground commands in one call."""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *runtime.tmux_command(
+                "list-panes",
+                "-a",
+                "-F",
+                "#{session_name}\t#{window_active}\t#{pane_active}\t#{pane_current_command}",
+            ),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+    except FileNotFoundError:
+        return set(), {}
+    stdout, _ = await proc.communicate()
+    if proc.returncode != 0:
+        return set(), {}
+    sessions: set[str] = set()
+    foreground_by_session: dict[str, Optional[str]] = {}
+    for raw_line in stdout.decode("utf-8", errors="ignore").splitlines():
+        if not raw_line:
+            continue
+        parts = raw_line.split("\t", 3)
+        session_name = parts[0]
+        if not session_name:
+            continue
+        sessions.add(session_name)
+        if len(parts) < 4:
+            foreground_by_session.setdefault(session_name, None)
+            continue
+        win_active, pane_active, raw_cmd = parts[1], parts[2], parts[3]
+        cmd = raw_cmd.strip() or None
+        if win_active == "1" and pane_active == "1":
+            foreground_by_session[session_name] = cmd
+        elif session_name not in foreground_by_session:
+            foreground_by_session[session_name] = cmd
+    return sessions, foreground_by_session
+
+
 async def _tmux_list_session_created(runtime: RuntimeBindings) -> dict[str, float]:
     """Return live tmux session names with their creation epoch."""
     try:

@@ -625,7 +625,15 @@ export const useTerminalStore = defineStore('terminal', () => {
   }
 
   async function switchEnv(tabId: string, data: SwitchEnvRequest) {
-    isLoading.value = true
+    const index = tabs.value.findIndex(t => t.id === tabId)
+    const previousTab = index !== -1 ? tabs.value[index] : undefined
+    if (index !== -1 && previousTab) {
+      tabs.value[index] = {
+        ...previousTab,
+        env: { ...data.env },
+        ...(data.solo_mode !== undefined ? { solo_mode: data.solo_mode } : {}),
+      }
+    }
     try {
       const response = await fetch(`${API_BASE}/tabs/${tabId}/switch-env`, {
         method: 'POST',
@@ -638,18 +646,20 @@ export const useTerminalStore = defineStore('terminal', () => {
       }
       const updatedTab = await response.json()
       invalidateTabSnapshots()
-      const index = tabs.value.findIndex(t => t.id === tabId)
-      if (index !== -1) {
-        tabs.value[index] = updatedTab
+      const latestIndex = tabs.value.findIndex(t => t.id === tabId)
+      if (latestIndex !== -1) {
+        tabs.value[latestIndex] = updatedTab
       }
-      // Also re-fetch to make sure env/solo_mode are in sync with the backend.
-      await fetchTabs({ force: true })
       return updatedTab
     } catch (e) {
+      if (previousTab) {
+        const rollbackIndex = tabs.value.findIndex(t => t.id === tabId)
+        if (rollbackIndex !== -1) {
+          tabs.value[rollbackIndex] = previousTab
+        }
+      }
       notifyError(e instanceof Error ? e.message : 'Unknown error')
       throw e
-    } finally {
-      isLoading.value = false
     }
   }
 
