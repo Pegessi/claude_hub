@@ -1,0 +1,49 @@
+{
+  "schema": 1,
+  "git_version": "git version 2.43.0",
+  "merge": "08ace73510f618ae983c7df05814251daaf2a2c4",
+  "parents": [
+    "5ed85d7c2b34ca4746efe0ff48f93d15002bca60",
+    "34c3a5eefaf36e309ed610be00dbdfb2244813b9"
+  ],
+  "base": "0af68882c9956096bc1d6c3a598be5d47ef7258a",
+  "shallow_boundaries": [],
+  "tree": "b818601ac9f01be897b52e3c97542e61580d795a",
+  "reconstructed_tree": "9eaec68bd7c753a1adef9c1816d50ad16f9eb06f",
+  "conflicts": [
+    "CHANGELOG.md"
+  ],
+  "decisions": [
+    {
+      "path": "CHANGELOG.md",
+      "base": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "b8da25967085038ce83ab6af49f514b77d008732"
+      },
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "90e24ad669e717599e1d383840c05a94d276da4f"
+      },
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "f873754aef873c66f8b253371e6d3b879893e071"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "16e29833f22dde2d0d444c3ff2b9773fcdf113a2"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "2e986b029a0ccfcd8e6562970fabe6324d05f6cb"
+      },
+      "reason": "Keep both top-of-Released changelog sections in chronological merge order (streamlined task sessions entry followed by main's chat switch/polling latency entry).",
+      "disposition": "resolve",
+      "destinations": []
+    }
+  ]
+}
