@@ -48,6 +48,7 @@ export const useAppStore = defineStore('app', () => {
     document.querySelector('meta[name="theme-color"]')?.setAttribute('content', chromeColor)
   }, { immediate: true, flush: 'sync' })
   const feishuBotSettingsVisible = ref(false)
+  const subagentSettingsVisible = ref(false)
   const scheduledTasksVisible = ref(false)
   const restartDialogVisible = ref(!!sessionStorage.getItem(RESTART_STORAGE_KEY))
   const scheduledTaskCreateTargetTabId = ref<string | null>(null)
@@ -70,6 +71,10 @@ export const useAppStore = defineStore('app', () => {
   }
 
   function openAppearance() { appearanceVisible.value = true }
+
+  function openSubagentSettings() { subagentSettingsVisible.value = true }
+
+  function closeSubagentSettings() { subagentSettingsVisible.value = false }
 
   function openScheduledTasks(targetTabId: string | null = null) {
     scheduledTaskCreateTargetTabId.value = targetTabId
@@ -94,6 +99,7 @@ export const useAppStore = defineStore('app', () => {
     mode,
     colorScheme,
     feishuBotSettingsVisible,
+    subagentSettingsVisible,
     scheduledTasksVisible,
     restartDialogVisible,
     scheduledTaskCreateTargetTabId,
@@ -106,6 +112,8 @@ export const useAppStore = defineStore('app', () => {
     themePersistenceError,
     setAppearance,
     openAppearance,
+    openSubagentSettings,
+    closeSubagentSettings,
     openScheduledTasks,
     closeScheduledTasks,
     openFeishuBotSettings,

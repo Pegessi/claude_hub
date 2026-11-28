@@ -24,7 +24,17 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
-from typing import Any, AsyncIterator, Awaitable, Callable, Dict, Iterable, List, Optional, Tuple
+from typing import (
+    Any,
+    AsyncIterator,
+    Awaitable,
+    Callable,
+    Dict,
+    Iterable,
+    List,
+    Optional,
+    Tuple,
+)
 
 from ..models import AgentType, SessionKind, TerminalTab
 from ..models.schema_domains.runtime import REASONING_EFFORTS
@@ -447,29 +457,187 @@ class SubagentService:
         if self._shutting_down or not self._started:
             raise SubagentError(503, "Subagents are unavailable while Claude Hub starts or stops")
 
-    def _launch_env(self, req: SubagentCreate) -> Dict[str, str]:
-        if req.agent_type == AgentType.TERMINAL:
+    async def _resolve_subagent_defaults(
+        self, req: SubagentCreate
+    ) -> Tuple[AgentType, Optional[str], Optional[str], Dict[str, str]]:
+        from .cross_review_settings import read_subagent_settings
+        from .cross_reviewer import (
+            CrossReviewCandidate,
+            is_candidate_ineligible,
+            is_candidate_quota_exhausted,
+            read_cached_quota_map,
+        )
+
+        agent_type = req.agent_type
+        if agent_type == AgentType.TERMINAL:
             raise SubagentError(400, "agent_type must be a Chat provider, not terminal")
+
         try:
             env = self.runtime.resolve_env(req.env_preset, dict(req.env))
         except ValueError as exc:
             raise SubagentError(400, str(exc)) from exc
-        if req.model:
-            env[_MODEL_ENV_KEYS[req.agent_type]] = req.model.strip()
-        if req.effort:
-            effort = req.effort.strip().lower()
-            key = _EFFORT_ENV_KEYS.get(req.agent_type)
+
+        model = req.model.strip() if req.model else None
+        effort = req.effort.strip().lower() if req.effort else None
+
+        settings = await asyncio.to_thread(read_subagent_settings)
+        preferences = settings.preferred_candidates
+        quota_map = await read_cached_quota_map() if (preferences or agent_type is None) else {}
+
+        if agent_type is None:
+            chosen = next(
+                (
+                    pref
+                    for pref in preferences
+                    if not is_candidate_ineligible(
+                        CrossReviewCandidate(pref.provider, pref.model, pref.effort),
+                        quota_map,
+                    )
+                ),
+                None,
+            )
+            if chosen is not None:
+                agent_type = AgentType(chosen.provider)
+            else:
+                agent_type = next(
+                    (
+                        prov
+                        for prov in (
+                            AgentType.CODEX,
+                            AgentType.CLAUDE,
+                            AgentType.CURSOR,
+                        )
+                        if not is_candidate_ineligible(CrossReviewCandidate(prov.value), quota_map)
+                    ),
+                    None,
+                )
+                if agent_type is None:
+                    raise SubagentError(
+                        503,
+                        "No eligible subagent provider is available (all automatic providers are quota-exhausted or not configured)",
+                    )
+
+            env_model_key = _MODEL_ENV_KEYS.get(agent_type)
+            env_model = (env.get(env_model_key) or "").strip() if env_model_key else ""
+            if model is None and env_model:
+                model = env_model
+
+            provider_spec = all_specs().get(agent_type)
+            effort_keys = provider_spec.effort_env_keys if provider_spec is not None else ()
+            env_effort = next(
+                (env[k].strip().lower() for k in effort_keys if (env.get(k) or "").strip()),
+                "",
+            )
+            if effort is None and env_effort:
+                effort = env_effort
+
+            if chosen is not None:
+                if model is None and chosen.model:
+                    model = chosen.model
+                if effort is None and chosen.effort:
+                    effort = chosen.effort
+        else:
+            env_model_key = _MODEL_ENV_KEYS.get(agent_type)
+            env_model = (env.get(env_model_key) or "").strip() if env_model_key else ""
+            if model is None and env_model:
+                model = env_model
+
+            provider_spec = all_specs().get(agent_type)
+            effort_keys = provider_spec.effort_env_keys if provider_spec is not None else ()
+            env_effort = next(
+                (env[k].strip().lower() for k in effort_keys if (env.get(k) or "").strip()),
+                "",
+            )
+            if effort is None and env_effort:
+                effort = env_effort
+
+            matching = [pref for pref in preferences if pref.provider == agent_type.value]
+            if matching:
+                if model is None and effort is None:
+                    chosen = next(
+                        (
+                            pref
+                            for pref in matching
+                            if not is_candidate_quota_exhausted(
+                                CrossReviewCandidate(pref.provider, pref.model, pref.effort),
+                                quota_map,
+                            )
+                        ),
+                        matching[0],
+                    )
+                    if chosen.model:
+                        model = chosen.model
+                    if chosen.effort:
+                        effort = chosen.effort
+                elif model is not None and effort is None:
+                    chosen_for_model = next(
+                        (
+                            pref
+                            for pref in matching
+                            if pref.model in {None, model}
+                            and not is_candidate_quota_exhausted(
+                                CrossReviewCandidate(pref.provider, pref.model, pref.effort),
+                                quota_map,
+                            )
+                        ),
+                        next(
+                            (pref for pref in matching if pref.model in {None, model}),
+                            None,
+                        ),
+                    )
+                    if chosen_for_model is not None and chosen_for_model.effort:
+                        effort = chosen_for_model.effort
+                elif model is None and effort is not None:
+                    chosen_for_effort = next(
+                        (
+                            pref
+                            for pref in matching
+                            if not is_candidate_quota_exhausted(
+                                CrossReviewCandidate(pref.provider, pref.model, pref.effort),
+                                quota_map,
+                            )
+                        ),
+                        matching[0],
+                    )
+                    if chosen_for_effort.model:
+                        model = chosen_for_effort.model
+
+        return agent_type, model, effort, env
+
+    def _launch_env(
+        self,
+        req: SubagentCreate,
+        *,
+        agent_type: AgentType,
+        model: Optional[str],
+        effort: Optional[str],
+        base_env: Optional[Dict[str, str]] = None,
+    ) -> Dict[str, str]:
+        if agent_type == AgentType.TERMINAL:
+            raise SubagentError(400, "agent_type must be a Chat provider, not terminal")
+        if base_env is not None:
+            env = dict(base_env)
+        else:
+            try:
+                env = self.runtime.resolve_env(req.env_preset, dict(req.env))
+            except ValueError as exc:
+                raise SubagentError(400, str(exc)) from exc
+        if model:
+            env[_MODEL_ENV_KEYS[agent_type]] = model.strip()
+        if effort:
+            cleaned_effort = effort.strip().lower()
+            key = _EFFORT_ENV_KEYS.get(agent_type)
             if key is None:
                 raise SubagentError(
                     400,
-                    f"{req.agent_type.value} Chat has no separate reasoning-effort setting; "
+                    f"{agent_type.value} Chat has no separate reasoning-effort setting; "
                     "choose a model variant instead",
                 )
-            if effort not in REASONING_EFFORTS:
+            if cleaned_effort not in REASONING_EFFORTS:
                 raise SubagentError(
                     400, f"effort must be one of {', '.join(sorted(REASONING_EFFORTS))}"
                 )
-            env[key] = effort
+            env[key] = cleaned_effort
         return env
 
     def _resolve_caller(self, req: SubagentCreate) -> Optional[TerminalTab]:
@@ -579,7 +747,8 @@ class SubagentService:
                 if record.call_id == req.call_id:
                     if record.request_digest != digest:
                         raise SubagentError(
-                            409, f"call_id {req.call_id} was already used with a different request"
+                            409,
+                            f"call_id {req.call_id} was already used with a different request",
                         )
                     return record, record.turns[0]
             return await self._create_locked(req, digest, created_by)
@@ -587,7 +756,10 @@ class SubagentService:
     async def _create_locked(
         self, req: SubagentCreate, digest: str, created_by: Optional[str]
     ) -> Tuple[Subagent, SubagentTurn]:
-        env = self._launch_env(req)
+        agent_type, model, effort, base_env = await self._resolve_subagent_defaults(req)
+        env = self._launch_env(
+            req, agent_type=agent_type, model=model, effort=effort, base_env=base_env
+        )
         parent = self._resolve_parent(req)
         cwd = self._resolve_cwd(req, parent)
         attribution = self._resolve_attribution(parent, cwd)
@@ -595,19 +767,21 @@ class SubagentService:
         # policy; without a parent nobody could approve, so it runs solo.
         if req.solo_mode is not None:
             solo_mode = req.solo_mode
+        elif agent_type == AgentType.ANTIGRAVITY:
+            solo_mode = False
         else:
             solo_mode = parent.solo_mode if parent is not None else True
         subagent_id = f"sa-{uuid.uuid4().hex[:12]}"
         env[SUBAGENT_ID_ENV] = subagent_id
         parent_id = parent.id if parent is not None else None
         first_line = req.prompt.strip().splitlines()[0][:60]
-        name = req.name or f"{req.agent_type.value} subagent: {first_line}"
+        name = req.name or f"{agent_type.value} subagent: {first_line}"
         record = Subagent(
             id=subagent_id,
             parent_tab_id=parent_id,
-            agent_type=req.agent_type,
-            model=req.model,
-            effort=req.effort,
+            agent_type=agent_type,
+            model=model,
+            effort=effort,
             cwd=cwd,
             env_preset=req.env_preset,
             name=name,
@@ -623,7 +797,7 @@ class SubagentService:
                 name=name,
                 cwd=cwd,
                 solo_mode=solo_mode,
-                agent_type=req.agent_type,
+                agent_type=agent_type,
                 session_kind=SessionKind.CHAT,
                 env=env,
                 parent_tab_id=parent_id,
@@ -737,7 +911,8 @@ class SubagentService:
         record = self.get(subagent_id)
         if not await self._close(record, reason) and not record.closed:
             raise SubagentError(
-                503, "Archiving the subagent's Chat tab failed; it stays open, retry close"
+                503,
+                "Archiving the subagent's Chat tab failed; it stays open, retry close",
             )
         return record
 
@@ -820,7 +995,8 @@ class SubagentService:
     def _spawn(self, record: Subagent, turn: SubagentTurn, text: str, visible: str) -> None:
         self._done[turn.turn_id] = asyncio.Event()
         self._tasks[turn.turn_id] = self._track(
-            self._execute(record, turn, text, visible), f"subagent-{record.id}-{turn.turn_id}"
+            self._execute(record, turn, text, visible),
+            f"subagent-{record.id}-{turn.turn_id}",
         )
 
     async def _execute(self, record: Subagent, turn: SubagentTurn, text: str, visible: str) -> None:
@@ -1045,7 +1221,10 @@ def _default_runtime() -> SubagentRuntime:
         tab_id: str, text: str, turn_id: str, visible_text: str, timeout_seconds: float
     ) -> str:
         # Imported lazily: the API facade owns the bound tailer manager.
-        from ..api.agent_stream import ExternalInteractionRequired, dispatch_tab_chat_and_wait
+        from ..api.agent_stream import (
+            ExternalInteractionRequired,
+            dispatch_tab_chat_and_wait,
+        )
 
         try:
             return await dispatch_tab_chat_and_wait(

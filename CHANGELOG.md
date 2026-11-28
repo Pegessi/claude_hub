@@ -7,6 +7,27 @@
 
 ## Released
 
+### feat(subagents): unify default subagent priority in Settings and simplify Cross-Review & Slim
+
+- Move subagent provider/model/effort priority configuration to global
+  `Subagent Priority` settings (`SubagentSettingsDialog.vue` via the top-right
+  Extensions menu and `/api/subagents/settings`, keeping
+  `/api/goals/cross-review-settings` as a compatibility alias) so normal
+  delegation (`claude-hub agent run` / `POST /api/subagents` when provider or
+  model is omitted), Goal cross-review, and Workspace `resolve_cross_reviewer_target`
+  share one default preference source while explicit user `--provider`, `--model`,
+  `--effort`, and `env` / `env_preset` model/effort overrides win, excluding
+  authoritatively `over` or `not_configured` providers during automatic selection.
+- Remove redundant per-run candidate lists (`strict_review_candidates`),
+  reviewer mode matrices (`single` / `dual`), and multi-preset ceremony in favor
+  of one lightweight `cross_review_slim` entry (`CrossReviewDialog.vue`,
+  `prompts.py`, `strict_review.py`) focused on bugs/correctness, elegant and
+  reasonable design, restraint against overengineering/defensive bloat, and
+  performance, while preserving legacy `readonly_brief` read-only and no-push
+  invariants across saved settings (`default_preset`), failed/malformed dialog
+  hydration, conflict-safe `PATCH` preference updates, persisted store loads,
+  resumes, and steers.
+
 ### feat: streamline task delegation contracts, subagent blind reviews, and agent roles
 
 - Add first-class `goal`, `done_when`, and `out_of_scope` task contract fields

@@ -69,10 +69,12 @@ _IMAGE_ATTACHMENT_GUIDANCE = (
 # the guidance without the ``agent run`` recipe, which bounds fan-out; the
 # server also enforces a nesting depth limit.
 _AGENT_RUN_GUIDANCE = (
-    "For help from another provider: `claude-hub agent run --provider X --prompt-file -` "
-    "returns its final answer (see `agent run --help`). Use Workspace Tasks only for tracked, "
-    "reviewed work. A resident helper from `claude-hub agent create` defaults here to a "
-    "Workspace Chat session.\n"
+    "For help from another provider or cross-review: `claude-hub agent run --prompt-file -` "
+    "follows the shared default subagent priority configured in Settings (or pass "
+    "`claude-hub agent run --provider X --prompt-file -` / `--model Y --effort Z` to override "
+    "explicitly) and returns its final answer (see `agent run --help`). Use Workspace Tasks "
+    "only for tracked, reviewed work. A resident helper from `claude-hub agent create` "
+    "defaults here to a Workspace Chat session.\n"
 )
 
 

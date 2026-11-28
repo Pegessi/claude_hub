@@ -10,7 +10,11 @@ from uuid import uuid4
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from .chat_image import ChatImageAttachment
-from .schema_domains.runtime import PROVIDER_EFFORT_ENV_KEYS, REASONING_EFFORTS, AgentType
+from .schema_domains.runtime import (
+    PROVIDER_EFFORT_ENV_KEYS,
+    REASONING_EFFORTS,
+    AgentType,
+)
 
 GOAL_OBJECTIVE_MAX_LENGTH = 4000
 GOAL_STEER_INPUT_MAX_LENGTH = 32_000
@@ -162,11 +166,10 @@ class GoalStrictReviewRound(BaseModel):
     created_at: datetime = Field(default_factory=utc_now)
 
 
-StrictReviewPreset = Literal["standard", "mr_slim", "bug_only", "readonly_brief"]
-StrictReviewMode = Literal["single", "dual"]
+StrictReviewPreset = Literal["standard", "cross_review_slim", "readonly_brief"]
 
 
-class CrossReviewModelPreference(BaseModel):
+class SubagentModelPreference(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     provider: Literal["maso", "codex", "claude", "cursor", "traex"]
@@ -174,7 +177,7 @@ class CrossReviewModelPreference(BaseModel):
     effort: str | None = Field(default=None, max_length=32)
 
     @model_validator(mode="after")
-    def validate_effort(self) -> "CrossReviewModelPreference":
+    def validate_effort(self) -> "SubagentModelPreference":
         if self.effort is not None:
             if self.effort not in REASONING_EFFORTS:
                 raise ValueError(f"effort must be one of {', '.join(sorted(REASONING_EFFORTS))}")
@@ -188,16 +191,24 @@ class CrossReviewModelPreference(BaseModel):
         return (value.strip() or None) if isinstance(value, str) else value
 
 
+CrossReviewModelPreference = SubagentModelPreference
+
+
 class StrictReviewOptions(BaseModel):
     strict_review: bool = False
     strict_review_preset: StrictReviewPreset = "standard"
-    strict_review_mode: StrictReviewMode | None = None
-    strict_review_candidates: list[CrossReviewModelPreference] | None = Field(
-        default=None, max_length=8
-    )
-    strict_review_briefing: bool = False
-    strict_review_mr_description: bool = False
     strict_review_push_branch: bool = False
+
+    @field_validator("strict_review_preset", mode="before")
+    @classmethod
+    def normalize_preset(cls, value: object) -> object:
+        if isinstance(value, str):
+            cleaned = value.strip()
+            if cleaned in {"mr_slim", "bug_only"}:
+                return "cross_review_slim"
+            if cleaned in {"standard", "cross_review_slim", "readonly_brief"}:
+                return cleaned
+        return value
 
     @model_validator(mode="after")
     def validate_review_options(self) -> "StrictReviewOptions":
@@ -272,7 +283,9 @@ class GoalRun(StrictReviewOptions):
     strict_review_cycle: int = Field(default=1, ge=1)
     strict_review_rounds: int = Field(default=0, ge=0, le=GOAL_STRICT_REVIEW_HARD_MAX_ROUNDS)
     strict_review_max_rounds: int = Field(
-        default=GOAL_STRICT_REVIEW_MAX_ROUNDS, ge=1, le=GOAL_STRICT_REVIEW_HARD_MAX_ROUNDS
+        default=GOAL_STRICT_REVIEW_MAX_ROUNDS,
+        ge=1,
+        le=GOAL_STRICT_REVIEW_HARD_MAX_ROUNDS,
     )
     strict_review_push_pending: bool = False
     strict_review_push_attempts: int = Field(default=0, ge=0)

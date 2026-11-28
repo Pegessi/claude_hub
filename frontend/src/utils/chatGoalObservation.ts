@@ -42,7 +42,6 @@ export function goalObservationVersion(goal: ChatGoal | null): string {
     goal.provider_status ?? '',
     goal.strict_review ? '1' : '0',
     goal.strict_review_preset ?? 'standard',
-    goal.strict_review_mode ?? '',
     goal.strict_review_rounds ?? 0,
     goal.strict_review_in_progress ? '1' : '0',
   ].join('\u0000')

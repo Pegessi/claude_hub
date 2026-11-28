@@ -51,6 +51,31 @@
     </svg>
     <span>Feishu Bot settings</span>
   </button>
+  <button
+    type="button"
+    class="extension-action"
+    @click="appStore.openSubagentSettings(); emit('select')"
+  >
+    <svg
+      class="extension-action-icon"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      stroke-width="1.8"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+      aria-hidden="true"
+      focusable="false"
+    >
+      <path d="M6 7h12M6 12h8M6 17h10" />
+      <circle
+        cx="17"
+        cy="12"
+        r="2"
+      />
+    </svg>
+    <span>Subagent priority</span>
+  </button>
   <NetworkAccessMenu variant="menu" />
   <QuotaMenu @select="emit('select')" />
   <button

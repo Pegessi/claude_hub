@@ -271,17 +271,17 @@ async def _scenario(context: BrowserContext, *, appearance: bool) -> dict:
     goal_updates = []
     goal_creates = []
     cross_settings = {
-        "default_preset": "readonly_brief",
-        "review_mode": "dual",
         "preferred_candidates": [],
-        "include_review_briefing": True,
-        "generate_mr_description": False,
         "push_remote_branch": False,
+        "default_preset": "cross_review_slim",
     }
     settings_get_started = asyncio.Event()
     release_settings_get = asyncio.Event()
     first_settings_get = True
     delay_settings_save = True
+    fail_next_settings_get = False
+    malformed_next_settings_get = False
+    fail_next_settings_save = False
     save_started = asyncio.Event()
     release_save = asyncio.Event()
     failure: BaseException | None = None
@@ -296,6 +296,7 @@ async def _scenario(context: BrowserContext, *, appearance: bool) -> dict:
         async def route_all(route) -> None:
             nonlocal current_goal, fail_next_send, plan_fixture, cross_settings
             nonlocal first_settings_get, delay_settings_save
+            nonlocal fail_next_settings_get, malformed_next_settings_get, fail_next_settings_save
             request = route.request
             parsed = urlparse(request.url)
             if origin(request.url) != origin(base):
@@ -493,17 +494,85 @@ async def _scenario(context: BrowserContext, *, appearance: bool) -> dict:
                         "plan_answered": bool(current_goal.get("plan_turn_id")),
                     }
                 body = {"ok": True}
-            elif path == "/api/goals/cross-review-settings":
+            elif path in {
+                "/api/goals/cross-review-settings",
+                "/api/subagents/settings",
+            }:
+                if request.method == "GET" and fail_next_settings_get:
+                    fail_next_settings_get = False
+                    await route.fulfill(
+                        status=503,
+                        content_type="application/json",
+                        body=json.dumps({"detail": "Service unavailable"}),
+                    )
+                    return
+                if request.method == "GET" and malformed_next_settings_get:
+                    malformed_next_settings_get = False
+                    await route.fulfill(
+                        status=200,
+                        content_type="application/json",
+                        body=json.dumps({"providers": []}),
+                    )
+                    return
                 if request.method == "GET" and first_settings_get:
                     first_settings_get = False
                     settings_get_started.set()
                     await release_settings_get.wait()
                 if request.method == "PUT":
-                    cross_settings = json.loads(request.post_data or "{}")
+                    if fail_next_settings_save:
+                        fail_next_settings_save = False
+                        await route.fulfill(
+                            status=500,
+                            content_type="application/json",
+                            body=json.dumps({"detail": "Save failed"}),
+                        )
+                        return
+                    put_payload = json.loads(request.post_data or "{}")
+                    raw_preset = (
+                        "readonly_brief"
+                        if put_payload.get("default_preset") == "readonly_brief"
+                        else "cross_review_slim"
+                    )
+                    push = (
+                        False
+                        if raw_preset == "readonly_brief"
+                        else bool(put_payload.get("push_remote_branch"))
+                    )
+                    cross_settings = {
+                        "preferred_candidates": put_payload.get("preferred_candidates", []),
+                        "push_remote_branch": push,
+                        "default_preset": "cross_review_slim" if push else raw_preset,
+                    }
                     if delay_settings_save:
                         delay_settings_save = False
                         save_started.set()
                         await release_save.wait()
+                if request.method == "PATCH":
+                    patch_payload = json.loads(request.post_data or "{}")
+                    merged = dict(cross_settings)
+                    if (
+                        "preferred_candidates" in patch_payload
+                        and patch_payload["preferred_candidates"] is not None
+                    ):
+                        merged["preferred_candidates"] = patch_payload["preferred_candidates"]
+                    if (
+                        "default_preset" in patch_payload
+                        and patch_payload["default_preset"] is not None
+                    ):
+                        merged["default_preset"] = patch_payload["default_preset"]
+                        if (
+                            patch_payload["default_preset"] == "readonly_brief"
+                            and patch_payload.get("push_remote_branch") is None
+                        ):
+                            merged["push_remote_branch"] = False
+                    if (
+                        "push_remote_branch" in patch_payload
+                        and patch_payload["push_remote_branch"] is not None
+                    ):
+                        merged["push_remote_branch"] = bool(patch_payload["push_remote_branch"])
+                    if merged.get("default_preset") == "readonly_brief":
+                        merged["push_remote_branch"] = False
+                    cross_settings = merged
                 body = {
                     "settings": cross_settings,
                     "providers": [
@@ -719,12 +788,15 @@ async def _scenario(context: BrowserContext, *, appearance: bool) -> dict:
         )
         await expect(page.get_by_role("button", name="Pause", exact=True)).to_be_visible()
 
-        # The configurable review opens lazily and uses the ordinary Goal path.
+        # The lightweight Cross-Review & Slim dialog opens lazily and uses the shared subagent priority settings.
         current_goal = None
         idle_fixture = True
+        delay_settings_save = False
+        await page.set_viewport_size({"width": 1440, "height": 900})
         await page.reload(wait_until="domcontentloaded")
         assert not any(
-            path == "/api/goals/cross-review-settings" for _, path in report["api_requests"]
+            path in {"/api/goals/cross-review-settings", "/api/subagents/settings"}
+            for _, path in report["api_requests"]
         )
         await expect(composer).to_be_enabled()
         await select_appearance(page, "dark", "Classic")
@@ -735,80 +807,438 @@ async def _scenario(context: BrowserContext, *, appearance: bool) -> dict:
         await asyncio.wait_for(settings_get_started.wait(), timeout=5)
         # Saved defaults must load before the review can start.
         await expect(review.get_by_role("button", name="Start Cross-Review")).to_be_disabled()
-        await expect(review.get_by_label("MR Slim & Gate")).to_be_disabled()
+        await expect(review.get_by_label("Push feature branch on PASS")).to_be_disabled()
         await review.get_by_label("Scope / focus notes").fill("Preserve these notes while loading")
         release_settings_get.set()
         await expect(review.get_by_role("button", name="Start Cross-Review")).to_be_enabled()
-        await expect(review.get_by_label("Read-Only Audit")).to_be_checked()
-        await expect(review.get_by_label("Dual consensus")).to_be_checked()
         await expect(review.get_by_label("Scope / focus notes")).to_have_value(
             "Preserve these notes while loading"
         )
-        # The first and last enabled controls trap keyboard focus.
-        await review.get_by_role("button", name="Start Cross-Review").focus()
-        await page.keyboard.press("Tab")
-        await expect(review.get_by_label("Read-Only Audit")).to_be_focused()
-        await page.keyboard.press("Shift+Tab")
-        await expect(review.get_by_role("button", name="Start Cross-Review")).to_be_focused()
-        # Readable text in the current theme; the existing Goal test also exercises both palettes.
+        for group_name in ("Review focus", "Wrap-up option"):
+            await expect(review.get_by_role("group", name=group_name, exact=True)).to_be_visible()
+        for pillar in (
+            "Bugs & correctness",
+            "Elegant design",
+            "Restraint & slim",
+            "Performance",
+        ):
+            await expect(review.get_by_text(pillar, exact=True)).to_be_visible()
+        # Desktop dialog opens at scrollTop=0 with no vertical overflow hiding content or footer.
+        desktop_layout = await review.evaluate("""el => {
+            const body = el.querySelector('.cr-body')
+            const pillars = [...el.querySelectorAll('.cr-pillar')].map(c => c.getBoundingClientRect())
+            const footer = el.querySelector('.cr-footer').getBoundingClientRect()
+            return {
+              scrollTop: body.scrollTop,
+              scrollHeight: body.scrollHeight,
+              clientHeight: body.clientHeight,
+              pillarCount: pillars.length,
+              footerBottom: footer.bottom,
+            }
+        }""")
+        assert desktop_layout["scrollTop"] == 0, desktop_layout
+        assert (
+            desktop_layout["scrollHeight"] <= desktop_layout["clientHeight"] + 1
+        ), f"default desktop dialog overflowed vertically: {desktop_layout}"
+        assert desktop_layout["pillarCount"] == 4, desktop_layout
+        assert desktop_layout["footerBottom"] <= 900, desktop_layout
+        await expect(review.locator(".cr-run-summary")).to_contain_text(
+            "Cross-Review & Slim · Auto heterogeneous routing"
+        )
         cross_contrast = (
             CONTRAST_SCRIPT.replace("#goal-dialog-title", "#cross-review-title")
             .replace(".goal-dialog-field-label", ".dialog legend")
-            .replace(".goal-dialog-field-hint", ".dialog label")
-            .replace(".goal-dialog-plan-note", ".dialog p")
-            .replace(".goal-dialog-tips", ".dialog footer button")
+            .replace(".goal-dialog-plan-note", ".goal-dialog-count")
+            .replace(".goal-dialog-tips", ".goal-dialog-button--primary")
         )
-        measured = await page.evaluate(cross_contrast)
-        assert measured and all(value >= 4.5 for value in measured.values()), measured
-        await page.set_viewport_size({"width": 390, "height": 844})
-        for name in ("Cancel", "Start Cross-Review"):
-            assert (await review.get_by_role("button", name=name, exact=True).bounding_box())[
-                "height"
-            ] >= 44
-        await review.get_by_label("Read-Only Audit").check()
-        await expect(review.get_by_label("Push feature branch on PASS")).to_be_disabled()
-        await review.get_by_label("Read-Only Audit").focus()
+        # Clearing scope notes surfaces actionable validation feedback and a 1-click default reset.
+        await review.get_by_label("Scope / focus notes").fill("   ")
+        await expect(review.get_by_role("button", name="Start Cross-Review")).to_be_disabled()
+        await expect(
+            review.get_by_text("Scope / focus notes are required to start a review.", exact=False)
+        ).to_be_visible()
+        dark_warning_contrast = await page.evaluate(cross_contrast)
+        assert dark_warning_contrast and all(
+            value >= 4.5 for value in dark_warning_contrast.values()
+        ), dark_warning_contrast
+        await review.get_by_role("button", name="Reset to default").click()
+        await expect(review.get_by_label("Scope / focus notes")).to_have_value(
+            "Cross-review the current change for bugs and correctness, elegant and reasonable design, restraint against overengineering or excessive defensive code, and performance; simplify where justified and verify."
+        )
+        await expect(review.get_by_role("button", name="Start Cross-Review")).to_be_enabled()
+        await review.get_by_label("Scope / focus notes").fill("x" * 3700)
+        await expect(review.locator(".goal-dialog-count")).to_have_attribute(
+            "data-near-limit", "true"
+        )
+        dark_near_limit_contrast = await page.evaluate(cross_contrast)
+        assert dark_near_limit_contrast and all(
+            value >= 4.5 for value in dark_near_limit_contrast.values()
+        ), dark_near_limit_contrast
+        await review.get_by_label("Scope / focus notes").fill("Preserve these notes while loading")
+        await review.get_by_role("button", name="Start Cross-Review").focus()
+        await page.keyboard.press("Tab")
+        await expect(review.get_by_role("button", name="Configure in Settings")).to_be_focused()
         await page.keyboard.press("Shift+Tab")
         await expect(review.get_by_role("button", name="Start Cross-Review")).to_be_focused()
-        await review.get_by_role("button", name="Save as default").click()
-        await asyncio.wait_for(save_started.wait(), timeout=5)
+        measured = await page.evaluate(cross_contrast)
+        assert measured and all(value >= 4.5 for value in measured.values()), measured
+        await page.screenshot(path=str(output / "cross-review-dark.png"), full_page=True)
+        report["screenshots"].append("cross-review-dark.png")
+
+        # F6: GET 503 on Subagent Priority settings surfaces alert, disables Save priority, and allows Retry load.
+        fail_next_settings_get = True
+        await review.get_by_role("button", name="Configure in Settings").click()
+        subagent_dialog = page.get_by_role("dialog", name="Subagent Priority")
+        await expect(subagent_dialog).to_be_visible()
+        await expect(
+            subagent_dialog.get_by_text(
+                "Could not load saved subagent priority. Retry before saving changes."
+            )
+        ).to_be_visible()
+        await expect(subagent_dialog.get_by_role("button", name="Save priority")).to_be_disabled()
+        await expect(subagent_dialog.get_by_role("button", name="Add priority")).to_be_disabled()
+        await page.wait_for_timeout(250)
+        await page.screenshot(
+            path=str(output / "subagent-priority-settings-error.png"), full_page=True
+        )
+        report["screenshots"].append("subagent-priority-settings-error.png")
+        await subagent_dialog.get_by_role("button", name="Retry load").click()
+        await expect(subagent_dialog.get_by_role("button", name="Save priority")).to_be_enabled()
+
+        # Open global Subagent Priority settings from Cross-Review & Slim and configure shared priority.
+        await subagent_dialog.get_by_label("Provider", exact=True).select_option("claude")
+        await expect(subagent_dialog.get_by_label("Effort", exact=True)).to_be_disabled()
+        await subagent_dialog.get_by_label("Provider", exact=True).select_option("codex")
+        await expect(subagent_dialog.get_by_label("Effort", exact=True)).to_be_enabled()
+        await subagent_dialog.get_by_label("Model", exact=True).select_option("reviewer-alpha")
+        await subagent_dialog.get_by_label("Effort", exact=True).select_option("ultra")
+        await subagent_dialog.get_by_role("button", name="Add priority").click()
+        await expect(subagent_dialog.locator(".candidate")).to_have_count(1)
+        await subagent_dialog.get_by_role("button", name="Save priority").click()
+        await expect(subagent_dialog.get_by_text("Subagent priority saved.")).to_be_visible()
+        assert cross_settings["preferred_candidates"] == [
+            {"provider": "codex", "model": "reviewer-alpha", "effort": "ultra"}
+        ]
+        await page.screenshot(path=str(output / "subagent-priority-settings.png"), full_page=True)
+        report["screenshots"].append("subagent-priority-settings.png")
+
+        # F5: Adding an unsaved second candidate and closing Settings must NOT leak into Cross-Review & Slim or persist on push toggle.
+        await subagent_dialog.get_by_label("Provider", exact=True).select_option("claude")
+        await subagent_dialog.get_by_role("button", name="Add priority").click()
+        await expect(subagent_dialog.locator(".candidate")).to_have_count(2)
+        await subagent_dialog.get_by_role("button", name="Close").click()
+        await expect(subagent_dialog).not_to_be_visible()
+
+        # Cross-Review & Slim reflects ONLY the committed 1 candidate, not the unsaved 2nd candidate.
+        await expect(review.locator(".cr-priority-summary")).to_have_text(
+            "#1 Codex/reviewer-alpha (ultra)"
+        )
+        await expect(review.locator(".cr-run-summary")).to_contain_text(
+            "Cross-Review & Slim · 1 shared priority subagent"
+        )
+        await review.get_by_label("Push feature branch on PASS").check()
+        await expect(review.locator(".cr-run-summary")).to_contain_text(
+            "Cross-Review & Slim · 1 shared priority subagent · Push on PASS"
+        )
+        assert cross_settings["preferred_candidates"] == [
+            {"provider": "codex", "model": "reviewer-alpha", "effort": "ultra"}
+        ]
+        await review.get_by_label("Push feature branch on PASS").uncheck()
+        assert cross_settings["push_remote_branch"] is False
+
+        # F7: 120-character custom model ID wraps cleanly at 390x844 mobile viewport without horizontal overflow.
+        long_model_id = "custom-model-" + ("x" * 107)
+        assert len(long_model_id) == 120
+        await review.get_by_role("button", name="Configure in Settings").click()
+        await expect(subagent_dialog).to_be_visible()
+        await subagent_dialog.get_by_label("Model", exact=True).select_option("__custom__")
+        await subagent_dialog.get_by_label("Custom model ID", exact=True).fill(long_model_id)
+        await subagent_dialog.get_by_role("button", name="Add priority").click()
+        await subagent_dialog.get_by_role("button", name="Save priority").click()
+        await expect(subagent_dialog.get_by_text("Subagent priority saved.")).to_be_visible()
+        await page.set_viewport_size({"width": 390, "height": 844})
+        settings_mobile_overflow = await subagent_dialog.evaluate("""el => {
+            const body = el.querySelector('.sa-body')
+            return { clientWidth: body.clientWidth, scrollWidth: body.scrollWidth }
+        }""")
+        assert (
+            settings_mobile_overflow["scrollWidth"] <= settings_mobile_overflow["clientWidth"] + 1
+        ), f"SubagentSettingsDialog overflowed at 390px with 120-char model: {settings_mobile_overflow}"
+        await subagent_dialog.get_by_role("button", name="Close").click()
+        await expect(subagent_dialog).not_to_be_visible()
+
+        long_model_cr_overflow = await review.evaluate("""el => {
+            const body = el.querySelector('.cr-body')
+            const summary = el.querySelector('.cr-priority-summary').getBoundingClientRect()
+            return {
+              clientWidth: body.clientWidth,
+              scrollWidth: body.scrollWidth,
+              summaryRight: summary.right,
+            }
+        }""")
+        assert (
+            long_model_cr_overflow["scrollWidth"] <= long_model_cr_overflow["clientWidth"] + 1
+            and long_model_cr_overflow["summaryRight"] <= 391
+        ), f"CrossReviewDialog overflowed at 390px with 120-char model: {long_model_cr_overflow}"
+
+        # Restore single reviewer-alpha candidate for clean light/dark/mobile screenshots.
+        await page.set_viewport_size({"width": 1440, "height": 900})
+        await review.get_by_role("button", name="Configure in Settings").click()
+        await expect(subagent_dialog).to_be_visible()
+        await subagent_dialog.get_by_role("button", name="Remove subagent 2").click()
+        await subagent_dialog.get_by_role("button", name="Save priority").click()
+        await expect(subagent_dialog.get_by_text("Subagent priority saved.")).to_be_visible()
+        await page.set_viewport_size({"width": 390, "height": 844})
+        await subagent_dialog.evaluate("""el => {
+            const body = el.querySelector('.sa-body')
+            if (body) body.scrollTop = 0
+            if (document.activeElement instanceof HTMLElement) document.activeElement.blur()
+        }""")
+        await page.wait_for_timeout(200)
+        await page.screenshot(
+            path=str(output / "subagent-priority-settings-mobile.png"), full_page=True
+        )
+        report["screenshots"].append("subagent-priority-settings-mobile.png")
+        await page.set_viewport_size({"width": 1440, "height": 900})
+        await subagent_dialog.get_by_role("button", name="Close").click()
+        await expect(subagent_dialog).not_to_be_visible()
+
+        # R2: Two-page conflict-safe regression — Page A opens Cross-Review & Slim with 1 candidate,
+        # Page B saves 2 candidates in Subagent Priority Settings, then Page A checks Push on PASS.
+        # Narrow PATCH from Page A must preserve Page B's 2 candidates.
+        page_b = await context.new_page()
+        await page_b.goto(base + f"/?tab={TAB}", wait_until="domcontentloaded")
+        await expect(page_b.get_by_role("button", name="Add to chat", exact=True)).to_be_visible()
+        await page_b.get_by_role("button", name="Add to chat", exact=True).click()
+        await page_b.get_by_role("menuitem", name="Cross-Review & Slim").click()
+        review_b = page_b.get_by_role("dialog", name="Cross-Review & Slim")
+        await expect(review_b).to_be_visible()
+        await review_b.get_by_role("button", name="Configure in Settings").click()
+        subagent_b = page_b.get_by_role("dialog", name="Subagent Priority")
+        await expect(subagent_b).to_be_visible()
+        await subagent_b.get_by_label("Provider", exact=True).select_option("claude")
+        await subagent_b.get_by_role("button", name="Add priority").click()
+        await expect(subagent_b.locator(".candidate")).to_have_count(2)
+        await subagent_b.get_by_role("button", name="Save priority").click()
+        await expect(subagent_b.get_by_text("Subagent priority saved.")).to_be_visible()
+        assert len(cross_settings["preferred_candidates"]) == 2
+        await page_b.close()
+
+        # Now Page A (which loaded when there was only 1 candidate) toggles Push feature branch on PASS:
+        await review.get_by_label("Push feature branch on PASS").check()
+        await expect(review.locator(".cr-run-summary")).to_contain_text(
+            "Cross-Review & Slim · 2 shared priority subagents · Push on PASS"
+        )
+        assert len(cross_settings["preferred_candidates"]) == 2
+        assert cross_settings["push_remote_branch"] is True
+        await review.get_by_label("Push feature branch on PASS").uncheck()
+        assert cross_settings["push_remote_branch"] is False
+        assert len(cross_settings["preferred_candidates"]) == 2
+
+        # S1: Stale-mode regression — if another tab/client saves readonly_brief while Page A
+        # still has Cross-Review & Slim open, a push-only PATCH from Page A must NOT switch
+        # the saved mode to cross_review_slim; Page A reconciles to Read-Only Audit.
+        cross_settings["default_preset"] = "readonly_brief"
+        cross_settings["push_remote_branch"] = False
+        await review.get_by_label("Push feature branch on PASS").check()
+        await expect(
+            review.get_by_text(
+                "Saved read-only audit default active (no file edits or branch push)."
+            )
+        ).to_be_visible()
+        await expect(review.get_by_label("Push feature branch on PASS")).not_to_be_checked()
+        await expect(review.get_by_label("Push feature branch on PASS")).to_be_disabled()
+        assert cross_settings["default_preset"] == "readonly_brief"
+        assert cross_settings["push_remote_branch"] is False
+        assert len(cross_settings["preferred_candidates"]) == 2
+
+        # Keep 1 candidate for the remaining single-candidate assertions/screenshots.
+        cross_settings = {
+            "preferred_candidates": [
+                {"provider": "codex", "model": "reviewer-alpha", "effort": "ultra"}
+            ],
+            "push_remote_branch": False,
+            "default_preset": "readonly_brief",
+        }
         await page.keyboard.press("Escape")
         await expect(review).not_to_be_visible()
-        await page.set_viewport_size({"width": 1440, "height": 900})
+
+        # R1: Failed (503) and malformed (200 without settings) hydration on Cross-Review & Slim
+        # must block Start Cross-Review and direct form submission until Retry load succeeds,
+        # preserving saved readonly_brief authorization.
+        prior_create_count = len(goal_creates)
+        fail_next_settings_get = True
+        await page.get_by_role("button", name="Add to chat", exact=True).click()
+        await page.get_by_role("menuitem", name="Cross-Review & Slim").click()
+        await expect(review).to_be_visible()
+        await expect(
+            review.get_by_text(
+                "Could not load saved subagent settings. Retry before starting a review."
+            )
+        ).to_be_visible()
+        await expect(review.get_by_role("button", name="Start Cross-Review")).to_be_disabled()
+        await expect(review.get_by_label("Push feature branch on PASS")).to_be_disabled()
+        await expect(review.locator(".cr-run-summary")).to_contain_text(
+            "Saved defaults unavailable — retry load to start"
+        )
+        # Direct form submit event while loadError=True must not emit or create a Goal.
+        await review.evaluate(
+            "form => form.dispatchEvent(new Event('submit', { cancelable: true }))"
+        )
+        assert len(goal_creates) == prior_create_count
+
+        # Next Retry load returns malformed 200 (missing settings) -> still blocked.
+        malformed_next_settings_get = True
+        await review.get_by_role("button", name="Retry load").click()
+        await expect(
+            review.get_by_text(
+                "Could not load saved subagent settings. Retry before starting a review."
+            )
+        ).to_be_visible()
+        await expect(review.get_by_role("button", name="Start Cross-Review")).to_be_disabled()
+        await review.evaluate(
+            "form => form.dispatchEvent(new Event('submit', { cancelable: true }))"
+        )
+        assert len(goal_creates) == prior_create_count
+
+        # Retry load now succeeds and restores saved readonly_brief authorization.
+        await review.get_by_role("button", name="Retry load").click()
+        await expect(
+            review.get_by_text(
+                "Saved read-only audit default active (no file edits or branch push)."
+            )
+        ).to_be_visible()
+        await expect(review.get_by_label("Push feature branch on PASS")).to_be_disabled()
+        await expect(review.locator(".cr-run-summary")).to_contain_text(
+            "Read-Only Audit · 1 shared priority subagent"
+        )
+        await review.get_by_role("button", name="Start Cross-Review").click()
+        await expect(review).not_to_be_visible()
+        assert goal_creates[-1]["strict_review"] is True
+        assert goal_creates[-1]["strict_review_preset"] == "readonly_brief"
+        assert goal_creates[-1]["strict_review_push_branch"] is False
+        await expect(page.locator(".goal-strict-pill")).to_contain_text("Read-Only Audit")
+
+        # Now reopen, switch from legacy readonly_brief to Cross-Review & Slim, and verify light & mobile dark views.
+        current_goal = None
+        await page.reload(wait_until="domcontentloaded")
+        await expect(composer).to_be_enabled()
         await select_appearance(page, "light", "Classic")
         await page.get_by_role("button", name="Add to chat", exact=True).click()
         await page.get_by_role("menuitem", name="Cross-Review & Slim").click()
         await expect(review.get_by_role("button", name="Start Cross-Review")).to_be_enabled()
-        release_save.set()
-        await page.wait_for_timeout(100)
-        await expect(review.get_by_text("Defaults saved.")).to_have_count(0)
-        await review.get_by_label("MR Slim & Gate").check()
+        await review.get_by_role("button", name="Switch to Cross-Review & Slim").click()
+        await expect(
+            review.get_by_text(
+                "Saved read-only audit default active (no file edits or branch push)."
+            )
+        ).not_to_be_visible()
+        assert cross_settings["default_preset"] == "cross_review_slim"
+        await review.get_by_role("button", name="Configure in Settings").click()
+        await expect(subagent_dialog).to_be_visible()
+        await page.wait_for_timeout(250)
+        await page.screenshot(
+            path=str(output / "subagent-priority-settings-light.png"), full_page=True
+        )
+        report["screenshots"].append("subagent-priority-settings-light.png")
+        await subagent_dialog.get_by_role("button", name="Close").click()
+        await expect(subagent_dialog).not_to_be_visible()
         light_contrast = await page.evaluate(cross_contrast)
         assert light_contrast and all(
             value >= 4.5 for value in light_contrast.values()
         ), light_contrast
-        await expect(review.get_by_label("MR Slim & Gate")).to_be_checked()
-        await review.get_by_label("Dual consensus").check()
-        await review.get_by_label("Provider", exact=True).select_option("claude")
-        await expect(review.get_by_label("Effort", exact=True)).to_be_disabled()
-        await review.get_by_label("Provider", exact=True).select_option("codex")
-        await expect(review.get_by_label("Effort", exact=True)).to_be_enabled()
-        await review.get_by_label("Model", exact=True).fill("reviewer-alpha")
-        await review.get_by_label("Effort", exact=True).select_option("ultra")
-        await expect(
-            review.get_by_text("Effort is a request, not a guarantee.", exact=False)
-        ).to_be_visible()
-        await review.get_by_role("button", name="Add reviewer").click()
-        await review.get_by_role("button", name="Save as default").click()
-        await expect(review.get_by_text("Defaults saved.")).to_be_visible()
-        assert cross_settings["review_mode"] == "dual"
-        assert cross_settings["preferred_candidates"][0]["effort"] == "ultra"
+        await review.get_by_label("Scope / focus notes").fill("   ")
+        light_warning_contrast = await page.evaluate(cross_contrast)
+        assert light_warning_contrast and all(
+            value >= 4.5 for value in light_warning_contrast.values()
+        ), light_warning_contrast
+        await review.get_by_label("Scope / focus notes").fill("x" * 3700)
+        light_near_limit_contrast = await page.evaluate(cross_contrast)
+        assert light_near_limit_contrast and all(
+            value >= 4.5 for value in light_near_limit_contrast.values()
+        ), light_near_limit_contrast
+        await review.get_by_role("button", name="Reset to default").click()
+        await page.screenshot(path=str(output / "cross-review-light.png"), full_page=True)
+        report["screenshots"].append("cross-review-light.png")
+
+        # Switch back to dark mode before taking the mobile dark screenshot and wait for settled geometry (F8).
+        await page.keyboard.press("Escape")
+        await expect(review).not_to_be_visible()
+        await select_appearance(page, "dark", "Classic")
+        await page.set_viewport_size({"width": 390, "height": 844})
+        await page.get_by_role("button", name="Add to chat", exact=True).click()
+        await page.get_by_role("menuitem", name="Cross-Review & Slim").click()
+        await expect(review.get_by_role("button", name="Start Cross-Review")).to_be_enabled()
+        await review.get_by_label("Scope / focus notes").fill("Mobile custom scope notes")
+        # Reset scrollTop to 0 and blur textarea so the mobile screenshot shows a clean, settled default state.
+        await review.evaluate("""el => {
+            const body = el.querySelector('.cr-body')
+            if (body) body.scrollTop = 0
+            if (document.activeElement instanceof HTMLElement) document.activeElement.blur()
+        }""")
+        await page.wait_for_timeout(150)
+        mobile_probe = await review.evaluate("""el => {
+            const body = el.querySelector('.cr-body')
+            const footer = el.querySelector('.cr-footer').getBoundingClientRect()
+            const dialogRect = el.getBoundingClientRect()
+            const selectors = [
+              '.goal-dialog-button',
+              '.cr-btn',
+              '.cr-chip',
+              '.cr-reset-btn',
+            ]
+            const controls = selectors.flatMap(sel =>
+              [...el.querySelectorAll(sel)].map(node => {
+                const r = node.getBoundingClientRect()
+                return {
+                  sel,
+                  text: (node.textContent || '').trim().slice(0, 32),
+                  width: r.width,
+                  height: r.height,
+                  left: r.left,
+                  right: r.right,
+                }
+              })
+            )
+            return {
+              clientWidth: body.clientWidth,
+              scrollWidth: body.scrollWidth,
+              scrollTop: body.scrollTop,
+              dialogTop: dialogRect.top,
+              dialogBottom: dialogRect.bottom,
+              footerBottom: footer.bottom,
+              controls,
+            }
+        }""")
+        assert (
+            mobile_probe["scrollWidth"] <= mobile_probe["clientWidth"] + 1
+        ), f"mobile body overflowed horizontally: {mobile_probe}"
+        assert mobile_probe["scrollTop"] == 0, f"mobile body remained scrolled: {mobile_probe}"
+        assert (
+            mobile_probe["dialogBottom"] <= 845 and mobile_probe["footerBottom"] <= 845
+        ), f"mobile dialog not settled inside 844px viewport: {mobile_probe}"
+        for ctrl in mobile_probe["controls"]:
+            assert (
+                ctrl["height"] >= 44 and ctrl["width"] >= 44
+            ), f"mobile control below 44px target: {ctrl}"
+            assert (
+                ctrl["left"] >= -1 and ctrl["right"] <= 391
+            ), f"mobile control outside 390px viewport: {ctrl}"
+        await page.screenshot(path=str(output / "cross-review-mobile.png"), full_page=True)
+        report["screenshots"].append("cross-review-mobile.png")
+        await page.set_viewport_size({"width": 1440, "height": 900})
+        await review.get_by_label("Push feature branch on PASS").check()
+        await expect(review.locator(".cr-run-summary")).to_contain_text(
+            "Cross-Review & Slim · 1 shared priority subagent · Push on PASS"
+        )
         await review.get_by_role("button", name="Start Cross-Review").click()
         await expect(review).not_to_be_visible()
-        assert goal_creates[-1]["strict_review_preset"] == "mr_slim"
-        assert goal_creates[-1]["strict_review_mode"] == "dual"
-        assert goal_creates[-1]["strict_review_candidates"][0]["model"] == "reviewer-alpha"
-        await expect(page.locator(".goal-strict-pill")).to_contain_text("MR Slim · Dual")
+        assert goal_creates[-1]["strict_review"] is True
+        assert goal_creates[-1]["strict_review_preset"] == "cross_review_slim"
+        assert goal_creates[-1]["strict_review_push_branch"] is True
+        assert "strict_review_candidates" not in goal_creates[-1]
+        assert "strict_review_mode" not in goal_creates[-1]
+        await expect(page.locator(".goal-strict-pill")).to_contain_text("Cross-Review & Slim")
 
         # Goal creation includes composer images in its first request.
         current_goal = None

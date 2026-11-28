@@ -168,10 +168,6 @@ class GoalRunController:
                     include={
                         "strict_review",
                         "strict_review_preset",
-                        "strict_review_mode",
-                        "strict_review_candidates",
-                        "strict_review_briefing",
-                        "strict_review_mr_description",
                         "strict_review_push_branch",
                     }
                 ),

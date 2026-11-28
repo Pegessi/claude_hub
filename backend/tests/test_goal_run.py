@@ -13,7 +13,11 @@ from claude_hub.models import (
     GoalUsageQuality,
 )
 from claude_hub.models.agent_stream import normalize_provider_usage
-from claude_hub.services.goal_run import GoalPolicyError, GoalRunController, GoalRunStore
+from claude_hub.services.goal_run import (
+    GoalPolicyError,
+    GoalRunController,
+    GoalRunStore,
+)
 from claude_hub.services.goal_run.prompts import build_continuation_prompt
 from claude_hub.services.local_storage import read_document, write_document
 
@@ -62,7 +66,11 @@ def test_codex_usage_uses_per_turn_last_and_non_cached_total() -> None:
 
 def request(request_id: str = "create-1", **kwargs: object) -> GoalRunCreate:
     return GoalRunCreate.model_validate(
-        {"objective": "Ship the requested feature", "client_request_id": request_id, **kwargs}
+        {
+            "objective": "Ship the requested feature",
+            "client_request_id": request_id,
+            **kwargs,
+        }
     )
 
 
@@ -100,7 +108,10 @@ async def test_objective_edit_keeps_goal_and_ignores_old_completion(tmp_path, ol
     with pytest.raises(GoalPolicyError, match="another mutation"):
         await manager.update_objective(initial.id, "edit", "Different content")
     await manager.on_turn_completed(
-        "tab", current.current_turn_id, "completed", response_with_checkpoint("complete")
+        "tab",
+        current.current_turn_id,
+        "completed",
+        response_with_checkpoint("complete"),
     )
     assert manager.get(initial.id).status == GoalRunStatus.COMPLETE
 
@@ -118,10 +129,6 @@ def test_contract_validation_and_create_idempotency(tmp_path: Path) -> None:
         "plan_first": False,
         "strict_review": False,
         "strict_review_preset": "standard",
-        "strict_review_mode": None,
-        "strict_review_candidates": None,
-        "strict_review_briefing": False,
-        "strict_review_mr_description": False,
         "strict_review_push_branch": False,
     }
     with pytest.raises(ValidationError):
@@ -198,7 +205,9 @@ async def test_completed_goal_remains_visible_until_cleared(tmp_path: Path) -> N
 
 
 @pytest.mark.asyncio
-async def test_turn_signal_continues_only_after_state_is_persisted(tmp_path: Path) -> None:
+async def test_turn_signal_continues_only_after_state_is_persisted(
+    tmp_path: Path,
+) -> None:
     observations: list[tuple[str, str]] = []
 
     async def dispatch(goal, prompt):
@@ -244,12 +253,17 @@ async def test_turn_missing_signal_without_transport_parks_and_usage_is_unavaila
 
 
 @pytest.mark.asyncio
-async def test_unrelated_completion_is_ignored_and_stop_pauses_goal(tmp_path: Path) -> None:
+async def test_unrelated_completion_is_ignored_and_stop_pauses_goal(
+    tmp_path: Path,
+) -> None:
     manager = controller(tmp_path)
     goal = manager.create("tab-1", request())
     arm_goal(manager, goal.id, "goal-turn")
     unrelated = await manager.on_turn_completed(
-        "tab-1", "user-turn", "complete", '<goal-status state="complete">x</goal-status>'
+        "tab-1",
+        "user-turn",
+        "complete",
+        '<goal-status state="complete">x</goal-status>',
     )
     assert unrelated is not None
     assert unrelated.status == GoalRunStatus.ACTIVE
@@ -266,14 +280,35 @@ async def test_unrelated_completion_is_ignored_and_stop_pauses_goal(tmp_path: Pa
     [
         ("failed", {"retryable": True}, GoalRunStatus.PAUSED),
         ("failed", {"delivery_uncertain": True}, GoalRunStatus.PAUSED),
-        ("failed", {"retryable": True, "delivery_uncertain": True}, GoalRunStatus.PAUSED),
+        (
+            "failed",
+            {"retryable": True, "delivery_uncertain": True},
+            GoalRunStatus.PAUSED,
+        ),
         ("failed", {}, GoalRunStatus.FAILED),
         ("failed", {"retryable": False}, GoalRunStatus.FAILED),
-        ("failed", {"retryable": "true", "delivery_uncertain": "false"}, GoalRunStatus.FAILED),
-        ("cancelled", {"retryable": True, "delivery_uncertain": True}, GoalRunStatus.PAUSED),
+        (
+            "failed",
+            {"retryable": "true", "delivery_uncertain": "false"},
+            GoalRunStatus.FAILED,
+        ),
+        (
+            "cancelled",
+            {"retryable": True, "delivery_uncertain": True},
+            GoalRunStatus.PAUSED,
+        ),
         ("completed", {"retryable": True}, GoalRunStatus.COMPLETE),
     ],
-    ids=["retryable", "uncertain", "both", "fatal", "not-retryable", "invalid", "stop", "success"],
+    ids=[
+        "retryable",
+        "uncertain",
+        "both",
+        "fatal",
+        "not-retryable",
+        "invalid",
+        "stop",
+        "success",
+    ],
 )
 async def test_completion_bridge_preserves_failure_contract(
     tmp_path, monkeypatch, status, metadata, expected
@@ -333,7 +368,12 @@ async def test_recoverable_completion_can_resume_same_goal_after_restart(tmp_pat
     goal = manager.create("tab-1", request())
     arm_goal(manager, goal.id, "failed-turn")
     await manager.on_turn_completed(
-        "tab-1", "failed-turn", "failed", "", retryable=True, delivery_uncertain=uncertain
+        "tab-1",
+        "failed-turn",
+        "failed",
+        "",
+        retryable=True,
+        delivery_uncertain=uncertain,
     )
     manager = GoalRunController(GoalRunStore(path), dispatch, cancel)
     manager.recover()
@@ -349,7 +389,12 @@ async def test_recoverable_completion_can_resume_same_goal_after_restart(tmp_pat
     assert resumed.current_turn_id == "resumed-turn"
     await manager.resume(goal.id, "resume")
     await manager.on_turn_completed(
-        "tab-1", "failed-turn", "failed", "", retryable=True, delivery_uncertain=uncertain
+        "tab-1",
+        "failed-turn",
+        "failed",
+        "",
+        retryable=True,
+        delivery_uncertain=uncertain,
     )
     dispatch.assert_awaited_once()
     assert manager.get(goal.id).current_turn_id == "resumed-turn"
@@ -359,7 +404,9 @@ async def test_recoverable_completion_can_resume_same_goal_after_restart(tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_usage_quality_conservatively_degrades_across_turns(tmp_path: Path) -> None:
+async def test_usage_quality_conservatively_degrades_across_turns(
+    tmp_path: Path,
+) -> None:
     async def dispatch(goal, prompt):
         return "turn-2"
 
@@ -387,7 +434,10 @@ async def test_blocked_signal_and_stale_completion_after_pause(tmp_path: Path) -
     goal = manager.create("tab-1", request())
     await manager.pause(goal.id, "pause")
     stale = await manager.on_turn_completed(
-        "tab-1", "turn-1", "complete", '<goal-status state="complete">done</goal-status>'
+        "tab-1",
+        "turn-1",
+        "complete",
+        '<goal-status state="complete">done</goal-status>',
     )
     assert stale is not None and stale.status == GoalRunStatus.PAUSED
     await manager.resume(goal.id, "resume")
@@ -401,7 +451,9 @@ async def test_blocked_signal_and_stale_completion_after_pause(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
-async def test_goal_continues_past_legacy_limits_with_bounded_recent_ids(tmp_path: Path) -> None:
+async def test_goal_continues_past_legacy_limits_with_bounded_recent_ids(
+    tmp_path: Path,
+) -> None:
     dispatched = []
 
     async def dispatch(goal, prompt):
@@ -464,7 +516,9 @@ def test_restart_between_turns_does_not_leave_goal_active_without_a_scheduler(
 
 
 @pytest.mark.asyncio
-async def test_resume_reconciles_uncertain_turn_and_dispatches_once(tmp_path: Path) -> None:
+async def test_resume_reconciles_uncertain_turn_and_dispatches_once(
+    tmp_path: Path,
+) -> None:
     dispatched: list[str] = []
     cancelled: list[str | None] = []
 
@@ -536,7 +590,9 @@ async def test_latest_valid_checkpoint_is_injected_and_invalid_update_is_non_des
 
 
 @pytest.mark.asyncio
-async def test_final_status_parser_keeps_inline_outer_opener_context(tmp_path: Path) -> None:
+async def test_final_status_parser_keeps_inline_outer_opener_context(
+    tmp_path: Path,
+) -> None:
     manager = controller(tmp_path)
     goal = manager.create("tab-1", request())
     arm_goal(manager, goal.id, "turn-1")
@@ -600,7 +656,9 @@ async def test_checkpoint_history_is_bounded(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_create_dispatches_after_persist_and_pause_cancels(tmp_path: Path) -> None:
+async def test_create_dispatches_after_persist_and_pause_cancels(
+    tmp_path: Path,
+) -> None:
     observed: list[str] = []
 
     async def dispatch(goal, prompt):
@@ -652,7 +710,9 @@ async def test_completion_during_pending_dispatch_is_not_lost(tmp_path: Path) ->
 
 
 @pytest.mark.asyncio
-async def test_pause_waits_for_pending_dispatch_acceptance_before_cancel(tmp_path: Path) -> None:
+async def test_pause_waits_for_pending_dispatch_acceptance_before_cancel(
+    tmp_path: Path,
+) -> None:
     dispatch_entered = asyncio.Event()
     release_dispatch = asyncio.Event()
     operations: list[str] = []
@@ -761,7 +821,9 @@ async def test_resume_does_not_dispatch_until_failed_pause_cancel_is_reconciled(
 
 
 @pytest.mark.asyncio
-async def test_duplicate_dispatch_and_unrelated_completion_do_not_resend(tmp_path: Path) -> None:
+async def test_duplicate_dispatch_and_unrelated_completion_do_not_resend(
+    tmp_path: Path,
+) -> None:
     entered, release = asyncio.Event(), asyncio.Event()
     dispatched = []
 
@@ -795,7 +857,9 @@ async def test_old_pause_replay_cannot_cancel_resumed_turn(tmp_path: Path) -> No
         cancelled.append(goal.current_turn_id)
 
     manager = GoalRunController(
-        GoalRunStore(tmp_path / "goals.json"), lambda goal, prompt: goal.pending_step_id, cancel
+        GoalRunStore(tmp_path / "goals.json"),
+        lambda goal, prompt: goal.pending_step_id,
+        cancel,
     )
     goal = await manager.create_and_start("tab-1", request())
     await manager.pause(goal.id, "pause")
@@ -807,7 +871,9 @@ async def test_old_pause_replay_cannot_cancel_resumed_turn(tmp_path: Path) -> No
 
 
 @pytest.mark.asyncio
-async def test_clear_failure_stays_visible_and_blocks_replacement(tmp_path: Path) -> None:
+async def test_clear_failure_stays_visible_and_blocks_replacement(
+    tmp_path: Path,
+) -> None:
     async def cancel(goal):
         raise RuntimeError("unreachable")
 
@@ -821,7 +887,9 @@ async def test_clear_failure_stays_visible_and_blocks_replacement(tmp_path: Path
 
 
 @pytest.mark.asyncio
-async def test_clearing_latest_goal_does_not_resurrect_previous_goal(tmp_path: Path) -> None:
+async def test_clearing_latest_goal_does_not_resurrect_previous_goal(
+    tmp_path: Path,
+) -> None:
     manager = controller(tmp_path)
     first = manager.create("tab-1", request())
     await manager.complete(first.id, "complete")
@@ -902,12 +970,16 @@ async def test_goal_usage_is_accounting_only(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_resume_reconciliation_allows_synchronous_completion_callback(tmp_path: Path) -> None:
+async def test_resume_reconciliation_allows_synchronous_completion_callback(
+    tmp_path: Path,
+) -> None:
     async def cancel(goal):
         await manager.on_turn_completed(goal.tab_id, "old", "cancelled", "")
 
     manager = GoalRunController(
-        GoalRunStore(tmp_path / "goals.json"), lambda goal, prompt: goal.pending_step_id, cancel
+        GoalRunStore(tmp_path / "goals.json"),
+        lambda goal, prompt: goal.pending_step_id,
+        cancel,
     )
     goal = manager.create("tab-1", request())
     goal.status = GoalRunStatus.PAUSED
@@ -918,7 +990,9 @@ async def test_resume_reconciliation_allows_synchronous_completion_callback(tmp_
 
 
 @pytest.mark.asyncio
-async def test_failed_reconciliation_without_turn_id_cannot_resume(tmp_path: Path) -> None:
+async def test_failed_reconciliation_without_turn_id_cannot_resume(
+    tmp_path: Path,
+) -> None:
     async def cancel(goal):
         raise RuntimeError("offline")
 
@@ -935,7 +1009,11 @@ async def test_failed_reconciliation_without_turn_id_cannot_resume(tmp_path: Pat
 async def test_pause_waits_only_for_acceptance_not_dispatch_callers_lifetime(
     tmp_path: Path,
 ) -> None:
-    entered, release, caller_finished = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    entered, release, caller_finished = (
+        asyncio.Event(),
+        asyncio.Event(),
+        asyncio.Event(),
+    )
     cancelled = []
 
     async def dispatch(goal, prompt):
@@ -970,7 +1048,9 @@ async def test_pause_waits_only_for_acceptance_not_dispatch_callers_lifetime(
 
 
 @pytest.mark.asyncio
-async def test_steer_replaces_running_goal_turn_and_keeps_goal_active(tmp_path: Path) -> None:
+async def test_steer_replaces_running_goal_turn_and_keeps_goal_active(
+    tmp_path: Path,
+) -> None:
     prompts: list[tuple[str | None, str]] = []
     cancelled: list[str | None] = []
 
@@ -1046,7 +1126,10 @@ async def test_blocked_goal_can_be_steered_with_the_user_reply(tmp_path: Path) -
     goal = await manager.create_and_start("tab-1", request())
     assert goal.current_turn_id is not None
     blocked = await manager.on_turn_completed(
-        "tab-1", goal.current_turn_id, "completed", response_with_checkpoint("needs_input")
+        "tab-1",
+        goal.current_turn_id,
+        "completed",
+        response_with_checkpoint("needs_input"),
     )
     assert blocked is not None and blocked.status == GoalRunStatus.BLOCKED
 
@@ -1056,7 +1139,9 @@ async def test_blocked_goal_can_be_steered_with_the_user_reply(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
-async def test_resume_during_chat_turn_waits_for_that_turn_boundary(tmp_path: Path) -> None:
+async def test_resume_during_chat_turn_waits_for_that_turn_boundary(
+    tmp_path: Path,
+) -> None:
     dispatched: list[str | None] = []
 
     async def dispatch(goal, prompt):
@@ -1098,7 +1183,9 @@ async def test_resume_during_chat_turn_waits_for_that_turn_boundary(tmp_path: Pa
 
 
 @pytest.mark.asyncio
-async def test_resume_fixed_step_override_is_persisted_and_only_used_once(tmp_path: Path) -> None:
+async def test_resume_fixed_step_override_is_persisted_and_only_used_once(
+    tmp_path: Path,
+) -> None:
     calls: list[tuple[str, str | None]] = []
     snapshot = tmp_path / "goals.json"
 
@@ -1176,7 +1263,9 @@ async def test_fixed_step_resume_replay_cannot_override_a_later_pending_step(
 
 
 @pytest.mark.asyncio
-async def test_duplicate_fixed_resume_claims_override_acceptance_once(tmp_path: Path) -> None:
+async def test_duplicate_fixed_resume_claims_override_acceptance_once(
+    tmp_path: Path,
+) -> None:
     entered, release = asyncio.Event(), asyncio.Event()
     calls: list[str | None] = []
 
@@ -1290,7 +1379,8 @@ async def test_fixed_resume_synchronous_completion_uses_normal_next_dispatch(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "status", ["complete", "completed", "success", "succeeded", "cancelled", "failed", "error"]
+    "status",
+    ["complete", "completed", "success", "succeeded", "cancelled", "failed", "error"],
 )
 async def test_deferred_boundary_deduplicates_without_charging_goal_usage(
     tmp_path: Path, status: str
@@ -1343,7 +1433,9 @@ async def test_deferred_boundary_deduplicates_without_charging_goal_usage(
 
 
 @pytest.mark.asyncio
-async def test_fixed_resume_options_reject_deferral_without_mutating_goal(tmp_path: Path) -> None:
+async def test_fixed_resume_options_reject_deferral_without_mutating_goal(
+    tmp_path: Path,
+) -> None:
     manager = controller(tmp_path)
     goal = manager.create("tab-1", request())
     await manager.pause(goal.id, "pause")
@@ -1360,11 +1452,16 @@ async def test_fixed_resume_options_reject_deferral_without_mutating_goal(tmp_pa
 
 def test_native_goal_create_replay_uses_original_request(tmp_path):
     store = GoalRunStore(tmp_path / "native-goals.json")
-    req = GoalRunCreate(objective="Native", client_request_id="native", strict_review_mode="dual")
+    req = GoalRunCreate(
+        objective="Native",
+        client_request_id="native",
+        strict_review_preset="cross_review_slim",
+        strict_review_push_branch=True,
+    )
     native = GoalRun(tab_id="tab", objective="Native", execution_owner="provider_native")
     created = store.create(native, req.client_request_id, req)
     assert store.replay_create("tab", req).id == created.id
     reloaded = GoalRunStore(tmp_path / "native-goals.json")
     assert reloaded.replay_create("tab", req).id == created.id
     with pytest.raises(ValueError, match="already used"):
-        reloaded.replay_create("tab", req.model_copy(update={"strict_review_mode": "single"}))
+        reloaded.replay_create("tab", req.model_copy(update={"strict_review_push_branch": False}))

@@ -169,6 +169,10 @@
         v-if="feishuBotSettingsVisible"
         @close="appStore.closeFeishuBotSettings()"
       />
+      <SubagentSettingsDialog
+        v-if="subagentSettingsVisible"
+        @close="appStore.closeSubagentSettings()"
+      />
       <AppearanceDialog v-if="appStore.appearanceVisible" />
       <ServiceRestartDialog
         v-if="appStore.restartDialogVisible"
@@ -196,6 +200,7 @@ import ThemeChromeIcon from '@/features/app-shell/components/ThemeChromeIcon.vue
 import { isGamePalette } from '@/features/app-shell/themePreference'
 import ServiceRestartDialog from '@/components/ServiceRestartDialog.vue'
 import FeishuBotSettingsDialog from '@/components/FeishuBotSettingsDialog.vue'
+import SubagentSettingsDialog from '@/components/SubagentSettingsDialog.vue'
 import ScheduledTasksPanel from '@/components/ScheduledTasksPanel.vue'
 import LoginView from '@/views/LoginView.vue'
 import { useAppStore } from '@/stores/appStore'
@@ -213,6 +218,7 @@ const { tabs, activePane, activePaneIsChat } = storeToRefs(store)
 const {
   mode,
   feishuBotSettingsVisible,
+  subagentSettingsVisible,
   scheduledTasksVisible,
   scheduledTaskCreateTargetTabId,
   scheduledTaskCreateRequest,

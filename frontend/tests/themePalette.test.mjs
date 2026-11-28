@@ -235,6 +235,7 @@ test('filled accent controls use contrast-safe fill roles', async () => {
     '../src/components/LayoutSelector.vue',
     '../src/features/chat/components/ChatComposer.vue',
     '../src/features/terminal/styles/tab-bar.css',
+    '../src/components/CrossReviewDialog.vue',
   ]
   const components = await Promise.all(componentUrls.map(url => (
     readFile(new URL(url, import.meta.url), 'utf8')
@@ -283,6 +284,10 @@ test('filled accent controls use contrast-safe fill roles', async () => {
   assert.match(components[0], /\.lang-toggle-btn\.active[\s\S]*?background: var\(--ch-color-accent-strong\);/)
   assert.match(
     components[1],
+    /\.goal-dialog-button--primary \{[^}]*background: var\(--ch-color-accent-strong\);/,
+  )
+  assert.match(
+    components[5],
     /\.goal-dialog-button--primary \{[^}]*background: var\(--ch-color-accent-strong\);/,
   )
   assert.match(components[2], /\.user-avatar-fallback[\s\S]*?background-color: var\(--ch-color-accent-strong\);/)

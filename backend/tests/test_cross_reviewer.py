@@ -48,7 +48,10 @@ DEFAULT_ASTRA_REVIEW_MODEL = "astra-example_reasoning_high"
 
 
 def _maso_catalog(
-    *, include_argon: bool = True, include_astra: bool = True, include_deepseek: bool = False
+    *,
+    include_argon: bool = True,
+    include_astra: bool = True,
+    include_deepseek: bool = False,
 ) -> list[StreamModelOption]:
     models: list[StreamModelOption] = []
     if include_argon:
@@ -175,7 +178,10 @@ async def test_resolve_cross_reviewer_target_pairing_and_fallbacks(
     # 1. MASO Argon worker -> paired with MASO Astra
     target_for_argon = await resolve_cross_reviewer_target(
         AgentType.MASO,
-        {"MASO_BASE_URL": "http://127.0.0.1:11004", "MASO_MODEL": "gemini-example_reasoning_high"},
+        {
+            "MASO_BASE_URL": "http://127.0.0.1:11004",
+            "MASO_MODEL": "gemini-example_reasoning_high",
+        },
         maso_probe=fake_probe,
     )
     assert target_for_argon is not None
@@ -189,14 +195,22 @@ async def test_resolve_cross_reviewer_target_pairing_and_fallbacks(
     # 2. MASO Astra worker -> paired with MASO Argon
     target_for_astra = await resolve_cross_reviewer_target(
         AgentType.MASO,
-        {"MASO_BASE_URL": "http://127.0.0.1:11004", "MASO_MODEL": "astra-example_reasoning_high"},
+        {
+            "MASO_BASE_URL": "http://127.0.0.1:11004",
+            "MASO_MODEL": "astra-example_reasoning_high",
+        },
         maso_probe=fake_probe,
     )
     assert target_for_astra is not None
     assert target_for_astra.env["MASO_MODEL"] == DEFAULT_ARGON_REVIEW_MODEL
 
     # 3. Claude / Codex / Cursor workers -> paired with MASO Argon without leaking worker secrets
-    for provider in (AgentType.CLAUDE, AgentType.CODEX, AgentType.CURSOR, AgentType.TRAEX):
+    for provider in (
+        AgentType.CLAUDE,
+        AgentType.CODEX,
+        AgentType.CURSOR,
+        AgentType.TRAEX,
+    ):
         target = await resolve_cross_reviewer_target(
             provider,
             {"ANTHROPIC_API_KEY": "secret-do-not-leak", "OPENAI_API_KEY": "secret-2"},
@@ -243,13 +257,48 @@ async def test_resolve_cross_reviewer_target_pairing_and_fallbacks(
     assert alt_target is not None
     assert alt_target.env["MASO_MODEL"] == "deepseek-example-reasoning-high"
 
-    # 6. Offline / unavailable MASO -> returns None gracefully
+    # 6. Offline / unavailable MASO -> returns None gracefully when no non-MASO preference is saved
     async def failing_probe(_env: dict[str, str]):
         raise MasoServiceUnavailable("no local maso")
 
     assert (
         await resolve_cross_reviewer_target(AgentType.CLAUDE, {}, maso_probe=failing_probe) is None
     )
+
+    # 7. Shared non-MASO preference (e.g., Claude/opus for a Codex worker) is honored by
+    # resolve_cross_reviewer_target even when MASO probe succeeds or fails (F4).
+    from claude_hub.models.goal_run import SubagentModelPreference
+    from claude_hub.services import cross_review_settings
+
+    monkeypatch.setattr(
+        cross_review_settings,
+        "resolve_runtime_home",
+        lambda: Path("/tmp/nonexistent-test-home"),
+    )
+    saved_settings = cross_review_settings.SubagentPrioritySettings(
+        preferred_candidates=[
+            SubagentModelPreference(provider="claude", model="opus"),
+        ]
+    )
+    monkeypatch.setattr(cross_review_settings, "read_subagent_settings", lambda: saved_settings)
+
+    pref_target_with_maso = await resolve_cross_reviewer_target(
+        AgentType.CODEX,
+        {},
+        maso_probe=fake_probe,
+    )
+    assert pref_target_with_maso is not None
+    assert pref_target_with_maso.agent_type == AgentType.CLAUDE
+    assert pref_target_with_maso.env == {"ANTHROPIC_MODEL": "opus"}
+
+    pref_target_without_maso = await resolve_cross_reviewer_target(
+        AgentType.CODEX,
+        {},
+        maso_probe=failing_probe,
+    )
+    assert pref_target_without_maso is not None
+    assert pref_target_without_maso.agent_type == AgentType.CLAUDE
+    assert pref_target_without_maso.env == {"ANTHROPIC_MODEL": "opus"}
 
 
 @pytest.mark.asyncio
@@ -360,7 +409,10 @@ async def test_workspace_manager_prefers_heterogeneous_reviewer_and_cleans_up_ep
 
     for s_id in (worker.id, same_model_reviewer.id, hetero_reviewer.id):
         manager.sessions[s_id] = manager.sessions[s_id].model_copy(
-            update={"status": ManagedSessionStatus.IDLE, "runtime_status": AgentRuntimeStatus.IDLE}
+            update={
+                "status": ManagedSessionStatus.IDLE,
+                "runtime_status": AgentRuntimeStatus.IDLE,
+            }
         )
 
     task1 = manager.create_task(
@@ -525,7 +577,10 @@ async def test_reviewer_selection_reuses_independent_same_model_reviewer_and_fal
     )
     for s_id in (worker.id, idle_argon_reviewer.id):
         manager.sessions[s_id] = manager.sessions[s_id].model_copy(
-            update={"status": ManagedSessionStatus.IDLE, "runtime_status": AgentRuntimeStatus.IDLE}
+            update={
+                "status": ManagedSessionStatus.IDLE,
+                "runtime_status": AgentRuntimeStatus.IDLE,
+            }
         )
 
     task = manager.create_task(
@@ -605,7 +660,9 @@ def test_reviewer_keeps_high_variant_advertised_under_duplicate_default_mode() -
     )
 
 
-def test_reviewer_uses_configured_fallback_when_catalog_unavailable(monkeypatch) -> None:
+def test_reviewer_uses_configured_fallback_when_catalog_unavailable(
+    monkeypatch,
+) -> None:
     from claude_hub.services import cross_reviewer
 
     monkeypatch.setattr(cross_reviewer, "DEFAULT_ARGON_REVIEW_MODEL", "fixture-reasoning-high")

@@ -21,6 +21,29 @@ REVIEW_OPTION_NAMES = set(GoalRunCreate.model_fields) - {
     "client_request_id",
     "plan_first",
 }
+_LEGACY_DROPPED_GOAL_FIELDS = frozenset(
+    {
+        "strict_review_mode",
+        "strict_review_candidates",
+        "strict_review_briefing",
+        "strict_review_mr_description",
+    }
+)
+
+
+def _normalize_persisted_goal_item(raw: dict[str, object]) -> dict[str, object]:
+    item = {k: v for k, v in raw.items() if k not in _LEGACY_DROPPED_GOAL_FIELDS}
+    if item.get("status") == "budget_limited":
+        item["status"] = "paused"
+        item["status_message"] = "Previous Goal limit removed; resume when ready"
+    preset = item.get("strict_review_preset")
+    if preset in {"mr_slim", "bug_only"}:
+        item["strict_review_preset"] = "cross_review_slim"
+    elif preset == "readonly_brief":
+        item["strict_review_push_branch"] = False
+        item["strict_review_push_pending"] = False
+        item["strict_review_push_target"] = None
+    return item
 
 
 def _normalized_create_input(tab_id: str, request: GoalRunCreate) -> dict[str, object]:
@@ -54,23 +77,37 @@ class GoalRunStore:
             payload = read_document(self.path)
             if payload.get("version") not in {1, 2}:
                 raise ValueError("unsupported goal snapshot version")
-            # Retire old limits without starting previously stopped work. The
-            # user explicitly resumes migrated Goals through the normal guards.
-            for item in payload.get("goals", []):
-                if item.get("status") == "budget_limited":
-                    item["status"] = "paused"
-                    item["status_message"] = "Previous Goal limit removed; resume when ready"
-            goals = [GoalRun.model_validate(item) for item in payload.get("goals", [])]
+            # Retire old limits and legacy per-run review matrices without
+            # starting previously stopped work or losing read-only intent.
+            goals = [
+                GoalRun.model_validate(_normalize_persisted_goal_item(item))
+                for item in payload.get("goals", [])
+                if isinstance(item, dict)
+            ]
             self._goals = {goal.id: goal for goal in goals}
             self._create_requests = dict(payload.get("create_requests", {}))
-            self._create_inputs = {
-                key: {
+            normalized_inputs: dict[str, dict[str, object]] = {}
+            for key, value in payload.get("create_inputs", {}).items():
+                if not isinstance(value, dict):
+                    continue
+                cleaned = {
                     name: item
                     for name, item in value.items()
-                    if name in {"tab_id", "objective", "images", "plan_first", *REVIEW_OPTION_NAMES}
+                    if name
+                    in {
+                        "tab_id",
+                        "objective",
+                        "images",
+                        "plan_first",
+                        *REVIEW_OPTION_NAMES,
+                    }
                 }
-                for key, value in payload.get("create_inputs", {}).items()
-            }
+                if cleaned.get("strict_review_preset") in {"mr_slim", "bug_only"}:
+                    cleaned["strict_review_preset"] = "cross_review_slim"
+                elif cleaned.get("strict_review_preset") == "readonly_brief":
+                    cleaned.pop("strict_review_push_branch", None)
+                normalized_inputs[key] = cleaned
+            self._create_inputs = normalized_inputs
 
     def _save(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -157,7 +194,10 @@ class GoalRunStore:
             return prior.model_copy(deep=True)
 
     def create(
-        self, goal: GoalRun, client_request_id: str, request: GoalRunCreate | None = None
+        self,
+        goal: GoalRun,
+        client_request_id: str,
+        request: GoalRunCreate | None = None,
     ) -> GoalRun:
         with self._lock:
             effective_request = request or GoalRunCreate(

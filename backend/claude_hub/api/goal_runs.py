@@ -22,6 +22,8 @@ from ..models.goal_run import GoalObjectiveUpdate
 from ..models.schema_domains.runtime import REASONING_EFFORTS
 from ..services.cross_review_settings import (
     CrossReviewSettings,
+    CrossReviewSettingsPatch,
+    patch_cross_review_settings,
     read_cross_review_settings,
     write_cross_review_settings,
 )
@@ -68,7 +70,9 @@ async def _cross_review_payload(settings: CrossReviewSettings) -> dict[str, obje
         {
             "provider": provider,
             "label": label,
-            "models": (models or fallback[provider]) if provider == "maso" else fallback[provider],
+            "models": (
+                (models or fallback[provider]) if provider == "maso" else fallback[provider]
+            ),
             "supports_effort": bool(get_spec(AgentType(provider)).effort_env_keys),
             "effort_options": (
                 sorted(REASONING_EFFORTS) if get_spec(AgentType(provider)).effort_env_keys else []
@@ -86,6 +90,7 @@ async def _cross_review_payload(settings: CrossReviewSettings) -> dict[str, obje
     return {"settings": settings, "providers": providers}
 
 
+@router.get("/api/subagents/settings")
 @router.get("/api/goals/cross-review-settings")
 async def get_cross_review_settings(
     current_user: User = Depends(get_current_user),
@@ -93,12 +98,22 @@ async def get_cross_review_settings(
     return await _cross_review_payload(await asyncio.to_thread(read_cross_review_settings))
 
 
+@router.put("/api/subagents/settings")
 @router.put("/api/goals/cross-review-settings")
 async def put_cross_review_settings(
     settings: CrossReviewSettings, current_user: User = Depends(get_current_user)
 ) -> dict[str, object]:
     await asyncio.to_thread(write_cross_review_settings, settings)
     return await _cross_review_payload(settings)
+
+
+@router.patch("/api/subagents/settings")
+@router.patch("/api/goals/cross-review-settings")
+async def patch_cross_review_settings_endpoint(
+    patch: CrossReviewSettingsPatch, current_user: User = Depends(get_current_user)
+) -> dict[str, object]:
+    updated = await asyncio.to_thread(patch_cross_review_settings, patch)
+    return await _cross_review_payload(updated)
 
 
 async def _dispatch_goal_turn(goal: GoalRun, prompt: str) -> str:
@@ -180,7 +195,9 @@ async def _cancel_goal_turn(goal: GoalRun) -> None:
 
 
 configure_goal_dispatch(
-    _dispatch_goal_turn, cancel=_cancel_goal_turn, provider_resolver=resolve_goal_provider
+    _dispatch_goal_turn,
+    cancel=_cancel_goal_turn,
+    provider_resolver=resolve_goal_provider,
 )
 
 
@@ -291,7 +308,9 @@ async def get_goal(goal_id: str, current_user: User = Depends(get_current_user))
 
 @router.patch("/api/goals/{goal_id}/objective", response_model=GoalRun)
 async def update_goal_objective(
-    goal_id: str, body: GoalObjectiveUpdate, current_user: User = Depends(get_current_user)
+    goal_id: str,
+    body: GoalObjectiveUpdate,
+    current_user: User = Depends(get_current_user),
 ) -> GoalRun:
     try:
         manager = get_goal_manager()
@@ -309,7 +328,9 @@ async def update_goal_objective(
 
 @router.post("/api/goals/{goal_id}/pause", response_model=GoalRun)
 async def pause_goal(
-    goal_id: str, body: GoalMutationRequest, current_user: User = Depends(get_current_user)
+    goal_id: str,
+    body: GoalMutationRequest,
+    current_user: User = Depends(get_current_user),
 ) -> GoalRun:
     try:
         manager = get_goal_manager()
@@ -327,7 +348,9 @@ async def pause_goal(
 
 @router.post("/api/goals/{goal_id}/resume", response_model=GoalRun)
 async def resume_goal(
-    goal_id: str, body: GoalMutationRequest, current_user: User = Depends(get_current_user)
+    goal_id: str,
+    body: GoalMutationRequest,
+    current_user: User = Depends(get_current_user),
 ) -> GoalRun:
     try:
         manager = get_goal_manager()
@@ -344,7 +367,10 @@ async def resume_goal(
                 return await manager.resume(goal_id, body.client_request_id)
             if goal.dispatch_state.value != "idle":
                 return await manager.resume(goal_id, body.client_request_id)
-            from .agent_stream import _get_tab_tailer_manager, _terminal_tab_session_or_404
+            from .agent_stream import (
+                _get_tab_tailer_manager,
+                _terminal_tab_session_or_404,
+            )
 
             session = _terminal_tab_session_or_404(goal.tab_id)
             stream_manager = _get_tab_tailer_manager()
@@ -367,7 +393,9 @@ async def resume_goal(
 
 @router.post("/api/goals/{goal_id}/complete", response_model=GoalRun)
 async def complete_goal(
-    goal_id: str, body: GoalMutationRequest, current_user: User = Depends(get_current_user)
+    goal_id: str,
+    body: GoalMutationRequest,
+    current_user: User = Depends(get_current_user),
 ) -> GoalRun:
     try:
         manager = get_goal_manager()
@@ -386,7 +414,9 @@ async def complete_goal(
 
 @router.post("/api/goals/{goal_id}/clear", response_model=GoalRun)
 async def clear_goal(
-    goal_id: str, body: GoalMutationRequest, current_user: User = Depends(get_current_user)
+    goal_id: str,
+    body: GoalMutationRequest,
+    current_user: User = Depends(get_current_user),
 ) -> GoalRun:
     try:
         manager = get_goal_manager()

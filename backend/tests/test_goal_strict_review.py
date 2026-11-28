@@ -174,7 +174,10 @@ def test_select_cross_reviewer_candidates_picks_heterogeneous_models() -> None:
         AgentType.CODEX,
         {},
         maso_base_url="http://127.0.0.1:11004",
-        maso_models=["gemini-example-model-1dd583607df6", "gpt-example-model-d050a243e4ed"],
+        maso_models=[
+            "gemini-example-model-1dd583607df6",
+            "gpt-example-model-d050a243e4ed",
+        ],
     )
     assert codex_targets[0].provider == "maso"
     assert codex_targets[0].model == "gemini-example-model-1dd583607df6_reasoning_high"
@@ -186,7 +189,10 @@ def test_select_cross_reviewer_candidates_picks_heterogeneous_models() -> None:
         AgentType.MASO,
         {"MASO_MODEL": "gemini-example-model-1dd583607df6_reasoning_high"},
         maso_base_url="http://127.0.0.1:11004",
-        maso_models=["gemini-example-model-1dd583607df6", "gpt-example-model-d050a243e4ed"],
+        maso_models=[
+            "gemini-example-model-1dd583607df6",
+            "gpt-example-model-d050a243e4ed",
+        ],
     )
     assert argon_targets[0].provider == "maso"
     assert argon_targets[0].model == "gpt-example-model-d050a243e4ed_reasoning_high"
@@ -199,7 +205,9 @@ def test_select_cross_reviewer_candidates_picks_heterogeneous_models() -> None:
 
 
 @pytest.mark.asyncio
-async def test_strict_review_blocks_p1_continues_and_completes_on_consensus(tmp_path: Path) -> None:
+async def test_strict_review_blocks_p1_continues_and_completes_on_consensus(
+    tmp_path: Path,
+) -> None:
     sent_prompts: list[tuple[str, str]] = []
     review_calls: list[int] = []
 
@@ -274,7 +282,10 @@ async def test_strict_review_blocks_p1_continues_and_completes_on_consensus(tmp_
     # Turn 2 fixes bug and claims complete -> reviewer round 2 returns PASS -> COMPLETE
     second_turn_id = sent_prompts[1][0]
     after_r2 = await ctrl.on_turn_completed(
-        "tab-1", second_turn_id, "completed", complete_envelope("Fixed lock and added test")
+        "tab-1",
+        second_turn_id,
+        "completed",
+        complete_envelope("Fixed lock and added test"),
     )
     assert after_r2 is not None
     assert review_calls == [1, 2]
@@ -409,7 +420,10 @@ async def test_strict_review_converging_blockers_grants_grace_round_and_complete
     # Rounds 1 and 2 continue within base budget
     for expected_round in (1, 2):
         res = await ctrl.on_turn_completed(
-            "tab-converge", sent[-1], "completed", complete_envelope(f"Turn {expected_round}")
+            "tab-converge",
+            sent[-1],
+            "completed",
+            complete_envelope(f"Turn {expected_round}"),
         )
         assert res is not None
         assert res.status == GoalRunStatus.ACTIVE
@@ -542,7 +556,8 @@ async def test_collect_strict_review_context_git_worktree_lessons_and_non_git(
     primary_repo.mkdir()
     subprocess.run(["git", "-C", str(primary_repo), "init", "-b", "main"], check=True)
     subprocess.run(
-        ["git", "-C", str(primary_repo), "config", "user.email", "test@example.com"], check=True
+        ["git", "-C", str(primary_repo), "config", "user.email", "test@example.com"],
+        check=True,
     )
     subprocess.run(["git", "-C", str(primary_repo), "config", "user.name", "Test User"], check=True)
     (primary_repo / "app.py").write_text("print('v1')\n", encoding="utf-8")
@@ -556,7 +571,17 @@ async def test_collect_strict_review_context_git_worktree_lessons_and_non_git(
     worktree_root.mkdir()
     wt_dir = worktree_root / "feat-lock"
     subprocess.run(
-        ["git", "-C", str(primary_repo), "worktree", "add", str(wt_dir), "-b", "feat/lock", "main"],
+        [
+            "git",
+            "-C",
+            str(primary_repo),
+            "worktree",
+            "add",
+            str(wt_dir),
+            "-b",
+            "feat/lock",
+            "main",
+        ],
         check=True,
     )
     (wt_dir / "app.py").write_text("print('v2 with lock')\n", encoding="utf-8")
@@ -756,7 +781,9 @@ async def test_run_subagent_strict_review_falls_back_to_same_model_clean_subagen
 
 
 @pytest.mark.asyncio
-async def test_strict_review_bypasses_provider_native_to_preserve_hub_gate(tmp_path: Path) -> None:
+async def test_strict_review_bypasses_provider_native_to_preserve_hub_gate(
+    tmp_path: Path,
+) -> None:
     dispatched: list[str] = []
     native_calls: list[str] = []
 
@@ -934,7 +961,10 @@ async def test_steer_after_max_rounds_resets_budget_and_persists_valid_history(
     assert len(steered.strict_review_history) == 3
 
     done = await ctrl.on_turn_completed(
-        "tab-steer", "user-steer-turn", "completed", complete_envelope("Fixed after steer")
+        "tab-steer",
+        "user-steer-turn",
+        "completed",
+        complete_envelope("Fixed after steer"),
     )
     assert done is not None
     assert done.status == GoalRunStatus.COMPLETE
@@ -1015,7 +1045,9 @@ async def test_clearing_strict_goal_on_codex_does_not_resurrect_terminal_native_
     assert await ctrl.refresh_current("codex-tab-2") is None
 
 
-def test_store_create_without_explicit_request_replays_strict_review(tmp_path: Path) -> None:
+def test_store_create_without_explicit_request_replays_strict_review(
+    tmp_path: Path,
+) -> None:
     store = GoalRunStore(tmp_path / "goals.json")
     goal = GoalRun(tab_id="tab-x", objective="Test", strict_review=True, plan_first=True)
     first = store.create(goal, "cid-1")
@@ -1387,7 +1419,10 @@ async def test_plan_first_and_strict_review_planning_turn_complete_signal_parks_
 
 
 def test_cross_review_preferences_and_consensus():
-    from claude_hub.models.goal_run import CrossReviewModelPreference, GoalStrictReviewFinding
+    from claude_hub.models.goal_run import (
+        CrossReviewModelPreference,
+        GoalStrictReviewFinding,
+    )
     from claude_hub.services.cross_reviewer import select_cross_reviewer_candidates
     from claude_hub.services.goal_run.strict_review import (
         StrictReviewOutcome,
@@ -1427,14 +1462,26 @@ def test_cross_review_preferences_and_consensus():
 def test_cross_review_presets_and_settings(tmp_path, monkeypatch):
     from pydantic import ValidationError
 
-    from claude_hub.models.goal_run import GoalRunCreate
+    from claude_hub.models.goal_run import GoalRunCreate, SubagentModelPreference
     from claude_hub.services import cross_review_settings as settings_module
 
     monkeypatch.setattr(settings_module, "resolve_runtime_home", lambda: tmp_path)
-    with pytest.raises(ValidationError, match="Read-only audit preset cannot push branches"):
-        settings_module.CrossReviewSettings(
-            default_preset="readonly_brief", push_remote_branch=True
-        )
+    migrated = settings_module.CrossReviewSettings.model_validate(
+        {
+            "default_preset": "readonly_brief",
+            "review_mode": "dual",
+            "include_review_briefing": True,
+            "generate_mr_description": True,
+            "push_remote_branch": True,
+            "preferred_candidates": [
+                {"provider": "codex", "model": "reviewer-alpha", "effort": "high"}
+            ],
+        }
+    )
+    assert migrated.push_remote_branch is False
+    assert migrated.preferred_candidates == [
+        SubagentModelPreference(provider="codex", model="reviewer-alpha", effort="high")
+    ]
     with pytest.raises(ValidationError, match="Read-only audit preset cannot push branches"):
         GoalRunCreate(
             objective="audit",
@@ -1446,42 +1493,46 @@ def test_cross_review_presets_and_settings(tmp_path, monkeypatch):
         objective="audit", client_request_id="id", strict_review_preset="mr_slim"
     )
     assert request.strict_review
-    saved = settings_module.CrossReviewSettings(review_mode="dual")
+    assert request.strict_review_preset == "cross_review_slim"
+    saved = settings_module.CrossReviewSettings(
+        preferred_candidates=[
+            SubagentModelPreference(provider="codex", model="reviewer-alpha", effort="high")
+        ],
+        push_remote_branch=True,
+    )
     settings_module.write_cross_review_settings(saved)
     assert settings_module.read_cross_review_settings() == saved
+    assert settings_module.read_subagent_settings() == saved
 
 
 @pytest.mark.asyncio
-async def test_dual_review_concurrent_and_backup(tmp_path, monkeypatch):
+async def test_strict_review_uses_shared_subagent_priority_with_fallback(tmp_path, monkeypatch):
+    from claude_hub.models.goal_run import SubagentModelPreference
     from claude_hub.models.subagent import SubagentTurnStatus
-    from claude_hub.services import subagents
+    from claude_hub.services import cross_review_settings, subagents
     from claude_hub.services.goal_run import strict_review as sr
     from claude_hub.services.ttyd_manager import ttyd_manager
 
+    monkeypatch.setattr(cross_review_settings, "resolve_runtime_home", lambda: tmp_path)
+    cross_review_settings.write_subagent_settings(
+        cross_review_settings.SubagentPrioritySettings(
+            preferred_candidates=[
+                SubagentModelPreference(provider="claude", model="reviewer-beta"),
+                SubagentModelPreference(provider="codex", model="reviewer-alpha", effort="high"),
+            ]
+        )
+    )
     monkeypatch.setattr(
         ttyd_manager,
         "get_tab",
         lambda _: SimpleNamespace(agent_type=AgentType.CURSOR, env={}, cwd=str(tmp_path)),
     )
-    candidates = [
-        sr.CrossReviewCandidate("codex", "reviewer-alpha"),
-        sr.CrossReviewCandidate("claude", "reviewer-beta"),
-        sr.CrossReviewCandidate("cursor", "reviewer-gamma"),
-    ]
-    monkeypatch.setattr(sr, "select_cross_reviewer_candidates", lambda *args, **kwargs: candidates)
-    entered = 0
-    both_started = asyncio.Event()
+    monkeypatch.setattr(sr, "read_cached_quota_map", lambda: asyncio.sleep(0, result={}))
     calls = []
 
     class Service:
         async def create(self, req):
-            nonlocal entered
-            calls.append(req.call_id)
-            entered += 1
-            if entered == 2:
-                both_started.set()
-            if entered <= 2:
-                await asyncio.wait_for(both_started.wait(), timeout=2)
+            calls.append((req.agent_type.value, req.model, req.effort, req.call_id))
             return SimpleNamespace(id=req.model), SimpleNamespace(turn_id=req.model)
 
         async def wait_turn(self, record_id, turn_id, wait_seconds):
@@ -1495,33 +1546,112 @@ async def test_dual_review_concurrent_and_backup(tmp_path, monkeypatch):
             )
 
     monkeypatch.setattr(subagents, "get_subagent_service", lambda: Service())
-    goal = GoalRun(tab_id="tab", objective="review", strict_review=True, strict_review_mode="dual")
+    goal = GoalRun(tab_id="tab", objective="review", strict_review=True)
     outcome = await run_subagent_strict_review(goal, "done", 1)
     assert outcome.verdict == "PASS"
-    assert outcome.reviewer_provider == "codex+cursor"
-    assert (
-        len(calls) == 3
-        and ":slot0:" in calls[0]
-        and ":slot1:" in calls[1]
-        and ":slot1:" in calls[2]
-    )
+    assert outcome.reviewer_provider == "codex"
+    assert outcome.reviewer_model == "reviewer-alpha"
+    assert [(c[0], c[1], c[2]) for c in calls[:2]] == [
+        ("claude", "reviewer-beta", None),
+        ("codex", "reviewer-alpha", "high"),
+    ]
 
 
 def test_review_preset_rubrics():
-    for preset, phrase in [
-        ("mr_slim", "Mandatory Subtraction Gate"),
-        ("bug_only", "P2/P3 advisory only"),
-        ("readonly_brief", "repository untouched"),
+    for preset, expected_preset, phrase in [
+        ("cross_review_slim", "cross_review_slim", "Cross-Review & Slim Focus"),
+        ("mr_slim", "cross_review_slim", "restraint (avoid overengineering"),
+        ("bug_only", "cross_review_slim", "bugs and correctness"),
+        ("readonly_brief", "readonly_brief", "repository untouched"),
     ]:
         goal = GoalRun(
             tab_id="tab",
             objective="review",
             strict_review_preset=preset,
-            strict_review_briefing=True,
         )
+        assert goal.strict_review_preset == expected_preset
         prompt = build_strict_review_prompt(goal, "turn", "done", 1)
         assert phrase in prompt
-        assert "3-Minute Review Briefing" in prompt
+
+
+@pytest.mark.asyncio
+async def test_legacy_readonly_brief_goal_migration_and_resume_preserves_readonly_and_no_push(
+    tmp_path,
+):
+    from claude_hub.services.goal_run.prompts import build_continuation_prompt
+    from claude_hub.services.local_storage import write_document
+
+    goals_path = tmp_path / "goals.json"
+    write_document(
+        goals_path,
+        {
+            "version": 2,
+            "goals": [
+                {
+                    "id": "goal-readonly-legacy",
+                    "tab_id": "tab-ro",
+                    "objective": "Audit changes without touching files",
+                    "status": "paused",
+                    "strict_review": True,
+                    "strict_review_preset": "readonly_brief",
+                    "strict_review_mode": "dual",
+                    "strict_review_candidates": [
+                        {"provider": "codex", "model": "gpt-5.4", "effort": "high"}
+                    ],
+                    "strict_review_briefing": True,
+                    "strict_review_mr_description": True,
+                    "strict_review_push_branch": True,
+                },
+                {
+                    "id": "goal-slim-legacy",
+                    "tab_id": "tab-slim",
+                    "objective": "Slim review",
+                    "status": "paused",
+                    "strict_review": True,
+                    "strict_review_preset": "mr_slim",
+                    "strict_review_mode": "single",
+                },
+            ],
+            "create_requests": {},
+            "create_inputs": {},
+        },
+    )
+    dispatched: list[str] = []
+
+    async def dispatch(goal, prompt):
+        dispatched.append(prompt)
+        return f"turn-{len(dispatched)}"
+
+    store = GoalRunStore(goals_path)
+    ro_goal = store.get("goal-readonly-legacy")
+    assert ro_goal.strict_review is True
+    assert ro_goal.strict_review_preset == "readonly_brief"
+    assert ro_goal.strict_review_push_branch is False
+    slim_goal = store.get("goal-slim-legacy")
+    assert slim_goal.strict_review_preset == "cross_review_slim"
+
+    controller = GoalRunController(store, dispatch)
+    resumed = await controller.resume("goal-readonly-legacy", "resume-ro")
+    assert resumed.status == GoalRunStatus.ACTIVE
+    assert resumed.strict_review_preset == "readonly_brief"
+    assert resumed.strict_review_push_branch is False
+    assert "STRICT READ-ONLY MODE" in dispatched[0]
+    assert "Push feature branch" not in dispatched[0]
+    assert "Do not push yet" not in dispatched[0]
+
+    steered_prompt = build_continuation_prompt(
+        resumed.model_copy(
+            update={
+                "pending_input": "Check the auth module too",
+                "strict_review_feedback": "Round 1 BLOCK:\n- [P1] a.py:1: missing evidence\nFix the blocking defects",
+            }
+        )
+    )
+    assert "STRICT READ-ONLY MODE" in steered_prompt
+    assert "without modifying repository files" in steered_prompt
+    review_prompt = build_strict_review_prompt(resumed, "turn-1", "Audit report", 1)
+    assert "repository untouched" in review_prompt
+    assert "Do not ask the worker to modify files" in review_prompt
 
 
 @pytest.mark.asyncio
@@ -1574,9 +1704,21 @@ def test_invalid_settings_and_effort_fall_back(tmp_path, monkeypatch):
 
     monkeypatch.setattr(settings, "resolve_runtime_home", lambda: tmp_path)
     path = tmp_path / "cross_review_settings.json"
-    for contents in ('{"review_mode":', '{"review_mode":"invalid"}'):
+    for contents in ('{"review_mode":', '{"preferred_candidates":"invalid"}'):
         path.write_text(contents)
         assert settings.read_cross_review_settings() == settings.CrossReviewSettings()
+    # Legacy readonly_brief default_preset is preserved across read/write until explicitly changed (F1).
+    path.write_text(
+        '{"default_preset":"readonly_brief","review_mode":"dual","push_remote_branch":true,"preferred_candidates":[{"provider":"codex","model":"gpt-5.4","effort":"high"}]}'
+    )
+    loaded = settings.read_cross_review_settings()
+    assert loaded.default_preset == "readonly_brief"
+    assert loaded.push_remote_branch is False
+    assert len(loaded.preferred_candidates) == 1
+    settings.write_cross_review_settings(loaded)
+    reloaded = settings.read_cross_review_settings()
+    assert reloaded.default_preset == "readonly_brief"
+    assert reloaded.push_remote_branch is False
     for provider in ("maso", "claude", "cursor"):
         with pytest.raises(ValidationError, match="no separate reasoning-effort"):
             CrossReviewModelPreference(provider=provider, effort="high")
@@ -1720,7 +1862,10 @@ async def test_interrupted_push_never_retains_approval(tmp_path, push_checkout, 
     )
     assert goal.strict_review_push_pending
     result = await manager.on_turn_completed(
-        "tab", goal.current_turn_id, status, f'<goal-status state="{signal}">waiting</goal-status>'
+        "tab",
+        goal.current_turn_id,
+        status,
+        f'<goal-status state="{signal}">waiting</goal-status>',
     )
     assert not result.strict_review_push_pending
     assert result.strict_review_push_target is None
@@ -1806,7 +1951,10 @@ async def test_push_candidate_reuses_approved_referenced_worktree(tmp_path, monk
     approved, reason = await inspect_push_candidate(goal, f"Implemented in {worktree}")
     assert reason is None and approved is not None
     goal.strict_review_push_target = approved
-    assert await inspect_push_candidate(goal, "Pushed feat-x to origin") == (approved, None)
+    assert await inspect_push_candidate(goal, "Pushed feat-x to origin") == (
+        approved,
+        None,
+    )
     other = worktree.parent / "other"
     other.mkdir()
     assert await inspect_push_candidate(goal, f"Pushed from {other}") == (
@@ -1825,7 +1973,9 @@ async def test_multiple_worktrees_skip_automatic_push(tmp_path, monkeypatch):
     candidate.mkdir(parents=True)
     baseline.mkdir()
     subprocess.run(
-        ["git", "init", "-b", "feature", str(candidate)], check=True, capture_output=True
+        ["git", "init", "-b", "feature", str(candidate)],
+        check=True,
+        capture_output=True,
     )
     subprocess.run(
         [
@@ -1929,7 +2079,8 @@ async def test_repeated_changed_push_candidate_stops_at_hard_cap(tmp_path, monke
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "signal", ['<goal-status state="continue">continue</goal-status>', "No status emitted"]
+    "signal",
+    ['<goal-status state="continue">continue</goal-status>', "No status emitted"],
 )
 @pytest.mark.parametrize("recovery", ["resume", "steer"])
 async def test_incomplete_push_turns_stop_at_cap_and_user_can_recover(

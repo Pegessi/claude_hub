@@ -141,12 +141,18 @@ async def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
 
 def _body(tmp_path: Path, **extra: Any) -> Dict[str, Any]:
-    return {"agent_type": "codex", "prompt": "summarize X", "parent_tab_id": "parent", **extra}
+    return {
+        "agent_type": "codex",
+        "prompt": "summarize X",
+        "parent_tab_id": "parent",
+        **extra,
+    }
 
 
 async def _wait(client: httpx.AsyncClient, result: Dict[str, Any]) -> Dict[str, Any]:
     response = await client.get(
-        f"/api/subagents/{result['subagent_id']}/turns/{result['turn_id']}", params={"wait": 5}
+        f"/api/subagents/{result['subagent_id']}/turns/{result['turn_id']}",
+        params={"wait": 5},
     )
     assert response.status_code == 200, response.text
     data: Dict[str, Any] = response.json()
@@ -227,7 +233,8 @@ async def test_same_call_id_is_idempotent(env) -> None:
     chats, service, client, tmp_path = env
     body = _body(tmp_path, call_id="call-1")
     first, second = await asyncio.gather(
-        client.post("/api/subagents", json=body), client.post("/api/subagents", json=body)
+        client.post("/api/subagents", json=body),
+        client.post("/api/subagents", json=body),
     )
     assert first.status_code == second.status_code == 201
     assert first.json()["subagent_id"] == second.json()["subagent_id"]
@@ -441,7 +448,12 @@ def test_tab_record_parent_link_round_trip_and_legacy_normalization() -> None:
 
 @pytest.mark.parametrize(
     ("parent_solo", "requested", "expected"),
-    [(True, None, True), (False, None, False), (False, True, True), (True, False, False)],
+    [
+        (True, None, True),
+        (False, None, False),
+        (False, True, True),
+        (True, False, False),
+    ],
 )
 async def test_solo_mode_inherits_parent_unless_overridden(
     env, parent_solo: bool, requested: Optional[bool], expected: bool
@@ -467,7 +479,11 @@ async def test_solo_mode_defaults_on_without_parent(env) -> None:
 async def test_subagent_inherits_resolved_workspace_attribution(env) -> None:
     chats, service, client, tmp_path = env
     chats.add_tab(
-        "parent", cwd=str(tmp_path), solo_mode=True, workspace_id="ws-1", workspace_name="Repo"
+        "parent",
+        cwd=str(tmp_path),
+        solo_mode=True,
+        workspace_id="ws-1",
+        workspace_name="Repo",
     )
     seen: List[tuple] = []
 
@@ -514,7 +530,9 @@ async def test_workspace_attribution_failure_never_blocks_spawn(env) -> None:
     assert chats.create_calls[-1]["workspace_id"] is None
 
 
-async def test_parent_remote_workspace_inherits_without_cwd_check(tmp_path: Path) -> None:
+async def test_parent_remote_workspace_inherits_without_cwd_check(
+    tmp_path: Path,
+) -> None:
     import sys
     from types import SimpleNamespace
 
@@ -522,7 +540,10 @@ async def test_parent_remote_workspace_inherits_without_cwd_check(tmp_path: Path
     from claude_hub.services.subagents import _resolve_subagent_workspace
 
     remote = SimpleNamespace(
-        id="ws-remote", name="Remote Repo", target=ExecutionTarget.REMOTE, path="/nonexistent"
+        id="ws-remote",
+        name="Remote Repo",
+        target=ExecutionTarget.REMOTE,
+        path="/nonexistent",
     )
     parent = TerminalTab(
         id="parent",
@@ -541,7 +562,11 @@ async def test_parent_remote_workspace_inherits_without_cwd_check(tmp_path: Path
             "get_workspace",
             lambda ws_id: remote if ws_id == "ws-remote" else None,
         )
-        mp.setattr(wm_module.workspace_manager, "find_workspace_for_local_path", lambda path: None)
+        mp.setattr(
+            wm_module.workspace_manager,
+            "find_workspace_for_local_path",
+            lambda path: None,
+        )
         assert _resolve_subagent_workspace(parent, str(tmp_path)) == (
             "ws-remote",
             "Remote Repo",
@@ -597,7 +622,10 @@ async def test_parent_workspace_cross_repo_child_falls_back_to_cwd_lookup(
     assert _resolve_subagent_workspace(parent, str(other_root)) == ("ws-other", "Other")
     # Unstamped parent resolves purely from cwd.
     plain_parent = parent.model_copy(update={"workspace_id": None})
-    assert _resolve_subagent_workspace(plain_parent, str(other_root)) == ("ws-other", "Other")
+    assert _resolve_subagent_workspace(plain_parent, str(other_root)) == (
+        "ws-other",
+        "Other",
+    )
     assert _resolve_subagent_workspace(plain_parent, str(tmp_path / "nowhere-x")) is None
 
 
@@ -672,7 +700,8 @@ async def test_subagent_caller_cannot_escape_depth_or_parent(env, identity: str)
         {"caller_tab_id": record.tab_id} if identity == "tab" else {"caller_subagent_id": record.id}
     )
     unlinked = await client.post(
-        "/api/subagents", json=_body(tmp_path, parent_tab_id=None, cwd=str(tmp_path), **caller)
+        "/api/subagents",
+        json=_body(tmp_path, parent_tab_id=None, cwd=str(tmp_path), **caller),
     )
     assert unlinked.status_code == 400 and "--no-parent" in unlinked.json()["detail"]
     other = await client.post("/api/subagents", json=_body(tmp_path, keep=True, **caller))
@@ -691,7 +720,9 @@ async def test_subagent_caller_cannot_escape_depth_or_parent(env, identity: str)
     await _eventually(lambda: grandchild.closed)
 
 
-async def test_top_level_caller_may_run_unlinked_and_unknown_subagent_is_refused(env) -> None:
+async def test_top_level_caller_may_run_unlinked_and_unknown_subagent_is_refused(
+    env,
+) -> None:
     chats, service, client, tmp_path = env
     body = _body(tmp_path, parent_tab_id=None, cwd=str(tmp_path), caller_tab_id="parent")
     assert (await client.post("/api/subagents", json=body)).status_code == 201
@@ -880,7 +911,9 @@ async def test_failed_follow_up_save_leaves_no_running_turn(env, monkeypatch) ->
     assert len(chats.sent) == 1
 
 
-async def test_concurrent_same_call_id_creates_one_subagent_while_tab_starts(env) -> None:
+async def test_concurrent_same_call_id_creates_one_subagent_while_tab_starts(
+    env,
+) -> None:
     chats, service, client, tmp_path = env
     chats.create_delay = 0.1
     body = _body(tmp_path, call_id="call-slow")
@@ -964,16 +997,23 @@ async def test_prefer_final_text_returns_answer_after_last_tool_call(
     from claude_hub.services import dot as dot_module
 
     monkeypatch.setattr(
-        dot_module, "get_dot_service", lambda: SimpleNamespace(is_dot_tab=lambda _t: False)
+        dot_module,
+        "get_dot_service",
+        lambda: SimpleNamespace(is_dot_tab=lambda _t: False),
     )
-    payload = {"assistant_text": "Reading.\nDone: 3 fixes.", "final_text": "Done: 3 fixes."}
+    payload = {
+        "assistant_text": "Reading.\nDone: 3 fixes.",
+        "final_text": "Done: 3 fixes.",
+    }
 
     class Manager:
         async def subscribe_completion(self, _session: Any) -> asyncio.Queue[Any]:
             queue: asyncio.Queue[Any] = asyncio.Queue()
             queue.put_nowait(
                 SimpleNamespace(
-                    turn_id="t-1", type=AgentStreamEventType.TURN_COMPLETED, payload=payload
+                    turn_id="t-1",
+                    type=AgentStreamEventType.TURN_COMPLETED,
+                    payload=payload,
                 )
             )
             return queue
@@ -1024,7 +1064,8 @@ def _real_manager(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Any:
 
     monkeypatch.setattr(TTYDProcess, "stop", fake_stop)
     monkeypatch.setattr(
-        "claude_hub.services.agent_stream.tailer.stop_session_stream", fake_stop_session_stream
+        "claude_hub.services.agent_stream.tailer.stop_session_stream",
+        fake_stop_session_stream,
     )
     monkeypatch.setattr(TTYDManager, "ensure_tab_running", fake_ensure_tab_running)
     manager = TTYDManager.__new__(TTYDManager)
@@ -1144,7 +1185,10 @@ async def test_viewed_non_kept_subagent_detaches_instead_of_archiving_on_grace(
 ) -> None:
     chats = FakeChats()
     chats.add_tab(
-        "parent", cwd=str(tmp_path), workspace_id="ws-display", workspace_name="Display WS"
+        "parent",
+        cwd=str(tmp_path),
+        workspace_id="ws-display",
+        workspace_name="Display WS",
     )
 
     def detach_tab(tab_id: str) -> Optional[TerminalTab]:
@@ -1226,7 +1270,9 @@ async def test_codex_chat_tab_cold_start_skips_terminal_rollout_quarantine(
     assert codex_chat.resume_quarantined is False
 
 
-async def test_reconciliation_archives_orphans_but_keeps_detached_tabs(tmp_path: Path) -> None:
+async def test_reconciliation_archives_orphans_but_keeps_detached_tabs(
+    tmp_path: Path,
+) -> None:
     chats = FakeChats()
     chats.add_tab("parent", cwd=str(tmp_path))
     chats.add_tab("orphan", cwd=str(tmp_path), subagent_id="sa-gone", parent_tab_id="parent")
@@ -1247,7 +1293,9 @@ async def test_reconciliation_archives_orphans_but_keeps_detached_tabs(tmp_path:
     await service.stop()
 
 
-async def test_close_stays_open_and_retryable_when_the_tab_will_not_archive(env) -> None:
+async def test_close_stays_open_and_retryable_when_the_tab_will_not_archive(
+    env,
+) -> None:
     chats, service, client, tmp_path = env
     started = (await client.post("/api/subagents", json=_body(tmp_path, keep=True))).json()
     assert (await _wait(client, started))["status"] == "completed"
@@ -1415,3 +1463,419 @@ async def test_startup_and_purge_delete_legacy_patrol_triage_records_and_tabs(
     stored = read_document(path)
     assert list(stored["subagents"].keys()) == ["sa-keep-1"]
     await restarted.stop()
+
+
+async def test_shared_subagent_priority_defaults_and_explicit_overrides(
+    env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from claude_hub.models.goal_run import SubagentModelPreference
+    from claude_hub.services import cross_review_settings, cross_reviewer
+
+    chats, service, client, tmp_path = env
+    monkeypatch.setattr(cross_review_settings, "resolve_runtime_home", lambda: tmp_path)
+    monkeypatch.setattr(
+        cross_reviewer, "read_cached_quota_map", lambda: asyncio.sleep(0, result={})
+    )
+
+    cross_review_settings.write_subagent_settings(
+        cross_review_settings.SubagentPrioritySettings(
+            preferred_candidates=[
+                SubagentModelPreference(provider="codex", model="gpt-5.4", effort="high"),
+                SubagentModelPreference(provider="claude", model="opus"),
+            ]
+        )
+    )
+
+    # 1. Omitted provider/model/effort resolves from the highest-priority saved entry.
+    omitted_resp = await client.post(
+        "/api/subagents",
+        json={
+            "prompt": "delegate with saved defaults",
+            "cwd": str(tmp_path),
+            "keep": True,
+        },
+    )
+    assert omitted_resp.status_code == 201, omitted_resp.text
+    omitted_record = service.get(omitted_resp.json()["subagent_id"])
+    assert omitted_record.agent_type == AgentType.CODEX
+    assert omitted_record.model == "gpt-5.4"
+    assert omitted_record.effort == "high"
+    assert chats.create_calls[-1]["env"]["CODEX_MODEL"] == "gpt-5.4"
+    assert chats.create_calls[-1]["env"]["CODEX_REASONING_EFFORT"] == "high"
+
+    # 2. Explicit provider with omitted model fills model from that provider's saved entry.
+    provider_only_resp = await client.post(
+        "/api/subagents",
+        json={
+            "agent_type": "claude",
+            "prompt": "delegate to claude",
+            "cwd": str(tmp_path),
+            "keep": True,
+        },
+    )
+    assert provider_only_resp.status_code == 201, provider_only_resp.text
+    provider_record = service.get(provider_only_resp.json()["subagent_id"])
+    assert provider_record.agent_type == AgentType.CLAUDE
+    assert provider_record.model == "opus"
+    assert provider_record.effort is None
+    assert chats.create_calls[-1]["env"]["ANTHROPIC_MODEL"] == "opus"
+
+    # 3. Explicit provider/model/effort overrides win over saved defaults.
+    explicit_resp = await client.post(
+        "/api/subagents",
+        json={
+            "agent_type": "codex",
+            "model": "gpt-5.4-mini",
+            "effort": "low",
+            "prompt": "explicit override",
+            "cwd": str(tmp_path),
+            "keep": True,
+        },
+    )
+    assert explicit_resp.status_code == 201, explicit_resp.text
+    explicit_record = service.get(explicit_resp.json()["subagent_id"])
+    assert explicit_record.agent_type == AgentType.CODEX
+    assert explicit_record.model == "gpt-5.4-mini"
+    assert explicit_record.effort == "low"
+    assert chats.create_calls[-1]["env"]["CODEX_MODEL"] == "gpt-5.4-mini"
+    assert chats.create_calls[-1]["env"]["CODEX_REASONING_EFFORT"] == "low"
+
+    # 4. Explicit req.env model/effort values win over saved defaults when req.model/req.effort are omitted (F3).
+    env_override_resp = await client.post(
+        "/api/subagents",
+        json={
+            "agent_type": "codex",
+            "env": {
+                "CODEX_MODEL": "explicit-env-model",
+                "CODEX_REASONING_EFFORT": "low",
+            },
+            "prompt": "explicit env override",
+            "cwd": str(tmp_path),
+            "keep": True,
+        },
+    )
+    assert env_override_resp.status_code == 201, env_override_resp.text
+    env_record = service.get(env_override_resp.json()["subagent_id"])
+    assert env_record.agent_type == AgentType.CODEX
+    assert env_record.model == "explicit-env-model"
+    assert env_record.effort == "low"
+    assert chats.create_calls[-1]["env"]["CODEX_MODEL"] == "explicit-env-model"
+    assert chats.create_calls[-1]["env"]["CODEX_REASONING_EFFORT"] == "low"
+
+    # 5. Quota-aware omitted-provider fallback when preferences are empty or all exhausted (F2).
+    from claude_hub.models import ProviderQuota, QuotaLimit
+
+    quota_calls = 0
+
+    async def fake_quota_codex_over():
+        nonlocal quota_calls
+        quota_calls += 1
+        return {
+            "codex": ProviderQuota(
+                provider="codex",
+                available=True,
+                state="over",
+                stale=False,
+                limits=[
+                    QuotaLimit(scope="5h", label="5-hour limit", state="over", used_percent=100)
+                ],
+            ),
+            "claude": ProviderQuota(
+                provider="claude",
+                available=True,
+                state="within",
+                stale=False,
+            ),
+        }
+
+    monkeypatch.setattr(cross_reviewer, "read_cached_quota_map", fake_quota_codex_over)
+    # 5a: Empty preferences still consults quota and selects healthy Claude instead of exhausted Codex.
+    cross_review_settings.write_subagent_settings(
+        cross_review_settings.SubagentPrioritySettings(preferred_candidates=[])
+    )
+    empty_pref_resp = await client.post(
+        "/api/subagents",
+        json={
+            "prompt": "empty prefs quota fallback",
+            "cwd": str(tmp_path),
+            "keep": True,
+        },
+    )
+    assert empty_pref_resp.status_code == 201, empty_pref_resp.text
+    assert quota_calls >= 1
+    empty_pref_record = service.get(empty_pref_resp.json()["subagent_id"])
+    assert empty_pref_record.agent_type == AgentType.CLAUDE
+
+    # 5b: Saved preferences all exhausted falls back to healthy Claude instead of resurrecting exhausted Codex.
+    cross_review_settings.write_subagent_settings(
+        cross_review_settings.SubagentPrioritySettings(
+            preferred_candidates=[
+                SubagentModelPreference(provider="codex", model="gpt-5.4", effort="high")
+            ]
+        )
+    )
+    exhausted_pref_resp = await client.post(
+        "/api/subagents",
+        json={
+            "prompt": "all prefs exhausted fallback",
+            "cwd": str(tmp_path),
+            "keep": True,
+        },
+    )
+    assert exhausted_pref_resp.status_code == 201, exhausted_pref_resp.text
+    exhausted_pref_record = service.get(exhausted_pref_resp.json()["subagent_id"])
+    assert exhausted_pref_record.agent_type == AgentType.CLAUDE
+
+    # 5c: Authoritatively not_configured provider is skipped in favor of healthy provider (R3).
+    async def fake_quota_codex_not_configured():
+        return {
+            "codex": ProviderQuota(
+                provider="codex",
+                available=False,
+                state="not_configured",
+                stale=False,
+                message="Codex is not configured on this deployment.",
+            ),
+            "claude": ProviderQuota(
+                provider="claude",
+                available=True,
+                state="within",
+                stale=False,
+            ),
+        }
+
+    monkeypatch.setattr(cross_reviewer, "read_cached_quota_map", fake_quota_codex_not_configured)
+    cross_review_settings.write_subagent_settings(
+        cross_review_settings.SubagentPrioritySettings(preferred_candidates=[])
+    )
+    not_conf_resp = await client.post(
+        "/api/subagents",
+        json={
+            "prompt": "skip not_configured codex",
+            "cwd": str(tmp_path),
+            "keep": True,
+        },
+    )
+    assert not_conf_resp.status_code == 201, not_conf_resp.text
+    assert service.get(not_conf_resp.json()["subagent_id"]).agent_type == AgentType.CLAUDE
+
+    # 5d: When all automatic fallback providers are authoritatively over/not_configured,
+    # omitted-provider delegation returns 503 instead of resurrecting an unusable provider,
+    # while an explicit caller agent_type still runs (R3).
+    async def fake_quota_all_ineligible():
+        return {
+            "codex": ProviderQuota(
+                provider="codex",
+                available=True,
+                state="over",
+                stale=False,
+                limits=[
+                    QuotaLimit(scope="5h", label="5-hour limit", state="over", used_percent=100)
+                ],
+            ),
+            "claude": ProviderQuota(
+                provider="claude",
+                available=True,
+                state="over",
+                stale=False,
+                limits=[
+                    QuotaLimit(scope="5h", label="5-hour limit", state="over", used_percent=100)
+                ],
+            ),
+            "cursor": ProviderQuota(
+                provider="cursor",
+                available=False,
+                state="not_configured",
+                stale=False,
+            ),
+        }
+
+    monkeypatch.setattr(cross_reviewer, "read_cached_quota_map", fake_quota_all_ineligible)
+    no_eligible_resp = await client.post(
+        "/api/subagents",
+        json={
+            "prompt": "all automatic providers ineligible",
+            "cwd": str(tmp_path),
+            "keep": True,
+        },
+    )
+    assert no_eligible_resp.status_code == 503
+    assert "No eligible subagent provider" in no_eligible_resp.json()["detail"]
+
+    explicit_when_over_resp = await client.post(
+        "/api/subagents",
+        json={
+            "agent_type": "codex",
+            "prompt": "explicit caller choice still honored",
+            "cwd": str(tmp_path),
+            "keep": True,
+        },
+    )
+    assert explicit_when_over_resp.status_code == 201, explicit_when_over_resp.text
+    assert service.get(explicit_when_over_resp.json()["subagent_id"]).agent_type == AgentType.CODEX
+
+
+async def test_integrated_saved_settings_to_cli_delegation_and_cross_review(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Integrated unmocked settings -> CLI delegation & cross-review check.
+
+    Writes shared subagent priority via PUT /api/subagents/settings, then drives:
+    1) `claude-hub agent run` (through CliRunner -> HubClient -> FastAPI -> SubagentService)
+       with omitted --provider, explicit --provider, and explicit --provider/--model/--effort.
+    2) `run_subagent_strict_review` (through real read_cross_review_settings ->
+       select_cross_reviewer_candidates -> SubagentService).
+    Only the downstream Chat tab/provider turn execution is faked by FakeChats.
+    """
+    from click.testing import CliRunner
+    from starlette.testclient import TestClient
+
+    from claude_hub.api import goal_runs as goal_runs_api
+    from claude_hub.cli import main as cli_main
+    from claude_hub.cli.client import HubClient
+    from claude_hub.cli.commands import subagents as subagent_commands
+    from claude_hub.cli.main import cli
+    from claude_hub.models.goal_run import GoalRun
+    from claude_hub.services import cross_review_settings, cross_reviewer
+    from claude_hub.services.goal_run import strict_review as sr
+    from claude_hub.services.ttyd_manager import ttyd_manager
+
+    monkeypatch.setattr(cross_review_settings, "resolve_runtime_home", lambda: tmp_path)
+    monkeypatch.setattr(
+        cross_reviewer, "read_cached_quota_map", lambda: asyncio.sleep(0, result={})
+    )
+    monkeypatch.setattr(sr, "read_cached_quota_map", lambda: asyncio.sleep(0, result={}))
+
+    chats = FakeChats()
+    parent_tab = chats.add_tab("parent-tab", cwd=str(tmp_path)).model_copy(
+        update={"agent_type": AgentType.CURSOR}
+    )
+    chats.tabs["parent-tab"] = parent_tab
+    monkeypatch.setattr(ttyd_manager, "get_tab", lambda tab_id: chats.tabs.get(tab_id))
+
+    async def fake_behavior(tab_id: str, text: str, turn_id: str, timeout: float) -> str:
+        await asyncio.sleep(0)
+        if "<goal-review>" in text:
+            return '<goal-review>{"verdict":"PASS","summary":"integrated review pass","findings":[]}</goal-review>'
+        return "CLI_DELEGATED_OK"
+
+    chats.behavior = fake_behavior
+    service = SubagentService(
+        tmp_path / "subagents.json", chats.runtime(), archive_grace_seconds=10
+    )
+    await service.start()
+    monkeypatch.setattr(subagents_api, "get_subagent_service", lambda: service)
+    monkeypatch.setattr(subagents_service, "get_subagent_service", lambda: service)
+
+    app = FastAPI()
+    app.include_router(subagents_api.router)
+    app.include_router(goal_runs_api.router)
+    app.dependency_overrides[get_current_user] = lambda: User(
+        open_id="local", name="Local", email="local@example.test"
+    )
+
+    try:
+        with TestClient(app) as sync_client:
+            # Save shared subagent priority via the real HTTP settings endpoint.
+            put_res = sync_client.put(
+                "/api/subagents/settings",
+                json={
+                    "preferred_candidates": [
+                        {"provider": "codex", "model": "gpt-5.4", "effort": "high"},
+                        {"provider": "claude", "model": "opus", "effort": None},
+                    ],
+                    "push_remote_branch": False,
+                },
+            )
+            assert put_res.status_code == 200, put_res.text
+
+            class _TestClientTransport(httpx.BaseTransport):
+                def handle_request(self, request: httpx.Request) -> httpx.Response:
+                    res = sync_client.request(
+                        request.method,
+                        str(request.url.raw_path, "ascii"),
+                        content=request.content,
+                        headers=dict(request.headers),
+                    )
+                    return httpx.Response(
+                        status_code=res.status_code,
+                        headers=dict(res.headers),
+                        content=res.content,
+                        request=request,
+                    )
+
+            monkeypatch.setattr(
+                cli_main,
+                "get_client",
+                lambda ctx: HubClient(
+                    base_url="http://testserver", transport=_TestClientTransport()
+                ),
+            )
+            monkeypatch.setattr(subagent_commands.time, "sleep", lambda seconds: None)
+            monkeypatch.setenv("CLAUDE_HUB_CONFIG", str(tmp_path / "missing.toml"))
+            monkeypatch.setenv("CLAUDE_HUB_TAB_ID", parent_tab.id)
+            monkeypatch.delenv("CLAUDE_HUB_SUBAGENT_ID", raising=False)
+            monkeypatch.chdir(tmp_path)
+
+            runner = CliRunner()
+            # (a) CLI `agent run` without --provider uses #1 saved priority (codex / gpt-5.4 / high).
+            r1 = runner.invoke(cli, ["agent", "run", "--prompt", "default delegation"])
+            assert r1.exit_code == 0, r1.output
+            assert r1.stdout == "CLI_DELEGATED_OK\n"
+            assert chats.create_calls[-1]["agent_type"] == AgentType.CODEX
+            assert chats.create_calls[-1]["env"]["CODEX_MODEL"] == "gpt-5.4"
+            assert chats.create_calls[-1]["env"]["CODEX_REASONING_EFFORT"] == "high"
+
+            # (b) CLI `agent run --provider claude` preserves provider and fills saved model `opus`.
+            r2 = runner.invoke(
+                cli,
+                [
+                    "agent",
+                    "run",
+                    "--provider",
+                    "claude",
+                    "--prompt",
+                    "claude delegation",
+                ],
+            )
+            assert r2.exit_code == 0, r2.output
+            assert chats.create_calls[-1]["agent_type"] == AgentType.CLAUDE
+            assert chats.create_calls[-1]["env"]["ANTHROPIC_MODEL"] == "opus"
+
+            # (c) CLI `agent run --provider codex --model custom-m --effort low` preserves all explicit flags.
+            r3 = runner.invoke(
+                cli,
+                [
+                    "agent",
+                    "run",
+                    "--provider",
+                    "codex",
+                    "--model",
+                    "custom-m",
+                    "--effort",
+                    "low",
+                    "--prompt",
+                    "explicit delegation",
+                ],
+            )
+            assert r3.exit_code == 0, r3.output
+            assert chats.create_calls[-1]["agent_type"] == AgentType.CODEX
+            assert chats.create_calls[-1]["env"]["CODEX_MODEL"] == "custom-m"
+            assert chats.create_calls[-1]["env"]["CODEX_REASONING_EFFORT"] == "low"
+
+        # (d) Cross-review uses the exact same saved settings file via unmocked selection & SubagentService.
+        goal = GoalRun(
+            tab_id=parent_tab.id,
+            objective="Review changes",
+            strict_review=True,
+            strict_review_preset="cross_review_slim",
+        )
+        outcome = await sr.run_subagent_strict_review(goal, "Worker finished.", 1)
+        assert outcome.verdict == "PASS"
+        assert outcome.reviewer_provider == "codex"
+        assert outcome.reviewer_model == "gpt-5.4"
+        assert chats.create_calls[-1]["agent_type"] == AgentType.CODEX
+        assert chats.create_calls[-1]["env"]["CODEX_MODEL"] == "gpt-5.4"
+        assert chats.create_calls[-1]["env"]["CODEX_REASONING_EFFORT"] == "high"
+    finally:
+        await service.stop()

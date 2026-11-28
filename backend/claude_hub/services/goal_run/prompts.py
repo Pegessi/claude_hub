@@ -168,27 +168,22 @@ def _checkpoint_prompt(goal: GoalRun) -> str:
 
 def _strict_review_prompt(goal: GoalRun) -> str:
     extra = ""
-    if goal.strict_review_preset == "mr_slim":
+    if goal.strict_review_preset == "cross_review_slim":
         extra += (
-            "Audit the full git diff merge-base..HEAD against the closest in-repo benchmark. "
-            "Prune unnecessary concepts, flags, wrappers and duplicate paths; consolidate fragmented tests into existing modules where appropriate. "
-            "Provide a Concept Survival Table naming the benchmark, what breaks if each addition is removed or folded into the main path, and test consolidation rationale.\n"
+            "Cross-Review & Slim focus: inspect the relevant code/diff with judgment across four "
+            "dimensions — (1) bugs and correctness (concrete reachable defects, data integrity, "
+            "security, broken verification), (2) elegant and reasonable design (clear boundaries, "
+            "reusing existing repository patterns), (3) restraint (avoid overengineering and "
+            "excessive defensive code; simplify where justified rather than adding parallel layers "
+            "or ceremony), and (4) performance. Cross-review uses the shared default subagent "
+            "priority configured in Settings.\n"
         )
-    elif goal.strict_review_preset == "bug_only":
-        extra += "Focus strictly on reachable causal P0/P1 correctness, security, data-loss and verification defects; avoid speculative refactoring.\n"
     elif goal.strict_review_preset == "readonly_brief":
-        extra += "STRICT READ-ONLY MODE: Do not edit, write, commit, push or delete repository files. Inspect the diff, call paths and checks and produce a diagnostic report and Review Briefing.\n"
-    if goal.strict_review_briefing:
         extra += (
-            "In the final response provide a 3-Minute Review Briefing with four sections: "
-            "Call-Path Topology Delta (Entry -> Decision -> Execution -> Cleanup, at most six old -> new lines); "
-            "Decision Delta (2-4 tradeoffs and defaults); Net Code Ledger & Concept Survival Table "
-            "(+X/-Y production, moved and test lines, benchmark and justification for every new config, flag, class and file); "
-            "Verification & Unverified Gaps.\n"
+            "STRICT READ-ONLY MODE: Do not edit, write, commit, push or delete repository files. "
+            "Inspect the diff, call paths and checks and produce a diagnostic report.\n"
         )
-    if goal.strict_review_mr_description:
-        extra += "Provide a ready-to-use MR/PR Title & Description with Background, Changes and Verification.\n"
-    if goal.strict_review_push_branch:
+    if goal.strict_review_push_branch and goal.strict_review_preset != "readonly_brief":
         if goal.strict_review_push_pending:
             if goal.strict_review_push_target:
                 extra += f"Approved checkout: {goal.strict_review_push_target}. Push only this exact branch and HEAD.\n"
@@ -226,8 +221,8 @@ def _strict_review_prompt(goal: GoalRun) -> str:
     return (
         extra + "Strict cross-model review is enabled for this Goal: when you emit "
         '<goal-status state="complete">, Claude Hub automatically runs an independent '
-        "cross-model reviewer against actual workspace state and your verification evidence "
-        "before completing the Goal.\n"
+        "cross-model reviewer (selected using the shared default subagent priority in Settings) "
+        "against actual workspace state and your verification evidence before completing the Goal.\n"
         "- Situational hygiene guidance: if this objective modifies a Git repository and "
         "the current checkout sits on a shared primary branch (main/master/develop), follow "
         "repository guidance (e.g. AGENTS.md isolated feature worktree) rather than editing "

@@ -495,10 +495,9 @@ async def test_review_recovery_retry_does_not_append_the_same_amendment_twice(tm
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("mode", ["single", "dual"])
 @pytest.mark.parametrize("outcome", ["PASS", "BLOCK", "ERROR", "CANCEL"])
-async def test_configured_review_queue_precedes_push_and_waits_for_all_reviewers(
-    tmp_path, monkeypatch, mode, outcome
+async def test_configured_review_queue_precedes_push_and_waits_for_reviewer(
+    tmp_path, monkeypatch, outcome
 ):
     """Exercise the real slot runner and controller, not a replacement review callback."""
     from types import SimpleNamespace
@@ -520,8 +519,6 @@ async def test_configured_review_queue_precedes_push_and_waits_for_all_reviewers
         ),
     )
     candidates = [sr.CrossReviewCandidate("codex", "reviewer-alpha")]
-    if mode == "dual":
-        candidates.append(sr.CrossReviewCandidate("claude", "reviewer-beta"))
     monkeypatch.setattr(sr, "select_cross_reviewer_candidates", lambda *a, **kw: candidates)
     started = {c.provider: asyncio.Event() for c in candidates}
     release = {c.provider: asyncio.Event() for c in candidates}
@@ -571,7 +568,6 @@ async def test_configured_review_queue_precedes_push_and_waits_for_all_reviewers
             objective="review candidate",
             client_request_id="create",
             strict_review=True,
-            strict_review_mode=mode,
             strict_review_push_branch=True,
         ),
     )
@@ -589,11 +585,8 @@ async def test_configured_review_queue_precedes_push_and_waits_for_all_reviewers
             assert len(sent) == 1
             assert not stopped.strict_review_in_progress
             return
-        if mode == "dual":
-            release["codex"].set()
-            await asyncio.wait_for(finished["codex"].wait(), 5)
-            await ctrl.steer(goal.id, "steer-two", "Then update the summary", "user-two")
-            assert not completion.done()
+        await ctrl.steer(goal.id, "steer-two", "Then update the summary", "user-two")
+        assert not completion.done()
         assert len(sent) == 1
         for event in release.values():
             event.set()
@@ -603,8 +596,7 @@ async def test_configured_review_queue_precedes_push_and_waits_for_all_reviewers
         assert not closed
         assert len(sent) == 2
         assert sent[-1].count("Report progress first") == 1
-        if mode == "dual":
-            assert sent[-1].count("Then update the summary") == 1
+        assert sent[-1].count("Then update the summary") == 1
         assert "Do not push yet" in sent[-1]
         assert result.strict_review_history[-1].verdict == (
             "PASS" if outcome == "PASS" else "BLOCK"

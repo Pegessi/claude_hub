@@ -110,7 +110,12 @@ export function useChatGoal(deps: Dependencies) {
       plan_first: choice.effective,
       strict_review: strictEnabled,
       attachments: imageSnapshot.map(toStreamSendAttachment),
-      ...(input.strict_review_preset ? { strict_review_preset: input.strict_review_preset, strict_review_mode: input.strict_review_mode, strict_review_candidates: input.strict_review_candidates, strict_review_briefing: input.strict_review_briefing, strict_review_mr_description: input.strict_review_mr_description, strict_review_push_branch: input.strict_review_push_branch } : {}),
+      ...(input.strict_review_preset
+        ? {
+            strict_review_preset: input.strict_review_preset,
+            strict_review_push_branch: input.strict_review_push_branch,
+          }
+        : {}),
     })
     if (saved) {
       deps.attachments.value = []

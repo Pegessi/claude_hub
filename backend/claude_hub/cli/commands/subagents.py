@@ -47,11 +47,13 @@ RUN_HELP = """Ask another provider for help and print its final answer.
 
 \b
 For help from another provider:
-  claude-hub agent run --provider codex --prompt-file - <<'EOF'
+  claude-hub agent run --prompt-file - <<'EOF'
   ...task...
   EOF
-returns the subagent's final answer on stdout (progress goes to stderr).
-Use Workspace Tasks only for tracked, reviewed work.
+uses the shared default subagent priority configured in Settings (or pass
+`--provider X --model Y --effort Z` to override explicitly) and returns the
+subagent's final answer on stdout (progress goes to stderr). Use Workspace Tasks
+only for tracked, reviewed work.
 
 \b
 The subagent is a native Hub Chat (visible in the UI) linked to the calling
@@ -126,7 +128,11 @@ def _post_with_retry(call: Any) -> Any:
 
 
 def _wait_for_turn(
-    client: HubClient, subagent_id: str, turn_id: str, *, timeout_seconds: Optional[float]
+    client: HubClient,
+    subagent_id: str,
+    turn_id: str,
+    *,
+    timeout_seconds: Optional[float],
 ) -> Dict[str, Any]:
     """Repeated long-polls, each well within the client HTTP timeout."""
     started = time.monotonic()
@@ -190,9 +196,11 @@ def _finish(result: Dict[str, Any], json_output: bool) -> None:
         _note(f"{result.get('subagent_id')} turn {status}: {result.get('error') or 'no answer'}")
     if status == "completed":
         return
-    code = {"timeout": EXIT_TIMEOUT, "cancelled": EXIT_CANCELLED, "running": EXIT_TIMEOUT}.get(
-        str(status), EXIT_FAILED
-    )
+    code = {
+        "timeout": EXIT_TIMEOUT,
+        "cancelled": EXIT_CANCELLED,
+        "running": EXIT_TIMEOUT,
+    }.get(str(status), EXIT_FAILED)
     click.get_current_context().exit(code)
 
 
@@ -268,7 +276,11 @@ def _block(
 
 def _common_turn_options(func: Any) -> Any:
     func = click.option(
-        "--json", "json_flag", is_flag=True, default=False, help="Print the structured result."
+        "--json",
+        "json_flag",
+        is_flag=True,
+        default=False,
+        help="Print the structured result.",
     )(func)
     func = click.option(
         "--background",
@@ -301,8 +313,8 @@ def _common_turn_options(func: Any) -> Any:
     "--agent-type",
     "provider",
     type=click.Choice(PROVIDERS),
-    required=True,
-    help="Chat provider for the subagent.",
+    default=None,
+    help="Chat provider for the subagent (default: shared subagent priority from Settings).",
 )
 @click.option("--model", default=None, help="Provider model id.")
 @click.option("--effort", default=None, help="Reasoning effort (Codex/TraeX only).")
@@ -337,7 +349,7 @@ def _common_turn_options(func: Any) -> Any:
 @click.pass_context
 def agent_run(
     ctx: click.Context,
-    provider: str,
+    provider: Optional[str],
     model: Optional[str],
     effort: Optional[str],
     cwd: Optional[str],
@@ -359,17 +371,18 @@ def agent_run(
     settings = ctx.obj
     preset = (
         env_preset
-        or settings.env_preset_for_agent_type(provider)
+        or (settings.env_preset_for_agent_type(provider) if provider else None)
         or getattr(settings, "default_env_preset", None)
     )
     body: Dict[str, Any] = {
-        "agent_type": provider,
         "prompt": text,
         "cwd": resolve_cli_local_path(cwd or "."),
         "keep": keep,
         "call_id": call_id or f"agent-run-{uuid.uuid4().hex}",
         "timeout_seconds": timeout_seconds,
     }
+    if provider:
+        body["agent_type"] = provider
     if solo is not None:
         body["solo_mode"] = solo
     elif provider == "antigravity":
@@ -398,8 +411,9 @@ def agent_run(
                 call_id=body["call_id"],
                 json_output=json_output,
             )
+            effective_provider = provider or started.get("agent_type") or "default"
             _note(
-                f"subagent {started['subagent_id']} ({provider}) started in tab "
+                f"subagent {started['subagent_id']} ({effective_provider}) started in tab "
                 f"{started.get('tab_id')}; turn {started['turn_id']}"
             )
             if background:
@@ -467,11 +481,19 @@ def agent_send(
 @click.argument("turn_id", required=False)
 @click.option("--wait", is_flag=True, default=False, help="Block until the turn finishes.")
 @click.option(
-    "--json", "json_flag", is_flag=True, default=False, help="Print the structured result."
+    "--json",
+    "json_flag",
+    is_flag=True,
+    default=False,
+    help="Print the structured result.",
 )
 @click.pass_context
 def agent_result(
-    ctx: click.Context, subagent_id: str, turn_id: Optional[str], wait: bool, json_flag: bool
+    ctx: click.Context,
+    subagent_id: str,
+    turn_id: Optional[str],
+    wait: bool,
+    json_flag: bool,
 ) -> None:
     """Show a subagent turn result (default: its latest turn).
 
@@ -509,7 +531,10 @@ def agent_result(
 @click.option("--include-closed", is_flag=True, default=False, help="Include closed subagents.")
 @click.pass_context
 def agent_subagents(
-    ctx: click.Context, parent_tab_id: Optional[str], all_parents: bool, include_closed: bool
+    ctx: click.Context,
+    parent_tab_id: Optional[str],
+    all_parents: bool,
+    include_closed: bool,
 ) -> None:
     """List subagents started by `agent run`."""
     params: Dict[str, Any] = {"include_closed": include_closed}

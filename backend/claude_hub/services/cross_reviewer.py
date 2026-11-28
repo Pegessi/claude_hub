@@ -205,6 +205,23 @@ def is_candidate_quota_exhausted(
     return False
 
 
+def is_candidate_ineligible(
+    candidate: CrossReviewCandidate,
+    quota_by_provider: Mapping[str, ProviderQuota] | None,
+) -> bool:
+    """Return True when a candidate is authoritatively over quota or not configured."""
+    if is_candidate_quota_exhausted(candidate, quota_by_provider):
+        return True
+    if not quota_by_provider:
+        return False
+    provider = (candidate.provider or "").strip().lower()
+    lookup = "codex" if provider in {"codex", "traex"} else provider
+    quota = quota_by_provider.get(lookup)
+    if quota is not None and not quota.stale and quota.state == "not_configured":
+        return True
+    return False
+
+
 def sanitize_reviewer_env(env: Mapping[str, str] | None) -> dict[str, str]:
     """Copy provider environment without parent tab/subagent identity markers."""
     if not env:
@@ -313,7 +330,7 @@ def _pick_family_model(
             sorted(
                 family,
                 key=lambda item: (
-                    0 if re.search(r"[_-](?:reasoning|thinking)[_-]high$", item, re.I) else 1,
+                    (0 if re.search(r"[_-](?:reasoning|thinking)[_-]high$", item, re.I) else 1),
                     0 if re.search(r"[_-](?:reasoning|thinking)$", item, re.I) else 1,
                     item,
                 ),
@@ -486,7 +503,10 @@ def select_cross_reviewer_candidates(
         else:
             candidate_env = {}
         candidate = CrossReviewCandidate(
-            preference.provider, preference.model, preference.effort, candidate_env or None
+            preference.provider,
+            preference.model,
+            preference.effort,
+            candidate_env or None,
         )
         review_env = {**candidate_env, "MASO_MODEL": preference.model or ""}
         if is_heterogeneous_reviewer(
@@ -515,7 +535,7 @@ def select_cross_reviewer_candidates(
     seen: set[tuple[str, str | None]] = set()
     for candidate in preferred_heterogeneous + heterogeneous + preferred_same + same:
         key = (candidate.provider, candidate.model)
-        if key not in seen and not is_candidate_quota_exhausted(candidate, quota_by_provider):
+        if key not in seen and not is_candidate_ineligible(candidate, quota_by_provider):
             result.append(candidate)
             seen.add(key)
     return result
@@ -543,137 +563,119 @@ async def resolve_cross_reviewer_target(
     Select an advertised model from a different family when possible.
     """
     env = dict(worker_env or {})
-    if (
+    from claude_hub.services.agent_stream.providers.spec import Surface, get_spec
+    from claude_hub.services.cross_review_settings import read_subagent_settings
+
+    settings = await asyncio.to_thread(read_subagent_settings)
+    has_non_maso_preference = any(
+        pref.provider != AgentType.MASO.value for pref in settings.preferred_candidates
+    )
+
+    skip_maso_probe = (
         maso_probe is None
         and os.environ.get("PYTEST_CURRENT_TEST")
         and os.environ.get("CLAUDE_HUB_ENABLE_CROSS_REVIEW_PROBE_IN_TESTS") != "1"
         and discover_maso_service is _ORIGINAL_DISCOVER_MASO_SERVICE
         and maso_discovery.discover_maso_service is _ORIGINAL_DISCOVER_MASO_SERVICE
-    ):
+    )
+    if skip_maso_probe and not has_non_maso_preference:
         return None
-    if maso_probe is not None:
-        probe = maso_probe
-    elif discover_maso_service is not _ORIGINAL_DISCOVER_MASO_SERVICE:
-        probe = discover_maso_service
-    else:
-        probe = maso_discovery.discover_maso_service
 
-    probe_env: dict[str, str] = {}
-    if env.get("MASO_BASE_URL"):
-        probe_env["MASO_BASE_URL"] = env["MASO_BASE_URL"]
+    base_url: str | None = None
+    models: list[StreamModelOption] = []
+    default_model: str | None = None
+    if not skip_maso_probe:
+        if maso_probe is not None:
+            probe = maso_probe
+        elif discover_maso_service is not _ORIGINAL_DISCOVER_MASO_SERVICE:
+            probe = discover_maso_service
+        else:
+            probe = maso_discovery.discover_maso_service
 
-    try:
-        base_url, models, default_model = await probe(probe_env)
-    except Exception:
-        logger.debug(
-            "Local MASO service unavailable for heterogeneous cross-review; falling back",
-            exc_info=True,
-        )
-        return None
+        probe_env: dict[str, str] = {}
+        if env.get("MASO_BASE_URL"):
+            probe_env["MASO_BASE_URL"] = env["MASO_BASE_URL"]
+
+        try:
+            base_url, models, default_model = await probe(probe_env)
+        except Exception:
+            logger.debug(
+                "Local MASO service unavailable for heterogeneous cross-review; falling back",
+                exc_info=True,
+            )
+            if not has_non_maso_preference:
+                return None
 
     effective_quota = (
         dict(quota_by_provider) if quota_by_provider is not None else await read_cached_quota_map()
     )
-
-    candidate_models: list[str] = []
-    if worker_agent_type == AgentType.MASO:
-        worker_family = maso_model_family(env, default_model=default_model)
-        if worker_family == "argon":
-            for maybe_model in (
-                _pick_family_model(
-                    models,
-                    preferred_full_id=DEFAULT_ASTRA_REVIEW_MODEL,
-                    base_prefix="astra",
-                    target_family="astra",
-                ),
-                _pick_alternate_non_family_model(models, "argon"),
-            ):
-                if maybe_model and maybe_model not in candidate_models:
-                    candidate_models.append(maybe_model)
-        else:
-            effective_excluded = worker_family or "other"
-            ordered = [
-                _pick_family_model(
-                    models,
-                    preferred_full_id=DEFAULT_ARGON_REVIEW_MODEL,
-                    base_prefix="gemini",
-                    target_family="argon",
-                ),
-                (
-                    _pick_family_model(
-                        models,
-                        preferred_full_id=DEFAULT_ASTRA_REVIEW_MODEL,
-                        base_prefix="astra",
-                        target_family="astra",
-                    )
-                    if worker_family not in {"astra", ""}
-                    else None
-                ),
-                _pick_alternate_non_family_model(models, effective_excluded),
-            ]
-            for maybe_model in ordered:
-                if maybe_model and maybe_model not in candidate_models:
-                    candidate_models.append(maybe_model)
-    else:
-        for maybe_model in (
-            _pick_family_model(
-                models,
-                preferred_full_id=DEFAULT_ARGON_REVIEW_MODEL,
-                base_prefix="gemini",
-                target_family="argon",
-            ),
-            _pick_family_model(
-                models,
-                preferred_full_id=DEFAULT_ASTRA_REVIEW_MODEL,
-                base_prefix="astra",
-                target_family="astra",
-            ),
-            _pick_alternate_non_family_model(models, ""),
-        ):
-            if maybe_model and maybe_model not in candidate_models:
-                candidate_models.append(maybe_model)
-
-    selected_model: str | None = None
-    for candidate_model in candidate_models:
-        cand = CrossReviewCandidate(
-            provider=AgentType.MASO.value,
-            model=candidate_model,
-            env={"MASO_BASE_URL": base_url, "MASO_MODEL": candidate_model},
-        )
-        if not is_candidate_quota_exhausted(cand, effective_quota):
-            selected_model = candidate_model
-            break
-
-    if not selected_model:
-        return None
-
-    reviewer_env = {
-        "MASO_BASE_URL": base_url,
-        "MASO_MODEL": selected_model,
-    }
-    if not is_heterogeneous_reviewer(
+    candidates = select_cross_reviewer_candidates(
         worker_agent_type,
         env,
-        AgentType.MASO,
-        reviewer_env,
+        maso_base_url=base_url,
+        maso_models=models,
         default_maso_model=default_model,
-    ):
-        if worker_agent_type == AgentType.MASO and not maso_model_family(
-            env, default_model=default_model
-        ):
-            # Worker had no explicit or advertised default model; setting an explicit
-            # MASO_MODEL on the reviewer still gives a deterministic reviewer target.
+        quota_by_provider=effective_quota,
+        allow_same_model_fallback=False,
+        preferred_candidates=settings.preferred_candidates,
+    )
+    preferred_providers = {pref.provider for pref in settings.preferred_candidates}
+
+    for cand in candidates:
+        cand_type = AgentType(cand.provider)
+        spec = get_spec(cand_type)
+        if not spec.runs_on(Surface.MANAGED_CHAT):
+            continue
+        if cand_type == AgentType.MASO:
+            if not base_url or not cand.model:
+                continue
+            reviewer_env = {
+                "MASO_BASE_URL": base_url,
+                "MASO_MODEL": cand.model,
+            }
+            if not is_heterogeneous_reviewer(
+                worker_agent_type,
+                env,
+                AgentType.MASO,
+                reviewer_env,
+                default_maso_model=default_model,
+            ):
+                if worker_agent_type == AgentType.MASO and not maso_model_family(
+                    env, default_model=default_model
+                ):
+                    return CrossReviewerTarget(
+                        agent_type=AgentType.MASO,
+                        session_kind=SessionKind.CHAT,
+                        env=reviewer_env,
+                        default_maso_model=default_model,
+                    )
+                continue
             return CrossReviewerTarget(
                 agent_type=AgentType.MASO,
                 session_kind=SessionKind.CHAT,
                 env=reviewer_env,
                 default_maso_model=default_model,
             )
-        return None
 
-    return CrossReviewerTarget(
-        agent_type=AgentType.MASO,
-        session_kind=SessionKind.CHAT,
-        env=reviewer_env,
-        default_maso_model=default_model,
-    )
+        if cand.provider not in preferred_providers:
+            continue
+        reviewer_env = {}
+        if cand.model and spec.model_env_key:
+            reviewer_env[spec.model_env_key] = cand.model
+        if cand.effort and spec.effort_env_keys:
+            reviewer_env[spec.effort_env_keys[0]] = cand.effort
+        if is_heterogeneous_reviewer(
+            worker_agent_type,
+            env,
+            cand_type,
+            reviewer_env,
+            default_maso_model=default_model,
+        ):
+            return CrossReviewerTarget(
+                agent_type=cand_type,
+                session_kind=SessionKind.CHAT,
+                env=reviewer_env,
+                default_maso_model=default_model,
+            )
+
+    return None

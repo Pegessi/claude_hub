@@ -256,8 +256,9 @@ const strictMaxRounds = computed(() =>
 )
 const strictContext = computed(() => {
   const preset = props.goal.strict_review_preset
-  const name = preset === 'mr_slim' ? 'MR Slim' : preset === 'bug_only' ? 'Bug Gate' : preset === 'readonly_brief' ? 'Read-Only Audit' : ''
-  return [name, props.goal.strict_review_mode === 'dual' ? 'Dual' : ''].filter(Boolean).join(' · ')
+  if (preset === 'cross_review_slim' || preset === 'mr_slim' || preset === 'bug_only') return 'Cross-Review & Slim'
+  if (preset === 'readonly_brief') return 'Read-Only Audit'
+  return ''
 })
 const strictPillText = computed(() => {
   const rounds = props.goal.strict_review_rounds ?? 0

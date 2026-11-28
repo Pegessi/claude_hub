@@ -45,7 +45,10 @@ class Hub:
     def handler(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
         path = request.url.path
-        if request.method == "POST" and path in {"/api/subagents", "/api/subagents/sa-1/turns"}:
+        if request.method == "POST" and path in {
+            "/api/subagents",
+            "/api/subagents/sa-1/turns",
+        }:
             if self.create_failures:
                 self.create_failures -= 1
                 raise httpx.ConnectError("connection refused", request=request)
@@ -298,11 +301,30 @@ def test_usage_errors(hub: Hub) -> None:
     assert _run(["agent", "run", "--provider", "bogus", "--prompt", "x"]).exit_code == 2
     assert (
         _run(
-            ["agent", "run", "--provider", "codex", "--prompt", "x", "--timeout", "soon"]
+            [
+                "agent",
+                "run",
+                "--provider",
+                "codex",
+                "--prompt",
+                "x",
+                "--timeout",
+                "soon",
+            ]
         ).exit_code
         == 2
     )
     assert hub.requests == []
+
+
+def test_run_without_provider_uses_shared_subagent_priority_defaults(hub: Hub) -> None:
+    hub.poll_results = [_turn("completed", final_text="from-default")]
+    result = _run(["agent", "run", "--prompt", "check with default priority"])
+    assert result.exit_code == 0, result.output
+    assert result.stdout == "from-default\n"
+    body = hub.bodies()[0]
+    assert "agent_type" not in body
+    assert body["prompt"] == "check with default priority"
 
 
 def test_send_result_list_and_close(hub: Hub) -> None:

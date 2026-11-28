@@ -101,12 +101,15 @@ def test_goal_api_rejects_non_direct_chat(goal_client: TestClient, monkeypatch) 
     assert response.status_code == 400
 
 
-def test_legacy_protocol_failure_can_be_explicitly_completed_with_strict_history(goal_client):
+def test_legacy_protocol_failure_can_be_explicitly_completed_with_strict_history(
+    goal_client,
+):
     from claude_hub.services.goal_signals import MISSING_GOAL_SIGNAL_MESSAGE
 
     manager = goal_api.get_goal_manager()
     goal = manager.create(
-        "tab-1", GoalRunCreate(objective="Verify", client_request_id="legacy", strict_review=True)
+        "tab-1",
+        GoalRunCreate(objective="Verify", client_request_id="legacy", strict_review=True),
     )
     goal.status = GoalRunStatus.FAILED
     goal.status_message = MISSING_GOAL_SIGNAL_MESSAGE
@@ -287,7 +290,10 @@ def _attach_exact_question_owner(monkeypatch, tmp_path, stream_manager, mode):
         return InboxEvidence("absent")
 
     inbox = ChatMessageInbox(
-        tmp_path / "question-inbox.json", lambda tab: InboxTarget("goal"), no_submit, evidence
+        tmp_path / "question-inbox.json",
+        lambda tab: InboxTarget("goal"),
+        no_submit,
+        evidence,
     )
     inbox.answer_submit = answers.submit
     monkeypatch.setattr(answers, "inbox", lambda: inbox)
@@ -362,7 +368,8 @@ def test_goal_resume_rejects_plan_and_defers_while_chat_turn_runs(goal_client, m
 
 def test_goal_resume_releases_when_chat_turn_ends_during_deferral(goal_client, monkeypatch):
     goal = goal_client.post(
-        "/api/tabs/tab-1/goal", json={"objective": "Finish it", "client_request_id": "create"}
+        "/api/tabs/tab-1/goal",
+        json={"objective": "Finish it", "client_request_id": "create"},
     ).json()
     goal_client.post(f"/api/goals/{goal['id']}/pause", json={"client_request_id": "pause"})
     in_flight = iter([True, False])
@@ -384,7 +391,8 @@ def test_goal_resume_releases_when_chat_turn_ends_during_deferral(goal_client, m
 
 def test_second_resume_during_deferral_waits_for_the_turn_or_releases_it(goal_client, monkeypatch):
     goal = goal_client.post(
-        "/api/tabs/tab-1/goal", json={"objective": "Finish it", "client_request_id": "create"}
+        "/api/tabs/tab-1/goal",
+        json={"objective": "Finish it", "client_request_id": "create"},
     ).json()
     goal_client.post(f"/api/goals/{goal['id']}/pause", json={"client_request_id": "pause"})
     in_flight = {"value": True}
@@ -459,7 +467,11 @@ def test_goal_create_and_steer_send_original_images_without_snapshot_blobs(
         return SimpleNamespace(supports_images=True)
 
     monkeypatch.setattr(stream_api, "_capabilities_for", capabilities)
-    body = {"objective": "Use the reference", "client_request_id": "images", "attachments": [IMAGE]}
+    body = {
+        "objective": "Use the reference",
+        "client_request_id": "images",
+        "attachments": [IMAGE],
+    }
     created = goal_client.post("/api/tabs/tab-1/goal", json=body)
     assert created.status_code == 201, created.text
     goal = created.json()
@@ -558,7 +570,9 @@ def test_interrupted_goal_images_require_reattachment_after_restart(
 
 def test_goal_question_followup_becomes_next_goal_turn(goal_client, monkeypatch, tmp_path):
     manager, sent, resolved = _steerable_goal(
-        monkeypatch, tmp_path, accepts_question_followup=lambda *args, **kwargs: _return_true()
+        monkeypatch,
+        tmp_path,
+        accepts_question_followup=lambda *args, **kwargs: _return_true(),
     )
     goal = goal_client.post(
         "/api/tabs/tab-1/goal",
@@ -585,7 +599,10 @@ def test_goal_question_followup_becomes_next_goal_turn(goal_client, monkeypatch,
     assert json.loads(canonical) == json.loads(answer)
     assert canonical in payload.text
     assert kwargs["visible_text"] == canonical
-    assert kwargs["turn_metadata"] == {"origin": "goal", "protocol": "goal-continuation-v1"}
+    assert kwargs["turn_metadata"] == {
+        "origin": "goal",
+        "protocol": "goal-continuation-v1",
+    }
     assert resolved and all(text == canonical for text in resolved)
     current = manager.get(goal["id"])
     assert current.status == GoalRunStatus.ACTIVE
@@ -631,7 +648,12 @@ def test_active_goal_steer_and_blocked_reply_route_into_goal(goal_client, monkey
     assert manager.get(goal["id"]).pending_input is None
 
     steer = goal_client.post(
-        url, json={"text": "Prefer option B", "client_turn_id": "steer-1", "delivery": "steer"}
+        url,
+        json={
+            "text": "Prefer option B",
+            "client_turn_id": "steer-1",
+            "delivery": "steer",
+        },
     )
     assert steer.status_code == 200, steer.text
     assert sent[-1][0].delivery == "steer"
@@ -696,7 +718,10 @@ def test_only_hub_goal_turns_enable_goal_protocol_handling(goal_client, monkeypa
         "/api/tabs/tab-1/goal",
         json={"objective": "Finish it", "client_request_id": "create"},
     ).json()
-    assert sent[-1][1]["turn_metadata"] == {"origin": "goal", "protocol": "goal-continuation-v1"}
+    assert sent[-1][1]["turn_metadata"] == {
+        "origin": "goal",
+        "protocol": "goal-continuation-v1",
+    }
     goal_client.post(f"/api/goals/{goal['id']}/pause", json={"client_request_id": "pause"})
     assert (
         goal_client.post(url, json={"text": "while paused", "client_turn_id": "paused"}).status_code
@@ -905,13 +930,85 @@ def test_cross_review_settings_api(goal_client, monkeypatch, tmp_path):
         "cursor": False,
         "traex": True,
     }
-    assert settings["review_mode"] == "single"
-    settings["review_mode"] = "dual"
+    assert settings == {
+        "preferred_candidates": [],
+        "push_remote_branch": False,
+        "default_preset": "cross_review_slim",
+    }
     settings["preferred_candidates"] = [
         {"provider": "codex", "model": "reviewer-alpha", "effort": "high"}
     ]
-    assert goal_client.put("/api/goals/cross-review-settings", json=settings).status_code == 200
-    assert goal_client.get("/api/goals/cross-review-settings").json()["settings"] == settings
-    settings["default_preset"] = "readonly_brief"
     settings["push_remote_branch"] = True
-    assert goal_client.put("/api/goals/cross-review-settings", json=settings).status_code == 422
+    assert goal_client.put("/api/subagents/settings", json=settings).status_code == 200
+    assert goal_client.get("/api/subagents/settings").json()["settings"] == settings
+    assert goal_client.get("/api/goals/cross-review-settings").json()["settings"] == settings
+    legacy_payload = {
+        "default_preset": "readonly_brief",
+        "review_mode": "dual",
+        "preferred_candidates": [{"provider": "claude", "model": "opus", "effort": None}],
+        "push_remote_branch": True,
+    }
+    res = goal_client.put("/api/goals/cross-review-settings", json=legacy_payload)
+    assert res.status_code == 200
+    assert res.json()["settings"] == {
+        "preferred_candidates": [{"provider": "claude", "model": "opus", "effort": None}],
+        "push_remote_branch": False,
+        "default_preset": "readonly_brief",
+    }
+    # Narrow PATCH updates push_remote_branch / default_preset without overwriting preferred_candidates (R2),
+    # and a push-only PATCH against saved readonly_brief preserves readonly_brief / push_remote_branch=False (S1).
+    two_candidates = [
+        {"provider": "codex", "model": "reviewer-alpha", "effort": "ultra"},
+        {"provider": "claude", "model": "opus", "effort": None},
+    ]
+    assert (
+        goal_client.put(
+            "/api/subagents/settings",
+            json={
+                "preferred_candidates": two_candidates,
+                "push_remote_branch": False,
+                "default_preset": "readonly_brief",
+            },
+        ).status_code
+        == 200
+    )
+    stale_push_patch = goal_client.patch(
+        "/api/goals/cross-review-settings",
+        json={"push_remote_branch": True},
+    )
+    assert stale_push_patch.status_code == 200
+    assert stale_push_patch.json()["settings"] == {
+        "preferred_candidates": two_candidates,
+        "push_remote_branch": False,
+        "default_preset": "readonly_brief",
+    }
+    assert goal_client.get("/api/subagents/settings").json()["settings"] == {
+        "preferred_candidates": two_candidates,
+        "push_remote_branch": False,
+        "default_preset": "readonly_brief",
+    }
+    assert cross_review_settings.read_subagent_settings().model_dump(mode="json") == {
+        "preferred_candidates": two_candidates,
+        "push_remote_branch": False,
+        "default_preset": "readonly_brief",
+    }
+    patched_mode = goal_client.patch(
+        "/api/goals/cross-review-settings",
+        json={"default_preset": "cross_review_slim"},
+    )
+    assert patched_mode.status_code == 200
+    assert patched_mode.json()["settings"] == {
+        "preferred_candidates": two_candidates,
+        "push_remote_branch": False,
+        "default_preset": "cross_review_slim",
+    }
+    patched_push = goal_client.patch(
+        "/api/goals/cross-review-settings",
+        json={"push_remote_branch": True},
+    )
+    assert patched_push.status_code == 200
+    assert patched_push.json()["settings"] == {
+        "preferred_candidates": two_candidates,
+        "push_remote_branch": True,
+        "default_preset": "cross_review_slim",
+    }

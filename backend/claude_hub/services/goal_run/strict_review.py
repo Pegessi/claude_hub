@@ -359,7 +359,9 @@ async def inspect_push_candidate(
     return f"{target}@{branch}:{head}", None
 
 
-async def _collect_single_dir_git_snapshot(target_cwd: str) -> tuple[bool, str, str | None]:
+async def _collect_single_dir_git_snapshot(
+    target_cwd: str,
+) -> tuple[bool, str, str | None]:
     """Return (is_git, formatted_snapshot, canonical_repo_root)."""
     rc, inside = await _run_git_command(target_cwd, "rev-parse", "--is-inside-work-tree")
     if rc != 0 or inside.lower() != "true":
@@ -499,7 +501,10 @@ def _collect_workspace_memory_sync(
                         matched_ws = ws
 
         if matched_ws is not None:
-            from ..feedback.common import INLINE_LESSONS_MAX_COUNT, render_inline_lessons_block
+            from ..feedback.common import (
+                INLINE_LESSONS_MAX_COUNT,
+                render_inline_lessons_block,
+            )
 
             workspace_id = matched_ws.id
             query = f"{objective}\n{assistant_text[:1000]}"
@@ -654,7 +659,9 @@ def _findings_match(a: GoalStrictReviewFinding, b: GoalStrictReviewFinding) -> b
     return jaccard >= 0.65
 
 
-def _blocking_findings(round_record: GoalStrictReviewRound) -> list[GoalStrictReviewFinding]:
+def _blocking_findings(
+    round_record: GoalStrictReviewRound,
+) -> list[GoalStrictReviewFinding]:
     return [f for f in round_record.findings if f.severity in {"P0", "P1"}]
 
 
@@ -811,17 +818,17 @@ def build_strict_review_prompt(
 
     context_block = f"\n{context.render_prompt_block()}" if context is not None else ""
     rubric = ""
-    if goal.strict_review_preset == "mr_slim":
+    if goal.strict_review_preset == "cross_review_slim":
         rubric += (
-            "Mandatory Subtraction Gate (Concept Survival Table): audit every added config knob, env var, flag, class, protocol, module and standalone test file in the full git diff merge-base..HEAD. "
-            "Rate unjustified parallel paths, wrappers and fragmented tests P1, naming the existing owner to fold into; naming or formatting nitpicks remain P2/P3.\n"
+            "Cross-Review & Slim Focus: evaluate (1) bugs and correctness (reachable causal P0/P1 "
+            "defects, data integrity, security, broken verification), (2) elegant and reasonable "
+            "design (clear ownership, reuse of existing patterns), (3) restraint (avoid "
+            "overengineering, redundant layers, and excessive defensive code; justify "
+            "simplifications where appropriate without demanding ritual tables), and (4) "
+            "performance. Exercise judgment rather than enforcing rigid templates.\n"
         )
-    elif goal.strict_review_preset == "bug_only":
-        rubric += "Subtraction and refactoring are P2/P3 advisory only; block strictly on reachable correctness, data-integrity, security or broken-verification defects.\n"
     elif goal.strict_review_preset == "readonly_brief":
-        rubric += "Verify the worker kept the repository untouched and its Review Briefing and defect analysis match the actual diff and call paths. Do not ask the worker to modify files.\n"
-    if goal.strict_review_briefing:
-        rubric += "Verify all four sections of the 3-Minute Review Briefing against actual diff stats, call paths and verification outputs; missing or materially inaccurate claims are P1.\n"
+        rubric += "Verify the worker kept the repository untouched and its defect analysis matches the actual diff and call paths. Do not ask the worker to modify files.\n"
 
     return f"""You are an independent adversarial reviewer verifying whether this Goal is genuinely complete.
 This is a READ-ONLY review (round {round_number} of {effective_max}).
@@ -915,7 +922,9 @@ def parse_strict_review_output(
     )
 
 
-def merge_strict_review_outcomes(outcomes: Sequence[StrictReviewOutcome]) -> StrictReviewOutcome:
+def merge_strict_review_outcomes(
+    outcomes: Sequence[StrictReviewOutcome],
+) -> StrictReviewOutcome:
     if not outcomes:
         raise ValueError("At least one review is required")
     findings: list[GoalStrictReviewFinding] = []
@@ -1031,11 +1040,7 @@ async def run_subagent_strict_review(
         maso_models=maso_model_ids,
         default_maso_model=default_maso_model,
         quota_by_provider=quota_map,
-        preferred_candidates=(
-            goal.strict_review_candidates
-            if goal.strict_review_candidates is not None
-            else settings.preferred_candidates
-        ),
+        preferred_candidates=settings.preferred_candidates,
     )
     if not candidates:
         raise RuntimeError(
@@ -1117,57 +1122,10 @@ async def run_subagent_strict_review(
 
         return None
 
-    if (goal.strict_review_mode or settings.review_mode) == "single":
-        for index, candidate in enumerate(candidates):
-            outcome = await attempt(index, candidate, 0)
-            if outcome is not None:
-                return outcome
-    else:
-        remaining = list(enumerate(candidates))
-        first = remaining.pop(0)
-        second_index = next(
-            (
-                i
-                for i, (_, c) in enumerate(remaining)
-                if are_candidates_distinct_families(first[1], c)
-            ),
-            0,
-        )
-        primary = [first]
-        if remaining:
-            primary.append(remaining.pop(second_index))
-        outcomes = await asyncio.gather(
-            *(attempt(index, candidate, slot) for slot, (index, candidate) in enumerate(primary))
-        )
-        while remaining and (len(outcomes) < 2 or any(outcome is None for outcome in outcomes)):
-            slot = next((i for i, outcome in enumerate(outcomes) if outcome is None), len(outcomes))
-            successful = [outcome for outcome in outcomes if outcome is not None]
-            backup_index = next(
-                (
-                    i
-                    for i, (_, c) in enumerate(remaining)
-                    if all(
-                        are_candidates_distinct_families(
-                            c, CrossReviewCandidate(o.reviewer_provider, o.reviewer_model)
-                        )
-                        for o in successful
-                    )
-                ),
-                0,
-            )
-            index, candidate = remaining.pop(backup_index)
-            outcome = await attempt(index, candidate, slot)
-            if slot == len(outcomes):
-                outcomes.append(outcome)
-            else:
-                outcomes[slot] = outcome
-        valid = [outcome for outcome in outcomes if outcome is not None]
-        if len(valid) == 1:
-            raise RuntimeError(
-                "Dual consensus requires two valid reviews; only 1/2 reviewers available"
-            )
-        if valid:
-            return merge_strict_review_outcomes(valid)
+    for index, candidate in enumerate(candidates):
+        outcome = await attempt(index, candidate, 0)
+        if outcome is not None:
+            return outcome
     raise RuntimeError(
         "Strict cross-review could not obtain a valid verdict (" + "; ".join(errors[:3]) + ")"
     )

@@ -845,7 +845,7 @@ test('Cross-Review can retry a failed create after empty reconciliation', async 
   const goal = h.owner(h.keys.chatGoalKey)
   await goal.hydrateGoal()
   goal.isCrossReviewOpen.value = true
-  const input = { objective: 'Review', strictReview: true, strict_review_preset: 'mr_slim' }
+  const input = { objective: 'Review', strictReview: true, strict_review_preset: 'cross_review_slim' }
   await goal.startGoal(input)
   assert.equal(creates, 1)
   assert.equal(goal.goal.value, null)

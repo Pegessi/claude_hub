@@ -96,7 +96,7 @@ class SubagentTurnCreate(BaseModel):
 class SubagentCreate(SubagentTurnCreate):
     """Create a subagent Chat tab and start its first turn."""
 
-    agent_type: AgentType
+    agent_type: Optional[AgentType] = None
     model: Optional[str] = Field(default=None, min_length=1, max_length=200)
     effort: Optional[str] = Field(default=None, min_length=1, max_length=32)
     cwd: Optional[str] = Field(default=None, min_length=1, max_length=4096)

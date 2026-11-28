@@ -76,3 +76,19 @@ changed shard placement and exposed a launcher wiring test leaking its bind-host
 environment into the restart-process test. The ordered two-module run reproduced
 the failure, then passed after registering that environment key for fixture
 restoration. No production listen guard or service lifecycle behavior was changed.
+
+## Shared default subagent priority & lightweight Cross-Review & Slim
+
+### Product goal alignment
+
+Per user direction, per-run model matrices, proliferating presets (`mr_slim`, `bug_only`, `readonly_brief`), and `single`/`dual` reviewer modes were retired from new Goal creation in favor of:
+
+1. **One shared default subagent priority configuration in global Settings**:
+   - `SubagentPrioritySettings` (`preferred_candidates`, `push_remote_branch`, and legacy-compatible `default_preset`, stored in `subagent_settings.json` with automatic fallback/sync to `cross_review_settings.json` and exposed at `GET`/`PUT`/`PATCH` `/api/subagents/settings` + `/api/goals/cross-review-settings`).
+   - Managed from global Settings (`SubagentSettingsDialog.vue` in the Extensions menu and linked directly via `Configure in Settings` inside `CrossReviewDialog.vue`), with deep-cloned state snapshots, HTTP error/retry protection on failed or malformed loads (`503` / missing `settings`), narrow conflict-safe `PATCH` updates from `CrossReviewDialog.vue` so push/mode toggles never overwrite concurrent candidate edits across tabs, and `overflow-wrap: anywhere` containment for up to 120-character custom model IDs on `390×844` mobile viewports.
+   - Consumed by normal subagent delegation (`claude-hub agent run` without `--provider` and `POST /api/subagents` with optional `agent_type`, filling omitted provider/model/effort from the highest-priority eligible entry while preserving explicit `--provider`, `--model`, `--effort`, and `env` / `env_preset` model/effort overrides, excluding authoritatively `over` or `not_configured` automatic targets and returning `503` when no automatic provider is eligible), Goal cross-review (`run_subagent_strict_review` and `_AGENT_RUN_GUIDANCE`), and Workspace cross-review target resolution (`resolve_cross_reviewer_target`, honoring both MASO and non-MASO `Surface.MANAGED_CHAT` candidates).
+2. **Lightweight Cross-Review & Slim entry**:
+   - `CrossReviewDialog.vue` is a compact entry for code cross-review and justified simplification across four pillars: (1) bugs and correctness, (2) elegant and reasonable design, (3) restraint against overengineering and excessive defensive code, and (4) performance.
+   - Displays the active shared subagent priority summary (`Configure in Settings`), a `Push feature branch on PASS` wrap-up option, and `Scope / focus notes` with one-click `Reset to default`, contrast-safe (`>=4.5:1`) validation feedback, and `>=44px` mobile touch targets at `390×844` with zero horizontal overflow.
+3. **Historical `readonly_brief` safety**:
+   - Persisted `goals.json`, `cross_review_settings.json`, and `subagent_settings.json` records with `readonly_brief` retain their strict read-only (`STRICT READ-ONLY MODE` worker prompt and read-only reviewer rubric) and no-push (`strict_review_push_branch=False`) invariants across saved default settings, cold load, resume, steer, and review rounds (with an explicit banner, one-click `Switch to Cross-Review & Slim` control, and fail-closed launch blocking with `Retry load` when settings hydration fails or returns malformed data in `CrossReviewDialog.vue`), while legacy `mr_slim` and `bug_only` records normalize cleanly to `cross_review_slim`.

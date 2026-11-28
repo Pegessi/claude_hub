@@ -259,6 +259,23 @@ def test_select_cross_reviewer_candidates_filters_quota_and_keeps_same_model_cle
     )
     assert empty_candidates == []
 
+    # 4. Authoritatively not_configured provider is filtered out by select_cross_reviewer_candidates (R3).
+    codex_not_configured_quota = {
+        "codex": ProviderQuota(
+            provider="codex",
+            available=False,
+            state="not_configured",
+            stale=False,
+        ),
+    }
+    no_codex_candidates = select_cross_reviewer_candidates(
+        AgentType.MASO,
+        {},
+        maso_base_url=None,
+        quota_by_provider=codex_not_configured_quota,
+    )
+    assert [c.provider for c in no_codex_candidates] == ["claude"]
+
 
 @pytest.mark.asyncio
 async def test_resolve_cross_reviewer_target_skips_exhausted_maso_family() -> None:
