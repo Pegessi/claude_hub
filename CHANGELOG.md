@@ -7,7 +7,6 @@
 
 ## Released
 
-<<<<<<< HEAD
 ### feat: streamline task delegation contracts, subagent blind reviews, and agent roles
 
 - Add first-class `goal`, `done_when`, and `out_of_scope` task contract fields
@@ -32,13 +31,12 @@
 - Make `agent create` seatless by default (`ephemeral=True`, `reuse_existing=False`),
   skip cold-start `bootstrap_prompt` check-in turns on non-resident execution
   sessions, and collapse legacy `worker`/`dispatcher`/`reviewer` UI selectors.
-=======
+
 ### fix(chat): speed up Chat session switches and hot model updates
 
 - Keep live `/stream/live` and `/stream/wait` subscriptions open when updating hot model or reasoning-effort environment keys (`switch-env`), apply optimistic model selection updates with atomic rollback instead of blocking on a full `/api/tabs` reload, pre-populate warm capability hints synchronously before incremental history catch-up resolves while syncing updated capabilities back into cached history snapshots, and suppress zero-delay `Updating conversation…` banner flashes during sub-250ms stream reconciliations while preserving immediate `Stop turn` availability.
 - Replace the hardcoded 1s `ttyd` startup sleep and 500ms `_configure_tmux` sleep with fast localhost port readiness probing and a single compound `tmux` option command, coalesce concurrent in-flight `/stream/capabilities` preparations, eliminate duplicate capability preparation on pending `/stream/live` streams, cache Codex discovered model/mode catalogs across sessions with one-shot foreground cold-start budgets and byte-verified `models_cache.json` parsing reuse, and refresh native Cursor/Antigravity model catalogs in the background before TTL expiry.
 - Batch `/api/tabs/status` polling with a single `tmux list-panes` snapshot for session liveness and active foreground commands, bounded `capture-pane` concurrency without redundant `has-session` checks, single-connection SQLite stream summary batch reads, per-poll binary availability memoization, and pre-indexed open workspace task lookups; reuse initialized SQLite connection state without re-acquiring the global schema lock, batch `list_tabs` unread turn checks, fast-path empty incremental conversation pages, and pre-filter hidden shell events with batched turn detail counts.
->>>>>>> main
 
 ### fix(cursor): retain recovery progress and refresh failed runtimes
 
