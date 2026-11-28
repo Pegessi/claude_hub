@@ -448,13 +448,13 @@ async def test_spec_implement_review_worktree_cross_review_and_remote_push(
     ).stdout.strip()
     assert origin_sha_b == head_sha_b
 
-    # Human acceptance transitions task to DONE and cleans up the ephemeral worktree worker session
+    # Human acceptance transitions task to DONE and archives the Chat worker session
+    # so full transcript and conversation_id remain inspectable/resumable.
     done_task = await manager.update_task(
         task.id, WorkspaceTaskUpdate(status=WorkspaceTaskStatus.DONE)
     )
     assert done_task.status == WorkspaceTaskStatus.DONE
-    assert worker.id not in manager.sessions
-    assert worker.tab_id in deleted_tabs
+    assert manager.sessions[worker.id].archived is True
 
 
 @pytest.mark.asyncio
@@ -843,7 +843,7 @@ async def test_fail_closed_auto_worktree_concurrent_start_and_rollback_compensat
     assert started_non_git.worktree_path is None
     assert started_non_git.session_id is not None
     await manager.update_task(task_non_git.id, WorkspaceTaskUpdate(status=WorkspaceTaskStatus.DONE))
-    assert started_non_git.session_id not in manager.sessions
+    assert manager.sessions[started_non_git.session_id].archived is True
     deleted_tabs.clear()
 
     # 2. Failed start_task (bad related_task_id) must reject before leaking any ephemeral session
@@ -866,7 +866,7 @@ async def test_fail_closed_auto_worktree_concurrent_start_and_rollback_compensat
             task_bad_rel.id,
             StartTaskRequest(related_task_id="nonexistent-related-id"),
         )
-    assert len(manager.sessions) == 0
+    assert manager._sessions_for_workspace_raw(ws.id) == []
 
     # Also verify compensation if _choose_dispatch_target raises after worktree agent creation
     orig_choose = manager._choose_dispatch_target
@@ -877,7 +877,7 @@ async def test_fail_closed_auto_worktree_concurrent_start_and_rollback_compensat
     monkeypatch.setattr(manager, "_choose_dispatch_target", failing_choose)
     with pytest.raises(RuntimeError, match="dispatch target failure"):
         await manager.start_task(task_bad_rel.id)
-    assert len(manager.sessions) == 0
+    assert manager._sessions_for_workspace_raw(ws.id) == []
     assert len(deleted_tabs) == 1
     monkeypatch.setattr(manager, "_choose_dispatch_target", orig_choose)
 
@@ -899,7 +899,7 @@ async def test_fail_closed_auto_worktree_concurrent_start_and_rollback_compensat
     )
     assert res1.session_id == res2.session_id
     assert res1.session_id is not None
-    assert len(manager.sessions) == 1
+    assert len(manager._sessions_for_workspace_raw(ws.id)) == 1
 
 
 @pytest.mark.asyncio

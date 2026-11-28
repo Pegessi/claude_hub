@@ -187,15 +187,54 @@ class _TaskStartMixin(_WorkspaceManagerBase):
                         )
                     )
 
+                def can_wake_archived(session: ManagedSession | None) -> bool:
+                    return bool(
+                        session
+                        and session.archived
+                        and session.id not in self._retiring_session_ids
+                        and session.workspace_id == workspace.id
+                        and session.session_kind == selected_kind == SessionKind.CHAT
+                        and session.role
+                        in {WorkspaceSessionRole.ORCHESTRATOR, WorkspaceSessionRole.WORKER}
+                        and (
+                            wanted_wt is None
+                            or workspace_identity.resolve_path(
+                                session.workspace_path or workspace.path
+                            )
+                            == wanted_wt
+                        )
+                    )
+
                 if not payload.target_session_id:
                     related = self.tasks.get(payload.related_task_id or task.related_task_id or "")
                     related_target = (
                         self.sessions.get(related.session_id or "") if related else None
                     )
+                    if can_wake_archived(related_target):
+                        assert related_target is not None
+                        try:
+                            related_target = await self.unarchive_session(
+                                workspace.id, related_target.id
+                            )
+                        except Exception:
+                            logger.warning(
+                                "Could not unarchive related task session_id=%s for task_id=%s; "
+                                "falling back to a fresh session",
+                                related_target.id,
+                                task.id,
+                                exc_info=True,
+                            )
+                            related_target = None
                     if compatible(related_target):
                         target = related_target
                     else:
                         target = self.sessions.get(task.session_id or "")
+                        if can_wake_archived(target):
+                            assert target is not None
+                            try:
+                                target = await self.unarchive_session(workspace.id, target.id)
+                            except Exception:
+                                target = None
                         if not compatible(target):
                             target = None
                         elif related_target is not None:

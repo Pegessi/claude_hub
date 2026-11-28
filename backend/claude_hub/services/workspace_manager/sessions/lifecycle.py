@@ -113,41 +113,45 @@ class _SessionLifecycleMixin(_WorkspaceManagerBase):
 
     async def _archive_session_locked(self, session: ManagedSession) -> None:
         """Release runtime under workspace/pump locks, retaining all evidence."""
-        provider_fenced = await agent_stream.fence_session_stream(session.id)
-        managed_chat.validate_delivery_state_discard(
-            session.workspace_id,
-            session.id,
-            acknowledged_call_ids=set(session.delivered_call_ids),
-            provider_fenced=provider_fenced,
-        )
-        # The headless tab owns navigation metadata; the managed stream owns
-        # the provider transport. Archive both without deleting either store.
-        tab = await ttyd_manager.archive_tab(session.tab_id)
-        if tab is None:
-            raise RuntimeError("Managed Chat backing tab is missing; cannot archive session")
-        await stream_lifecycle.stop_session_stream(session.id)
-        # Provider shutdown may durably capture its conversation id. Preserve
-        # that latest identity instead of restoring the pre-fence snapshot.
-        session = self.sessions[session.id]
-        snapshot = self._snapshot_report_intake_workspace(session.workspace_id)
-        now = self._runtime_now()
-        self.sessions[session.id] = session.model_copy(
-            update={
-                "archived": True,
-                "archive_provider_fenced": provider_fenced,
-                "archived_at": now,
-                "chat_paused": True,
-                "status": ManagedSessionStatus.STOPPED,
-                "runtime_status": AgentRuntimeStatus.OFFLINE,
-                "updated_at": now,
-            }
-        )
-        self._clear_retired_session_pointers(session)
+        self._retiring_session_ids.add(session.id)
         try:
-            self._save_state()
-        except BaseException:
-            self._restore_report_intake_workspace(session.workspace_id, snapshot)
-            raise
+            provider_fenced = await agent_stream.fence_session_stream(session.id)
+            managed_chat.validate_delivery_state_discard(
+                session.workspace_id,
+                session.id,
+                acknowledged_call_ids=set(session.delivered_call_ids),
+                provider_fenced=provider_fenced,
+            )
+            # The headless tab owns navigation metadata; the managed stream owns
+            # the provider transport. Archive both without deleting either store.
+            tab = await ttyd_manager.archive_tab(session.tab_id)
+            if tab is None:
+                raise RuntimeError("Managed Chat backing tab is missing; cannot archive session")
+            await stream_lifecycle.stop_session_stream(session.id)
+            # Provider shutdown may durably capture its conversation id. Preserve
+            # that latest identity instead of restoring the pre-fence snapshot.
+            session = self.sessions[session.id]
+            snapshot = self._snapshot_report_intake_workspace(session.workspace_id)
+            now = self._runtime_now()
+            self.sessions[session.id] = session.model_copy(
+                update={
+                    "archived": True,
+                    "archive_provider_fenced": provider_fenced,
+                    "archived_at": now,
+                    "chat_paused": True,
+                    "status": ManagedSessionStatus.STOPPED,
+                    "runtime_status": AgentRuntimeStatus.OFFLINE,
+                    "updated_at": now,
+                }
+            )
+            self._clear_retired_session_pointers(session)
+            try:
+                self._save_state()
+            except BaseException:
+                self._restore_report_intake_workspace(session.workspace_id, snapshot)
+                raise
+        finally:
+            self._retiring_session_ids.discard(session.id)
 
     def _clear_retired_session_pointers(self, session: ManagedSession) -> None:
         workspace = self.workspaces.get(session.workspace_id)

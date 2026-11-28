@@ -466,7 +466,14 @@ export function useWorkspaceRuntime() {
 
   async function openSession(session: ManagedSession) {
     await runPending(sessionActionKey('open', session.id), async () => {
-      await terminalStore.fetchTabs()
+      await Promise.all([
+        terminalStore.fetchTabs(),
+        terminalStore.fetchArchivedTabs(),
+      ])
+      if (terminalStore.archivedTabs.some(t => t.id === session.tab_id)) {
+        const restored = await terminalStore.unarchiveTab(session.tab_id)
+        if (!restored) return
+      }
       appStore.setMode('terminal')
       terminalStore.setActiveTab(session.tab_id)
     })

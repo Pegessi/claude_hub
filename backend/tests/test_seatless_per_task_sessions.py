@@ -76,6 +76,7 @@ async def test_retiring_session_race_provisions_fresh_ephemeral_session(workflow
     manager.tasks[first.id] = first.model_copy(
         update={"status": WorkspaceTaskStatus.REVIEW, "review_skipped_at": manager._runtime_now()}
     )
+    await manager.update_task(first.id, WorkspaceTaskUpdate(status=WorkspaceTaskStatus.DONE))
 
     entered_retire = asyncio.Event()
     release_retire = asyncio.Event()
@@ -89,9 +90,7 @@ async def test_retiring_session_race_provisions_fresh_ephemeral_session(workflow
 
     monkeypatch.setattr(manager, "_retire_session_resources", slow_retire)
 
-    done_coro = asyncio.create_task(
-        manager.update_task(first.id, WorkspaceTaskUpdate(status=WorkspaceTaskStatus.DONE))
-    )
+    delete_coro = asyncio.create_task(manager.delete_session(retiring_id))
     await entered_retire.wait()
     assert retiring_id in manager._retiring_session_ids
 
@@ -99,7 +98,7 @@ async def test_retiring_session_race_provisions_fresh_ephemeral_session(workflow
     start_coro = asyncio.create_task(manager.start_task(followup.id))
     await asyncio.sleep(0.02)
     release_retire.set()
-    await done_coro
+    await delete_coro
     started_followup = await start_coro
 
     assert started_followup.session_id is not None
@@ -141,16 +140,39 @@ async def test_queued_related_task_rehomes_when_prior_session_goes_offline(workf
 
 
 @pytest.mark.asyncio
-async def test_standard_done_removes_session(workflow):
+async def test_done_archives_chat_session_and_related_task_wakes_it_up(workflow):
     manager = workflow.manager
     task = await manager.start_task(create(workflow).id)
     session_id = task.session_id
+    assert session_id is not None
     workflow.native.finish(session_id)
-    # Human acceptance applies to a task ready for acceptance.
+    # Human acceptance archives the Chat session (retaining transcript + conversation_id)
+    # rather than deleting it.
     manager.tasks[task.id] = task.model_copy(
         update={"status": WorkspaceTaskStatus.REVIEW, "review_skipped_at": manager._runtime_now()}
     )
     await manager.update_task(task.id, WorkspaceTaskUpdate(status=WorkspaceTaskStatus.DONE))
+    assert session_id in manager.sessions
+    assert manager.sessions[session_id].archived is True
+
+    # Starting a follow-up task with related_task_id automatically unarchives and
+    # resumes the same Chat session.
+    followup = create(workflow, related_task_id=task.id)
+    started_followup = await manager.start_task(followup.id)
+    assert started_followup.session_id == session_id
+    assert started_followup.status == WorkspaceTaskStatus.WORKING
+    assert manager.sessions[session_id].archived is False
+    assert started_followup.dispatch_reason == f"Related to task {task.id}"
+
+    # Explicit cleanup after both tasks are DONE removes the archived session.
+    workflow.native.finish(session_id)
+    manager.tasks[followup.id] = started_followup.model_copy(
+        update={"status": WorkspaceTaskStatus.REVIEW, "review_skipped_at": manager._runtime_now()}
+    )
+    await manager.update_task(followup.id, WorkspaceTaskUpdate(status=WorkspaceTaskStatus.DONE))
+    assert manager.sessions[session_id].archived is True
+    cleanup_res = await manager.cleanup_task_session(followup.id)
+    assert cleanup_res.action == "deleted"
     assert session_id not in manager.sessions
 
 

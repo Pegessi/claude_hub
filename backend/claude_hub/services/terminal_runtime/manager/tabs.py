@@ -133,6 +133,10 @@ class ManagerTabsMixin(ManagerHost):
         async with self._locked_current_tab(tab_id) as process:
             if process is None or process.archived:
                 return None
+            if process.is_managed_chat:
+                # Headless managed Chat owns no ttyd/tmux listener; its native
+                # provider runtime is started lazily by the Chat stream layer.
+                return process.to_schema()
             if self._runtime._is_local_port_listening(process.port):
                 process.is_active = True
                 return process.to_schema()

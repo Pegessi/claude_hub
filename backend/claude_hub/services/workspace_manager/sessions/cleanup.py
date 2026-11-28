@@ -52,14 +52,30 @@ class _SessionCleanupMixin(_WorkspaceManagerBase):
                     self._quarantine_failed_session_deletion(session_id)
                     raise
 
-    async def archive_session(self, workspace_id: str, session_id: str) -> ManagedSession:
-        return await self._set_session_archived(workspace_id, session_id, archived=True)
+    async def archive_session(
+        self,
+        workspace_id: str,
+        session_id: str,
+        *,
+        before_archive: Callable[[], bool] | None = None,
+    ) -> ManagedSession:
+        return await self._set_session_archived(
+            workspace_id,
+            session_id,
+            archived=True,
+            before_change=before_archive,
+        )
 
     async def unarchive_session(self, workspace_id: str, session_id: str) -> ManagedSession:
         return await self._set_session_archived(workspace_id, session_id, archived=False)
 
     async def _set_session_archived(
-        self, workspace_id: str, session_id: str, *, archived: bool
+        self,
+        workspace_id: str,
+        session_id: str,
+        *,
+        archived: bool,
+        before_change: Callable[[], bool] | None = None,
     ) -> ManagedSession:
         async with self.workspace_mutation_lock(workspace_id):
             pump_lock = self._pump_locks.setdefault(session_id, asyncio.Lock())
@@ -72,6 +88,8 @@ class _SessionCleanupMixin(_WorkspaceManagerBase):
                         "Session archive supports Chat only; use tab archive for terminals"
                     )
                 if session.archived == archived:
+                    return session
+                if before_change is not None and not before_change():
                     return session
                 if self._non_terminal_tasks_referencing_session(session_id) or (
                     self._session_raw_task_bindings_block_cleanup(session)
@@ -186,21 +204,24 @@ class _SessionCleanupMixin(_WorkspaceManagerBase):
                     reason="session is the workspace dispatcher",
                 )
 
-        if session.runtime_status != AgentRuntimeStatus.IDLE:
-            return TaskCleanupResult(
-                task_id=task_id,
-                session_id=session_id,
-                action="skipped",
-                reason=f"session runtime_status is {session.runtime_status.value}; must be idle",
-            )
+        if not session.archived:
+            if session.runtime_status != AgentRuntimeStatus.IDLE:
+                return TaskCleanupResult(
+                    task_id=task_id,
+                    session_id=session_id,
+                    action="skipped",
+                    reason=(
+                        f"session runtime_status is {session.runtime_status.value}; must be idle"
+                    ),
+                )
 
-        if session.status == ManagedSessionStatus.STOPPED:
-            return TaskCleanupResult(
-                task_id=task_id,
-                session_id=session_id,
-                action="skipped",
-                reason="session is stopped",
-            )
+            if session.status == ManagedSessionStatus.STOPPED:
+                return TaskCleanupResult(
+                    task_id=task_id,
+                    session_id=session_id,
+                    action="skipped",
+                    reason="session is stopped",
+                )
 
         if self._session_raw_task_bindings_block_cleanup(session, exclude_task_id=task_id):
             return TaskCleanupResult(

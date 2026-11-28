@@ -556,9 +556,9 @@ class _TaskUpdatesMixin(_WorkspaceManagerBase):
                         self._save_workspace_state(current.workspace_id)
                 if worker_incarnation is not None:
                     w_id, w_tab, w_created = worker_incarnation
-                    await self._best_effort_delete_session(
-                        w_id,
-                        before_delete=lambda: (
+
+                    def _worker_still_idle_for_retirement() -> bool:
+                        return (
                             (cur := self.sessions.get(w_id)) is not None
                             and cur.tab_id == w_tab
                             and cur.created_at == w_created
@@ -573,8 +573,30 @@ class _TaskUpdatesMixin(_WorkspaceManagerBase):
                             )
                             and cur.task_id in {None, current.id}
                             and cur.current_task_id in {None, current.id}
-                        ),
-                    )
+                        )
+
+                    cur_worker = self.sessions.get(w_id)
+                    if cur_worker is not None and cur_worker.session_kind == SessionKind.CHAT:
+                        # Archive instead of deleting on DONE so full Chat transcript
+                        # and conversation_id remain inspectable and resumable via
+                        # Related Task; physical deletion happens only on delete_task
+                        # or explicit `task cleanup`.
+                        try:
+                            await self.archive_session(
+                                current.workspace_id,
+                                w_id,
+                                before_archive=_worker_still_idle_for_retirement,
+                            )
+                        except Exception:
+                            logger.exception(
+                                "Best-effort archive of completed task Chat session %s failed",
+                                w_id,
+                            )
+                    else:
+                        await self._best_effort_delete_session(
+                            w_id,
+                            before_delete=_worker_still_idle_for_retirement,
+                        )
                 if reviewer_incarnation is not None:
                     r_id, r_tab, r_created = reviewer_incarnation
                     await self._best_effort_delete_session(

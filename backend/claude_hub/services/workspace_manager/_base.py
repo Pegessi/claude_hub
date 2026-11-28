@@ -272,6 +272,18 @@ class _WorkspaceManagerBase(_RuntimeHostContract):
     ) -> list[str]: ...
 
     @abstractmethod
+    async def archive_session(
+        self,
+        workspace_id: str,
+        session_id: str,
+        *,
+        before_archive: Callable[[], bool] | None = None,
+    ) -> ManagedSession: ...
+
+    @abstractmethod
+    async def unarchive_session(self, workspace_id: str, session_id: str) -> ManagedSession: ...
+
+    @abstractmethod
     async def _best_effort_delete_session(
         self, session_id: str, *, before_delete: Callable[[], bool] | None = None
     ) -> None: ...
